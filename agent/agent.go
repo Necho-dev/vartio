@@ -1,0 +1,91 @@
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/joho/godotenv"
+)
+
+const agentVersion = "1.1.0"
+
+func main() {
+	loadEnv()
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		os.Exit(runServiceCommand(os.Args[2:]))
+	}
+	cfg := loadConfig()
+	log.Printf("probe-agent %s control=%s bios=%s", agentVersion, cfg.URL, cfg.BiosUUID)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := serve(ctx, cfg); err != nil && ctx.Err() == nil {
+		log.Fatal(err)
+	}
+}
+
+func loadEnv() {
+	_ = godotenv.Load()
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		_ = godotenv.Load(filepath.Join(dir, "probe-agent.env"))
+		_ = godotenv.Load(filepath.Join(dir, "agent.env"))
+	}
+	_ = godotenv.Load("probe-agent.env")
+	_ = godotenv.Load("agent.env")
+}
+
+type config struct {
+	URL      string
+	Token    string
+	BiosUUID string
+	Watches  []watchSpec
+}
+
+type watchSpec struct {
+	Kind string
+	Name string
+}
+
+func loadConfig() config {
+	url := strings.TrimSpace(os.Getenv("GUEST_CONTROL_URL"))
+	if url == "" {
+		url = "ws://127.0.0.1:8766/v1/probe/connect"
+	}
+	token := os.Getenv("GUEST_TOKEN")
+	if token == "" {
+		token = "dev"
+	}
+	bios := strings.TrimSpace(os.Getenv("GUEST_BIOS_UUID"))
+	if bios == "" {
+		if id, err := readBIOSUUID(); err == nil {
+			bios = id
+		} else {
+			log.Printf("bios uuid: %v (set GUEST_BIOS_UUID)", err)
+			bios = "unknown"
+		}
+	}
+	var watches []watchSpec
+	for _, n := range splitCSV(os.Getenv("GUEST_WATCH_PROCS")) {
+		watches = append(watches, watchSpec{Kind: "process", Name: n})
+	}
+	for _, n := range splitCSV(os.Getenv("GUEST_WATCH_SERVICES")) {
+		watches = append(watches, watchSpec{Kind: "service", Name: n})
+	}
+	return config{URL: url, Token: token, BiosUUID: bios, Watches: watches}
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
