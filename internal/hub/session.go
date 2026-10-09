@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -14,25 +15,94 @@ type session struct {
 	conn       *websocket.Conn
 	mu         sync.Mutex
 	pending    map[string]chan Frame
-	termOut    chan []byte
+	terms      map[string]*termSink
 	displayOut chan []byte
-	termID     string
 	displayID  string
 	seen       time.Time
+	remote     string
+	since      time.Time
 	closed     chan struct{}
 	closeOnce  sync.Once
 }
 
-func newSession(conn *websocket.Conn, hello Hello) *session {
+func newSession(conn *websocket.Conn, hello Hello, remote string) *session {
+	now := time.Now()
 	return &session{
 		hello:      hello,
 		conn:       conn,
 		pending:    map[string]chan Frame{},
-		termOut:    make(chan []byte, 32),
+		terms:      map[string]*termSink{},
 		displayOut: make(chan []byte, 2),
-		seen:       time.Now(),
+		seen:       now,
+		remote:     remote,
+		since:      now,
 		closed:     make(chan struct{}),
 	}
+}
+
+// termStall bounds how long a slow browser may stall the agent read loop before
+// terminal output is dropped.
+const termStall = 2 * time.Second
+
+// termSink receives "out" frames for one browser terminal. bye is shown to the
+// browser when the sink is stopped from outside (taken over / shell exited).
+type termSink struct {
+	id   string
+	out  chan []byte
+	done chan struct{}
+	once sync.Once
+	bye  string
+}
+
+func (t *termSink) stop(bye string) {
+	t.once.Do(func() {
+		t.bye = bye
+		close(t.done)
+	})
+}
+
+// attachTerm registers a terminal stream. Single-PTY agents get the previous
+// terminal replaced; multi-PTY agents are capped at MaxTerms.
+func (s *session) attachTerm(id string) (*termSink, error) {
+	t := &termSink{id: id, out: make(chan []byte, 256), done: make(chan struct{})}
+	var evicted []*termSink
+	s.mu.Lock()
+	if s.hello.Has(CapMultiTerm) {
+		if len(s.terms) >= MaxTerms {
+			s.mu.Unlock()
+			return nil, &RPCError{Code: "too_many_terms", Message: fmt.Sprintf("at most %d terminals per guest", MaxTerms)}
+		}
+	} else {
+		for k, v := range s.terms {
+			evicted = append(evicted, v)
+			delete(s.terms, k)
+		}
+	}
+	s.terms[id] = t
+	s.mu.Unlock()
+	for _, v := range evicted {
+		v.stop("已在其他窗口打开终端（该探针版本只支持单会话）")
+	}
+	return t, nil
+}
+
+// detachTerm reports whether t was still registered, i.e. the agent PTY is
+// still ours to close.
+func (s *session) detachTerm(t *termSink) bool {
+	s.mu.Lock()
+	active := s.terms[t.id] == t
+	if active {
+		delete(s.terms, t.id)
+	}
+	s.mu.Unlock()
+	t.stop("")
+	return active
+}
+
+func (s *session) termFor(id string) *termSink {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.terms[id]
 }
 
 func (s *session) info() SessionInfo {
@@ -45,6 +115,8 @@ func (s *session) info() SessionInfo {
 		BiosUUID:    s.hello.BiosUUID,
 		HostName:    s.hello.HostName,
 		MACs:        append([]string(nil), s.hello.MACs...),
+		RemoteAddr:  s.remote,
+		ConnectedAt: s.since.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -116,12 +188,25 @@ func (s *session) deliver(fr Frame) {
 	s.touch()
 	if fr.Stream != "" {
 		switch fr.Stream {
+		case StreamTermExit:
+			if t := s.termFor(fr.ID); t != nil {
+				s.mu.Lock()
+				delete(s.terms, fr.ID)
+				s.mu.Unlock()
+				t.stop("shell 已退出")
+			}
 		case "out":
-			if len(fr.Data) > 0 {
-				select {
-				case s.termOut <- fr.Data:
-				default:
-				}
+			if len(fr.Data) == 0 {
+				return
+			}
+			t := s.termFor(fr.ID)
+			if t == nil {
+				return
+			}
+			select {
+			case t.out <- fr.Data:
+			case <-t.done:
+			case <-time.After(termStall):
 			}
 		case "display":
 			if len(fr.Data) == 0 {

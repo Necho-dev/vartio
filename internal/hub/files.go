@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"govmomi-wmks/internal/esxi"
 )
@@ -48,6 +50,41 @@ func (h *Hub) CollectFile(ctx context.Context, bios, path string, max int64) ([]
 	return buf, st, nil
 }
 
+func (h *Hub) FilesOp(ctx context.Context, bios string, req FilesOpRequest) (FilesOpResult, error) {
+	switch req.Op {
+	case FileOpMkdir, FileOpRename, FileOpDelete, FileOpTrash, FileOpZip:
+	default:
+		return FilesOpResult{}, esxi.ErrBad("op must be mkdir, rename, delete, trash, or zip")
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		return FilesOpResult{}, esxi.ErrBad("path required")
+	}
+	raw, err := h.Call(ctx, bios, MethodFilesOp, req)
+	if err != nil {
+		return FilesOpResult{}, err
+	}
+	return decode[FilesOpResult](raw)
+}
+
+func (h *Hub) Trash(ctx context.Context, bios string, req TrashRequest) (TrashResult, error) {
+	switch req.Op {
+	case TrashList, TrashEmpty:
+	case TrashRestore, TrashPurge:
+		if len(req.IDs) == 0 {
+			return TrashResult{}, esxi.ErrBad("ids required")
+		}
+	default:
+		return TrashResult{}, esxi.ErrBad("op must be list, restore, purge, or empty")
+	}
+	raw, err := h.Call(ctx, bios, MethodTrash, req)
+	if err != nil {
+		return TrashResult{}, err
+	}
+	return decode[TrashResult](raw)
+}
+
+// WriteFile streams a guest file; a directory is zipped on the guest first and
+// the temporary archive is removed afterwards.
 func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path string) error {
 	if path == "" {
 		return esxi.ErrBad("path required")
@@ -57,13 +94,22 @@ func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path s
 		return err
 	}
 	if st.IsDir {
-		return esxi.ErrBad("path is a directory")
+		z, err := h.FilesOp(ctx, bios, FilesOpRequest{Op: FileOpZip, Path: st.Path})
+		if err != nil {
+			return err
+		}
+		defer func() {
+			c, cancel := context.WithTimeout(context.Background(), ActionTimeout)
+			defer cancel()
+			_, _ = h.FilesOp(c, bios, FilesOpRequest{Op: FileOpDelete, Path: filepath.Dir(z.Path), Confirm: true})
+		}()
+		return h.WriteFile(w, ctx, bios, z.Path)
 	}
 	if st.Size > FileMaxBytes {
 		return esxi.ErrTooLarge("file exceeds %d bytes", FileMaxBytes)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(st.Path)))
+	w.Header().Set("Content-Disposition", contentDisposition(baseName(st.Path)))
 	w.Header().Set("Content-Length", strconv.FormatInt(st.Size, 10))
 	w.WriteHeader(http.StatusOK)
 
@@ -151,4 +197,22 @@ func (h *Hub) ReadFile(ctx context.Context, bios, path string, r io.Reader, size
 			return last, nil
 		}
 	}
+}
+
+// baseName handles both separators: the hub may run on a different OS than the guest.
+func baseName(p string) string {
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+func contentDisposition(name string) string {
+	ascii := strings.Map(func(r rune) rune {
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
+	return `attachment; filename="` + ascii + `"; filename*=UTF-8''` + url.PathEscape(name)
 }

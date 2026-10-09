@@ -38,6 +38,31 @@ curl -sS -X POST http://127.0.0.1:8766/v1/probe/sessions/$BIOS/display
 
 Guest 在 ESXi 网段、仍只测探针时：把 `GUEST_DEV_LISTEN` 改成该网段可达地址。不要给 Guest 配入站端口。
 
+## 监控页面（probe-hub）
+
+probe-hub 自带一个 Beszel 风格的监控页（`/`，embed 在二进制里）。hub 每 `PROBE_HUB_INTERVAL`（默认 10s）对在线探针发 `metrics` RPC，探针只回累计计数器与瞬时值，速率由 hub 算；历史写 PostgreSQL，按 `date_bin` 降采样出曲线。1.2 以前的探针没有 `metrics`，hub 退回 `health` 兜底。
+
+配置放 `probe-hub.env`（当前目录或二进制旁，已 gitignore）：
+
+| 变量 | 说明 |
+|------|------|
+| `PROBE_HUB_LISTEN` | 局域网测试用 `0.0.0.0:8766` |
+| `PROBE_HUB_DSN` | `postgres://probe_hub:***@127.0.0.1:5432/probe_hub?sslmode=disable`；不设则只有实时视图、无历史 |
+| `GUEST_TOKEN` | 探针接入令牌 |
+| `PROBE_HUB_ADMIN_TOKEN` | 设置后页面与 `/v1/probe/sessions*`、`/v1/probe/monitor/*` 需 Bearer；`/v1/probe/connect` 与一次性 WS 票不受影响 |
+| `PROBE_HUB_INTERVAL` / `PROBE_HUB_RETENTION` | 采集间隔 / 样本保留（默认 `10s` / `168h`），事件保留 30 天 |
+
+表：`probe_systems`（主机、标签、最新样本 jsonb）、`probe_metrics`（`(bios_uuid, ts)` 主键的时序样本）、`probe_events`（上下线）。启动时自动建表。
+
+监控 API（hub 独有）：
+
+- `GET /v1/probe/monitor/config` — 公开，告诉前端是否需要登录
+- `GET /v1/probe/monitor/systems` — 全部主机 + 最新样本
+- `GET|PATCH|DELETE /v1/probe/monitor/systems/{bios}` — 详情含最近事件；PATCH `{name?, tags?}`；DELETE 仅离线主机
+- `GET /v1/probe/monitor/systems/{bios}/series?range=1h|6h|24h|7d|30d` — 列式曲线数据
+
+物理 Windows 机器的 SMBIOS UUID 若是占位值（全 0 / 全 F / `03000200-0400-0500-0006-000700080009`），探针改用注册表 `MachineGuid`，避免局域网多台机器撞 ID。
+
 ## 生产 REST
 
 前缀 `/v1/probe/vms/{id}`。`GET /v1/vms` 只加 `guestAgent.online`，不向全部探针拉健康。旧路径 `/v1/vms/{id}/guest*`、`/v1/guest/*`、`/ws/guest-*` 已去掉。
@@ -47,7 +72,7 @@ Guest 在 ESXi 网段、仍只测探针时：把 `GUEST_DEV_LISTEN` 改成该网
 - `GET|POST .../procs` — 列表；`start|stop|kill` 要 `confirm`
 - `GET|POST .../services` — 列表；`start|stop|restart` 要 `confirm`
 - `POST .../exec` — `{command, args?, cwd?, shell, timeoutSec}`
-- `POST .../term` → `/v1/probe/ws/term?id=`（2 分钟一次性）
+- `POST .../term` → `/v1/probe/ws/term?id=&cols=&rows=`（2 分钟一次性）。每张票一个独立 PTY，同一台最多 8 个并发会话（监控页终端的多标签页）；agent 在 Hello 里声明 `caps: ["term.multi"]`（≥1.4.0），旧 agent 只支持单会话，新开会顶掉旧的
 - `POST .../power` — `shutdown|reboot`，要 `confirm`。没有 `on`
 - `GET|POST .../display` — GET 说明；POST 出 `/v1/probe/ws/display` 票。只读 JPEG ~2fps、最长边 1920、质量 88，**无 input**。无交互会话 `409 no_user_session`，不回退宿主机截图。Windows 服务在 Session 0 里看不到用户桌面，画面要在用户会话里跑探针（或另做用户态助手）
 - `GET .../files?path=` — 列表；空 path 为暂存目录
@@ -61,11 +86,25 @@ MCP：`esxi_guest_get` / `health` / `procs` / `services` / `exec` / `power` / `d
 ## 探针分发
 
 ```bash
-make probe-agent-windows
-# dist/probe-agent.exe
+make probe-agent-dist      # 全平台：windows/darwin/linux × amd64/arm64
+make probe-agent-windows   # 只打 Windows
+# 或：scripts/probe-agent-dist.sh linux/amd64 windows/amd64
 ```
 
-exe 旁放 `probe-agent.env`（`GUEST_CONTROL_URL`、`GUEST_TOKEN`）。安装：
+产物按版本、平台隔离（版本取 `cmd/probe-agent/main.go` 的 `agentVersion`），升级时整目录替换、旧版本可并存回滚：
+
+```
+dist/probe-agent/
+├── probe-agent.env                         # 模板（GUEST_CONTROL_URL、GUEST_TOKEN），自行维护，勿提交
+├── latest -> 1.3.2
+└── 1.3.2/
+    ├── probe-agent-1.3.2-windows-amd64/    # probe-agent.exe + probe-agent.env（CRLF）
+    ├── probe-agent-1.3.2-windows-amd64.zip # 解压即得上面的同名目录
+    ├── probe-agent-1.3.2-darwin-arm64/     # probe-agent + probe-agent.env
+    └── …
+```
+
+模板路径可用 `AGENT_ENV=path/to/env` 覆盖；不存在时包里不带 env。可执行文件旁的 `probe-agent.env` 会被自动加载。Windows 上替换版本前先停掉旧进程/服务，否则 exe 被占用会复制失败。安装：
 
 ```
 probe-agent.exe service install

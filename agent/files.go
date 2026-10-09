@@ -44,6 +44,13 @@ func resolveGuestPath(p string) (string, *guest.FrameError) {
 	if p == "" || p == "." {
 		return stage, nil
 	}
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", asRPC(err)
+		}
+		return filepath.Clean(filepath.Join(home, p[1:])), nil
+	}
 	if filepath.IsAbs(p) {
 		return filepath.Clean(p), nil
 	}
@@ -69,7 +76,14 @@ func filesList(params json.RawMessage) (guest.FilesListResult, *guest.FrameError
 		}
 		return guest.FilesListResult{}, asRPC(err)
 	}
-	out := guest.FilesListResult{Path: abs, Staging: stagingDir(), Entries: []guest.FileEntry{}}
+	out := guest.FilesListResult{
+		Path: abs, Staging: stagingDir(), Sep: string(filepath.Separator),
+		Roots: fileRoots(), Trash: true, Entries: []guest.FileEntry{},
+	}
+	out.Home, _ = os.UserHomeDir()
+	if parent := filepath.Dir(abs); parent != abs {
+		out.Parent = parent
+	}
 	if !st.IsDir() {
 		out.Entries = append(out.Entries, fileEntry(abs, st))
 		return out, nil
@@ -83,7 +97,15 @@ func filesList(params json.RawMessage) (guest.FilesListResult, *guest.FrameError
 		if err != nil {
 			continue
 		}
-		out.Entries = append(out.Entries, fileEntry(filepath.Join(abs, e.Name()), info))
+		full := filepath.Join(abs, e.Name())
+		fe := fileEntry(full, info)
+		if e.Type()&os.ModeSymlink != 0 {
+			fe.Link = true
+			if st, err := os.Stat(full); err == nil {
+				fe.IsDir = st.IsDir()
+			}
+		}
+		out.Entries = append(out.Entries, fe)
 	}
 	return out, nil
 }
@@ -95,6 +117,7 @@ func fileEntry(abs string, st os.FileInfo) guest.FileEntry {
 		IsDir:    st.IsDir(),
 		Size:     st.Size(),
 		MtimeUTC: st.ModTime().UTC().Format(time.RFC3339),
+		Hidden:   strings.HasPrefix(st.Name(), ".") || hiddenAttr(st),
 	}
 }
 
@@ -180,10 +203,10 @@ func filesPut(params json.RawMessage) (guest.FilesPutResult, *guest.FrameError) 
 		} else if !os.IsNotExist(err) {
 			return guest.FilesPutResult{}, asRPC(err)
 		}
-		if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			return guest.FilesPutResult{}, asRPC(err)
 		}
-		if err := os.WriteFile(part, req.Data, 0o600); err != nil {
+		if err := os.WriteFile(part, req.Data, 0o644); err != nil {
 			return guest.FilesPutResult{}, asRPC(err)
 		}
 	} else {

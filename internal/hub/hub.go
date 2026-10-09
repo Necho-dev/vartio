@@ -20,6 +20,9 @@ type Hub struct {
 	Token string
 	// Ambiguous is optional. When true for a biosUuid, VM-scoped APIs return guest_unbound.
 	Ambiguous func(biosUUID string) bool
+	// OnConnect / OnDisconnect are optional; set before the hub serves traffic.
+	OnConnect    func(SessionInfo)
+	OnDisconnect func(SessionInfo)
 
 	mu      sync.Mutex
 	byBIOS  map[string]*session
@@ -76,22 +79,31 @@ func (h *Hub) get(biosUUID string) *session {
 func (h *Hub) drop(s *session) {
 	h.mu.Lock()
 	cur := h.byBIOS[normUUID(s.hello.BiosUUID)]
-	if cur == s {
+	removed := cur == s
+	if removed {
 		delete(h.byBIOS, normUUID(s.hello.BiosUUID))
 	}
 	h.mu.Unlock()
 	s.close()
+	if removed && h.OnDisconnect != nil {
+		info := s.info()
+		info.Online = false
+		h.OnDisconnect(info)
+	}
 }
 
-func (h *Hub) accept(conn *websocket.Conn, hello Hello) *session {
+func (h *Hub) accept(conn *websocket.Conn, hello Hello, remote string) *session {
 	hello.BiosUUID = normUUID(hello.BiosUUID)
-	s := newSession(conn, hello)
+	s := newSession(conn, hello, remote)
 	h.mu.Lock()
 	if old := h.byBIOS[hello.BiosUUID]; old != nil {
 		old.close()
 	}
 	h.byBIOS[hello.BiosUUID] = s
 	h.mu.Unlock()
+	if h.OnConnect != nil {
+		h.OnConnect(s.info())
+	}
 	go s.readLoop()
 	go s.pingLoop()
 	go func() {
@@ -157,6 +169,12 @@ func (h *Hub) issueStream(biosUUID, kind, path, note string) (map[string]string,
 		return nil, err
 	}
 	h.mu.Lock()
+	now := time.Now()
+	for k, t := range h.tickets {
+		if now.After(t.ExpiresAt) {
+			delete(h.tickets, k)
+		}
+	}
 	h.tickets[id] = streamTicket{ID: id, BiosUUID: normUUID(biosUUID), Kind: kind, ExpiresAt: time.Now().Add(TicketTTL)}
 	h.mu.Unlock()
 	return map[string]string{

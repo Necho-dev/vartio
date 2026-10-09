@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -74,13 +75,23 @@ func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	h.accept(conn, hello)
-	log.Printf("guest connected bios=%s host=%s ver=%s", hello.BiosUUID, hello.HostName, hello.Version)
+	remote := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		remote = host
+	}
+	h.accept(conn, hello, remote)
+	log.Printf("guest connected bios=%s host=%s ver=%s from=%s", hello.BiosUUID, hello.HostName, hello.Version, remote)
 }
 
 // DevHandler is the local /server mux: sessions keyed by biosUuid, no ESXi.
 func (h *Hub) DevHandler() http.Handler {
 	mux := http.NewServeMux()
+	h.RegisterDev(mux)
+	return mux
+}
+
+// RegisterDev mounts the standalone probe API (connect, sessions, streams) on mux.
+func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathConnect, h.HandleConnect)
 	mux.HandleFunc("GET "+PathSessions, h.wrap(h.handleSessions))
 	mux.HandleFunc("GET "+PathSessions+"/{bios}", h.wrap(h.handleSessionInfo))
@@ -99,7 +110,9 @@ func (h *Hub) DevHandler() http.Handler {
 	mux.HandleFunc("GET "+PathSessions+"/{bios}/files", h.wrap(h.handleFilesList))
 	mux.HandleFunc("PUT "+PathSessions+"/{bios}/files", h.wrap(h.handleFilesPut))
 	mux.HandleFunc("GET "+PathSessions+"/{bios}/files/content", h.wrap(h.handleFilesContent))
-	return mux
+	mux.HandleFunc("POST "+PathSessions+"/{bios}/files/op", h.wrap(h.handleFilesOp))
+	mux.HandleFunc("GET "+PathSessions+"/{bios}/trash", h.wrap(h.handleTrashList))
+	mux.HandleFunc("POST "+PathSessions+"/{bios}/trash", h.wrap(h.handleTrashOp))
 }
 
 func (h *Hub) wrap(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
@@ -238,6 +251,40 @@ func (h *Hub) handleFilesContent(w http.ResponseWriter, r *http.Request) error {
 	return h.WriteFile(w, ctx, r.PathValue("bios"), r.URL.Query().Get("path"))
 }
 
+func (h *Hub) handleFilesOp(w http.ResponseWriter, r *http.Request) error {
+	var req FilesOpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return esxi.ErrBad("invalid json")
+	}
+	req.Confirm = confirmed(r, req.Confirm)
+	out, err := h.FilesOp(r.Context(), r.PathValue("bios"), req)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, out)
+}
+
+func (h *Hub) handleTrashList(w http.ResponseWriter, r *http.Request) error {
+	out, err := h.Trash(r.Context(), r.PathValue("bios"), TrashRequest{Op: TrashList})
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, out)
+}
+
+func (h *Hub) handleTrashOp(w http.ResponseWriter, r *http.Request) error {
+	var req TrashRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return esxi.ErrBad("invalid json")
+	}
+	req.Confirm = confirmed(r, req.Confirm)
+	out, err := h.Trash(r.Context(), r.PathValue("bios"), req)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, out)
+}
+
 func (h *Hub) handleFilesPut(w http.ResponseWriter, r *http.Request) error {
 	path := r.URL.Query().Get("path")
 	if path == "" {
@@ -272,33 +319,54 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 	defer browser.Close()
 
 	ctx := r.Context()
-	raw, err := s.call(ctx, t.ID, MethodTermOpen, TermOpenRequest{Cols: 120, Rows: 32})
+	cols, _ := strconv.Atoi(r.URL.Query().Get("cols"))
+	rows, _ := strconv.Atoi(r.URL.Query().Get("rows"))
+	if cols <= 0 || rows <= 0 {
+		cols, rows = 120, 32
+	}
+	sink, err := s.attachTerm(t.ID)
 	if err != nil {
+		_ = browser.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31m"+err.Error()+"\x1b[0m\r\n"))
+		return
+	}
+	if _, err := s.call(ctx, t.ID, MethodTermOpen, TermOpenRequest{ID: t.ID, Cols: cols, Rows: rows}); err != nil {
+		s.detachTerm(sink)
 		_ = browser.WriteMessage(websocket.TextMessage, []byte("term.open: "+err.Error()))
 		return
 	}
-	var opened TermOpenResult
-	_ = json.Unmarshal(raw, &opened)
-	_ = opened
-	s.mu.Lock()
-	s.termID = t.ID
-	s.mu.Unlock()
 	defer func() {
+		// Unregistered means the PTY is gone or now owned by a newer terminal.
+		if !s.detachTerm(sink) {
+			return
+		}
 		c, cancel := context.WithTimeout(context.Background(), TermOpenTimeout)
 		_, _ = s.call(c, t.ID+"-close", MethodTermClose, map[string]string{"id": t.ID})
 		cancel()
-		s.mu.Lock()
-		s.termID = ""
-		s.mu.Unlock()
 	}()
 
+	idle := time.NewTimer(TermIdle)
+	defer idle.Stop()
+	activity := make(chan struct{}, 1)
 	errc := make(chan error, 2)
 	go func() {
 		for {
-			_, data, err := browser.ReadMessage()
+			typ, data, err := browser.ReadMessage()
 			if err != nil {
 				errc <- err
 				return
+			}
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
+			if typ == websocket.TextMessage {
+				if size, ok := parseResize(data); ok {
+					size.ID = t.ID
+					c, cancel := context.WithTimeout(ctx, TermOpenTimeout)
+					_, _ = s.call(c, t.ID+"-resize-"+strconv.FormatInt(time.Now().UnixNano(), 36), MethodTermResize, size)
+					cancel()
+					continue
+				}
 			}
 			_ = s.write(Frame{ID: t.ID, Stream: "in", Data: data})
 		}
@@ -309,11 +377,20 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 			case <-s.closed:
 				errc <- errOffline
 				return
-			case b, ok := <-s.termOut:
-				if !ok {
-					errc <- errOffline
-					return
+			case <-idle.C:
+				_ = browser.WriteMessage(websocket.BinaryMessage, []byte("\r\n[idle timeout]\r\n"))
+				errc <- context.DeadlineExceeded
+				return
+			case <-activity:
+				idle.Reset(TermIdle)
+			case <-sink.done:
+				if sink.bye != "" {
+					_ = browser.WriteMessage(websocket.BinaryMessage, []byte("\r\n\x1b[90m["+sink.bye+"]\x1b[0m\r\n"))
 				}
+				errc <- errOffline
+				return
+			case b := <-sink.out:
+				idle.Reset(TermIdle)
 				if err := browser.WriteMessage(websocket.BinaryMessage, b); err != nil {
 					errc <- err
 					return
@@ -322,6 +399,23 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	<-errc
+}
+
+// parseResize recognises the browser control message {"type":"resize","cols":N,"rows":N}.
+// Anything else on the socket is keyboard input.
+func parseResize(data []byte) (TermOpenRequest, bool) {
+	if len(data) < 8 || data[0] != '{' {
+		return TermOpenRequest{}, false
+	}
+	var m struct {
+		Type string `json:"type"`
+		Cols int    `json:"cols"`
+		Rows int    `json:"rows"`
+	}
+	if json.Unmarshal(data, &m) != nil || m.Type != "resize" || m.Cols <= 0 || m.Rows <= 0 {
+		return TermOpenRequest{}, false
+	}
+	return TermOpenRequest{Cols: m.Cols, Rows: m.Rows}, true
 }
 
 func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {

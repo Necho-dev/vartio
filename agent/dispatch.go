@@ -12,6 +12,8 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 	case guest.MethodHealth:
 		h, err := collectHealth(a.cfg.Watches)
 		return h, asRPC(err)
+	case guest.MethodMetrics:
+		return collectMetrics(), nil
 	case guest.MethodProcsList:
 		list, err := listProcs()
 		return list, asRPC(err)
@@ -39,14 +41,24 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 	case guest.MethodTermOpen:
 		var req guest.TermOpenRequest
 		_ = json.Unmarshal(fr.Params, &req)
-		if err := a.term.open(req, func(p []byte) { a.streamOut(fr.ID, p) }); err != nil {
+		id := fr.ID
+		if err := a.term.open(id, req, func(p []byte) { a.streamOut(id, p) }, func() { a.streamExit(id) }); err != nil {
 			return nil, asRPC(err)
 		}
 		return guest.TermOpenResult{OK: true}, nil
 	case guest.MethodTermResize:
+		var req guest.TermOpenRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil {
+			return nil, bad("invalid params")
+		}
+		a.term.setSize(req.ID, req.Cols, req.Rows)
 		return map[string]bool{"ok": true}, nil
 	case guest.MethodTermClose:
-		a.term.close()
+		var req struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(fr.Params, &req)
+		a.term.close(req.ID)
 		return map[string]bool{"ok": true}, nil
 	case guest.MethodPower:
 		var req guest.PowerRequest
@@ -68,6 +80,10 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		return filesGet(fr.Params)
 	case guest.MethodFilesPut:
 		return filesPut(fr.Params)
+	case guest.MethodFilesOp:
+		return filesOp(fr.Params)
+	case guest.MethodTrash:
+		return trashOp(fr.Params)
 	default:
 		return nil, &guest.FrameError{Code: "not_implemented", Message: fr.Method}
 	}

@@ -5,12 +5,47 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
+// readBIOSUUID prefers the SMBIOS UUID (matches ESXi biosUuid). Physical boards that ship
+// a placeholder UUID fall back to MachineGuid so LAN machines do not collide.
 func readBIOSUUID() (string, error) {
+	id, err := readSMBIOSUUID()
+	if err == nil && !bogusUUID(id) {
+		return id, nil
+	}
+	k, kerr := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Cryptography`, registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if kerr != nil {
+		if err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	defer k.Close()
+	guid, _, gerr := k.GetStringValue("MachineGuid")
+	if gerr != nil || strings.TrimSpace(guid) == "" {
+		if err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	return strings.ToLower(strings.TrimSpace(guid)), nil
+}
+
+func bogusUUID(id string) bool {
+	s := strings.ToLower(strings.ReplaceAll(id, "-", ""))
+	if s == "" || strings.Trim(s, "0") == "" || strings.Trim(s, "f") == "" {
+		return true
+	}
+	return s == "03000200040005000006000700080009"
+}
+
+func readSMBIOSUUID() (string, error) {
 	mod := windows.NewLazySystemDLL("kernel32.dll")
 	proc := mod.NewProc("GetSystemFirmwareTable")
 	const rsmb = 0x52534D42

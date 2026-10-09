@@ -14,6 +14,14 @@ func (h *Hub) Health(ctx context.Context, bios string) (Health, error) {
 	return decode[Health](raw)
 }
 
+func (h *Hub) Metrics(ctx context.Context, bios string) (Metrics, error) {
+	raw, err := h.Call(ctx, bios, MethodMetrics, nil)
+	if err != nil {
+		return Metrics{}, err
+	}
+	return decode[Metrics](raw)
+}
+
 func (h *Hub) Procs(ctx context.Context, bios string) ([]ProcInfo, error) {
 	raw, err := h.Call(ctx, bios, MethodProcsList, nil)
 	if err != nil {

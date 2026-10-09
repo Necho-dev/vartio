@@ -8,6 +8,7 @@ import (
 const (
 	MethodHello          = "hello"
 	MethodHealth         = "health"
+	MethodMetrics        = "metrics"
 	MethodProcsList      = "procs.list"
 	MethodProcsAction    = "procs.action"
 	MethodServicesList   = "services.list"
@@ -23,6 +24,8 @@ const (
 	MethodFilesList      = "files.list"
 	MethodFilesGet       = "files.get"
 	MethodFilesPut       = "files.put"
+	MethodFilesOp        = "files.op"
+	MethodTrash          = "files.trash"
 )
 
 const (
@@ -41,10 +44,21 @@ const (
 	FileMaxBytes    = 512 << 20
 	FileChunk       = 256 << 10
 	FileChunkWait   = 20 * time.Second
+	FileOpTimeout   = 10 * time.Minute
 	DisplayFPS      = 2
 	DisplayMaxSide  = 1920
 	DisplayJPEGQ    = 88
+	// MaxTerms caps concurrent terminal sessions (browser tabs) per guest.
+	MaxTerms = 8
 )
+
+// CapMultiTerm in Hello.Caps means the agent keys PTYs by stream id, so several
+// terminals can run at once. Agents without it keep a single PTY.
+const CapMultiTerm = "term.multi"
+
+// Stream "exit" (agent → hub, Data empty) reports that the shell behind a
+// terminal stream id has ended.
+const StreamTermExit = "exit"
 
 // Frame is one JSON object on the outbound agent WebSocket.
 type Frame struct {
@@ -77,6 +91,16 @@ type Hello struct {
 	HostName string   `json:"hostname,omitempty"`
 	Version  string   `json:"version,omitempty"`
 	MACs     []string `json:"macs,omitempty"`
+	Caps     []string `json:"caps,omitempty"`
+}
+
+func (h Hello) Has(c string) bool {
+	for _, x := range h.Caps {
+		if x == c {
+			return true
+		}
+	}
+	return false
 }
 
 type HelloOK struct {
@@ -132,6 +156,53 @@ type Watch struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// SysInfo is the static part of a metrics reply.
+type SysInfo struct {
+	HostName        string `json:"hostname,omitempty"`
+	OS              string `json:"os,omitempty"`
+	Platform        string `json:"platform,omitempty"`
+	PlatformVersion string `json:"platformVersion,omitempty"`
+	Kernel          string `json:"kernel,omitempty"`
+	Arch            string `json:"arch,omitempty"`
+	CPUModel        string `json:"cpuModel,omitempty"`
+	Cores           int    `json:"cores,omitempty"`
+	Threads         int    `json:"threads,omitempty"`
+	BootTime        int64  `json:"bootTime,omitempty"`
+}
+
+type DiskUsage struct {
+	Mount string `json:"mount"`
+	FS    string `json:"fs,omitempty"`
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+}
+
+type TempSensor struct {
+	Name string  `json:"name"`
+	C    float64 `json:"c"`
+}
+
+// Metrics is one monitoring sample. Byte counters are cumulative; the hub derives rates.
+type Metrics struct {
+	TimeMs    int64        `json:"timeMs"`
+	Info      SysInfo      `json:"info"`
+	CPUPct    float64      `json:"cpuPct"`
+	Load      [3]float64   `json:"load"`
+	MemTotal  uint64       `json:"memTotal"`
+	MemUsed   uint64       `json:"memUsed"`
+	SwapTotal uint64       `json:"swapTotal"`
+	SwapUsed  uint64       `json:"swapUsed"`
+	RootMount string       `json:"rootMount,omitempty"`
+	Disks     []DiskUsage  `json:"disks"`
+	DiskRead  uint64       `json:"diskRead"`
+	DiskWrite uint64       `json:"diskWrite"`
+	NetRx     uint64       `json:"netRx"`
+	NetTx     uint64       `json:"netTx"`
+	NICs      []NICInfo    `json:"nics"`
+	Temps     []TempSensor `json:"temps,omitempty"`
+	Procs     int          `json:"procs"`
+}
+
 type ProcInfo struct {
 	PID     int32   `json:"pid"`
 	Name    string  `json:"name"`
@@ -185,9 +256,12 @@ type PowerResult struct {
 	Message  string `json:"message,omitempty"`
 }
 
+// TermOpenRequest is also the term.resize payload; ID names the stream to
+// resize (empty = every terminal, for single-PTY agents).
 type TermOpenRequest struct {
-	Cols int `json:"cols,omitempty"`
-	Rows int `json:"rows,omitempty"`
+	ID   string `json:"id,omitempty"`
+	Cols int    `json:"cols,omitempty"`
+	Rows int    `json:"rows,omitempty"`
 }
 
 type TermOpenResult struct {
@@ -201,6 +275,8 @@ type SessionInfo struct {
 	BiosUUID    string   `json:"biosUuid,omitempty"`
 	HostName    string   `json:"hostname,omitempty"`
 	MACs        []string `json:"macs,omitempty"`
+	RemoteAddr  string   `json:"remoteAddr,omitempty"`
+	ConnectedAt string   `json:"connectedAt,omitempty"`
 }
 
 type DisplayOpenResult struct {
@@ -228,12 +304,79 @@ type FileEntry struct {
 	IsDir    bool   `json:"isDir"`
 	Size     int64  `json:"size,omitempty"`
 	MtimeUTC string `json:"mtimeUtc,omitempty"`
+	Hidden   bool   `json:"hidden,omitempty"`
+	Link     bool   `json:"link,omitempty"`
 }
 
+// FilesListResult: Path "" lists the staging dir, "~" the user's home.
 type FilesListResult struct {
 	Path    string      `json:"path"`
+	Parent  string      `json:"parent,omitempty"`
 	Staging string      `json:"staging"`
+	Home    string      `json:"home,omitempty"`
+	Sep     string      `json:"sep,omitempty"`
+	Roots   []string    `json:"roots,omitempty"`
+	Trash   bool        `json:"trash,omitempty"` // agent supports FileOpTrash
 	Entries []FileEntry `json:"entries"`
+}
+
+// File management ops for MethodFilesOp.
+const (
+	FileOpMkdir  = "mkdir"  // Path
+	FileOpRename = "rename" // Path -> To (bare name = same directory)
+	FileOpDelete = "delete" // Path; non-empty directories need Confirm
+	FileOpTrash  = "trash"  // Path -> moved to the OS recycle bin / Trash
+	FileOpZip    = "zip"    // Path (directory) -> staging zip in result Path
+)
+
+type FilesOpRequest struct {
+	Op      string `json:"op"`
+	Path    string `json:"path"`
+	To      string `json:"to,omitempty"`
+	Confirm bool   `json:"confirm,omitempty"`
+}
+
+type FilesOpResult struct {
+	OK    bool   `json:"ok"`
+	Path  string `json:"path,omitempty"`
+	Size  int64  `json:"size,omitempty"`
+	Count int    `json:"count,omitempty"`
+}
+
+// Recycle bin management for MethodTrash. IDs are opaque handles from list.
+const (
+	TrashList    = "list"
+	TrashRestore = "restore" // IDs -> back to the original path ("name 2" if taken)
+	TrashPurge   = "purge"   // IDs -> deleted for good; needs Confirm
+	TrashEmpty   = "empty"   // everything listed; needs Confirm
+)
+
+type TrashRequest struct {
+	Op      string   `json:"op"`
+	IDs     []string `json:"ids,omitempty"`
+	Confirm bool     `json:"confirm,omitempty"`
+}
+
+type TrashItem struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Orig       string `json:"orig,omitempty"` // original full path; empty if unknown
+	IsDir      bool   `json:"isDir,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	DeletedUtc string `json:"deletedUtc,omitempty"`
+}
+
+type TrashFailure struct {
+	ID      string `json:"id"`
+	Message string `json:"message"`
+}
+
+type TrashResult struct {
+	Location string         `json:"location,omitempty"` // human-readable trash location
+	Items    []TrashItem    `json:"items"`
+	Done     int            `json:"done,omitempty"`
+	Paths    []string       `json:"paths,omitempty"` // restore targets
+	Failed   []TrashFailure `json:"failed,omitempty"`
 }
 
 type FilesGetRequest struct {
@@ -283,7 +426,7 @@ type AgentFlag struct {
 
 func TimeoutFor(method string, execSec int) time.Duration {
 	switch method {
-	case MethodHealth, MethodProcsList, MethodServicesList:
+	case MethodHealth, MethodMetrics, MethodProcsList, MethodServicesList:
 		return ListTimeout
 	case MethodProcsAction, MethodServicesAction:
 		return ActionTimeout
@@ -295,6 +438,8 @@ func TimeoutFor(method string, execSec int) time.Duration {
 		return ListTimeout
 	case MethodFilesGet, MethodFilesPut:
 		return FileChunkWait
+	case MethodFilesOp, MethodTrash:
+		return FileOpTimeout
 	case MethodExec:
 		d := ExecDefault
 		if execSec > 0 {

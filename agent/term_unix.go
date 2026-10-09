@@ -10,8 +10,11 @@ import (
 	"github.com/creack/pty"
 )
 
-func startPTY(cols, rows int, onOut func([]byte)) (io.WriteCloser, func(), error) {
-	shell := os.Getenv("SHELL")
+func startPTY(cols, rows int, onOut func([]byte), onExit func()) (io.WriteCloser, func(), func(int, int), error) {
+	shell := os.Getenv("GUEST_TERM_SHELL")
+	if shell == "" {
+		shell = os.Getenv("SHELL")
+	}
 	if shell == "" {
 		shell = "/bin/bash"
 	}
@@ -23,7 +26,7 @@ func startPTY(cols, rows int, onOut func([]byte)) (io.WriteCloser, func(), error
 	)
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	go func() {
 		buf := make([]byte, 4096)
@@ -35,13 +38,18 @@ func startPTY(cols, rows int, onOut func([]byte)) (io.WriteCloser, func(), error
 				onOut(p)
 			}
 			if err != nil {
-				return
+				break
 			}
 		}
+		_ = cmd.Wait()
+		onExit()
 	}()
 	closer := func() {
 		_ = cmd.Process.Kill()
 		_ = f.Close()
 	}
-	return f, closer, nil
+	resize := func(c, r int) {
+		_ = pty.Setsize(f, &pty.Winsize{Cols: uint16(c), Rows: uint16(r)})
+	}
+	return f, closer, resize, nil
 }

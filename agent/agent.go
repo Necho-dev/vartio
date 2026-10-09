@@ -12,7 +12,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const agentVersion = "1.1.0"
+const agentVersion = "1.7.0"
 
 func main() {
 	loadEnv()

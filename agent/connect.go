@@ -21,9 +21,12 @@ func serve(ctx context.Context, cfg config) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		err := dialOnce(ctx, cfg)
+		connected, err := dialOnce(ctx, cfg)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if connected {
+			backoff = time.Second
 		}
 		log.Printf("disconnected: %v; retry in %s", err, backoff)
 		select {
@@ -37,14 +40,16 @@ func serve(ctx context.Context, cfg config) error {
 	}
 }
 
-func dialOnce(ctx context.Context, cfg config) error {
+// dialOnce reports connected=true once the hello handshake succeeded, so the caller
+// resets its backoff after a session that was actually up.
+func dialOnce(ctx context.Context, cfg config) (bool, error) {
 	hdr := http.Header{}
 	if cfg.Token != "" {
 		hdr.Set("X-Guest-Token", cfg.Token)
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.URL, hdr)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 
@@ -53,20 +58,23 @@ func dialOnce(ctx context.Context, cfg config) error {
 		HostName: hostname(),
 		Version:  agentVersion,
 		MACs:     listMACs(),
+		Caps:     []string{guest.CapMultiTerm},
 	}
 	if err := conn.WriteJSON(hello); err != nil {
-		return err
+		return false, err
 	}
 	var ack guest.HelloOK
 	if err := conn.ReadJSON(&ack); err != nil {
-		return err
+		return false, err
 	}
 	if !ack.OK {
-		return errHello
+		return false, errHello
 	}
 	log.Printf("connected as %s", cfg.BiosUUID)
 	a := &agent{cfg: cfg, conn: conn, term: newTermHub(), display: newDisplayHub()}
-	return a.loop(ctx)
+	defer a.term.close("")
+	defer a.display.close()
+	return true, a.loop(ctx)
 }
 
 var errHello = errors.New("hello rejected")
@@ -91,7 +99,7 @@ func (a *agent) loop(ctx context.Context) error {
 			return err
 		}
 		if fr.Stream == "in" {
-			a.term.write(fr.Data)
+			a.term.write(fr.ID, fr.Data)
 			continue
 		}
 		if fr.Method == "" {
@@ -122,6 +130,12 @@ func (a *agent) streamOut(id string, p []byte) {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
 	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: "out", Data: p})
+}
+
+func (a *agent) streamExit(id string) {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: guest.StreamTermExit})
 }
 
 func (a *agent) streamDisplay(id string, p []byte) {
