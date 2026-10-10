@@ -5,6 +5,10 @@ package main
 import (
 	"fmt"
 	"image"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -27,6 +31,9 @@ var (
 	procDeleteObject           = modGdi32.NewProc("DeleteObject")
 	procDeleteDC               = modGdi32.NewProc("DeleteDC")
 	procGetDIBits              = modGdi32.NewProc("GetDIBits")
+	procEnumDisplayMonitors    = modUser32.NewProc("EnumDisplayMonitors")
+	procGetMonitorInfoW        = modUser32.NewProc("GetMonitorInfoW")
+	procSetThreadDpiAwareness  = modUser32.NewProc("SetThreadDpiAwarenessContext")
 	procGetCurrentProcessId    = modKernel32.NewProc("GetCurrentProcessId")
 	procProcessIdToSessionId   = modKernel32.NewProc("ProcessIdToSessionId")
 )
@@ -38,7 +45,21 @@ const (
 	dibRGBColors = 0
 	biRGB        = 0
 	biBitCount   = 32
+
+	monitorInfoPrimary = 1
+	// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+	dpiPerMonitorV2 = ^uintptr(3)
 )
+
+type winRect struct{ Left, Top, Right, Bottom int32 }
+
+type monitorInfoEx struct {
+	Size    uint32
+	Monitor winRect
+	Work    winRect
+	Flags   uint32
+	Device  [32]uint16
+}
 
 type bitmapInfoHeader struct {
 	Size          uint32
@@ -71,9 +92,71 @@ func interactiveSession() error {
 	return nil
 }
 
-func captureFrame() ([]byte, error) {
-	w, _, _ := procGetSystemMetrics.Call(smCXScreen)
-	h, _, _ := procGetSystemMetrics.Call(smCYScreen)
+// dpiAware runs fn on one OS thread in per-monitor DPI mode, so monitor
+// rectangles and the screen DC both use physical pixels even on scaled
+// secondary monitors. Without the API (before Windows 10 1607) fn runs as is.
+func dpiAware(fn func()) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if procSetThreadDpiAwareness.Find() == nil {
+		if old, _, _ := procSetThreadDpiAwareness.Call(dpiPerMonitorV2); old != 0 {
+			defer procSetThreadDpiAwareness.Call(old)
+		}
+	}
+	fn()
+}
+
+var (
+	monMu  sync.Mutex
+	monOut []guest.Screen
+	monCB  = windows.NewCallback(func(h, _, _, _ uintptr) uintptr {
+		mi := monitorInfoEx{Size: uint32(unsafe.Sizeof(monitorInfoEx{}))}
+		if r, _, _ := procGetMonitorInfoW.Call(h, uintptr(unsafe.Pointer(&mi))); r != 0 {
+			name := strings.TrimPrefix(windows.UTF16ToString(mi.Device[:]), `\\.\`)
+			monOut = append(monOut, guest.Screen{Name: name,
+				X: int(mi.Monitor.Left), Y: int(mi.Monitor.Top),
+				Width: int(mi.Monitor.Right - mi.Monitor.Left), Height: int(mi.Monitor.Bottom - mi.Monitor.Top),
+				Primary: mi.Flags&monitorInfoPrimary != 0})
+		}
+		return 1
+	})
+)
+
+// listScreens returns the monitors with the primary first, then left to right.
+func listScreens() []guest.Screen {
+	monMu.Lock()
+	defer monMu.Unlock()
+	monOut = nil
+	dpiAware(func() { procEnumDisplayMonitors.Call(0, 0, monCB, 0) })
+	out := monOut
+	monOut = nil
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Primary != out[j].Primary {
+			return out[i].Primary
+		}
+		if out[i].X != out[j].X {
+			return out[i].X < out[j].X
+		}
+		return out[i].Y < out[j].Y
+	})
+	for i := range out {
+		out[i].Index = i
+	}
+	return out
+}
+
+func captureFrame(sc guest.Screen, p displayProfile) (b []byte, err error) {
+	dpiAware(func() { b, err = captureRect(sc, p) })
+	return b, err
+}
+
+func captureRect(sc guest.Screen, p displayProfile) ([]byte, error) {
+	x, y, w, h := uintptr(sc.X), uintptr(sc.Y), uintptr(sc.Width), uintptr(sc.Height)
+	if sc.Width <= 0 || sc.Height <= 0 {
+		x, y = 0, 0
+		w, _, _ = procGetSystemMetrics.Call(smCXScreen)
+		h, _, _ = procGetSystemMetrics.Call(smCYScreen)
+	}
 	if w == 0 || h == 0 {
 		return nil, &guest.FrameError{Code: "no_user_session", Message: "no desktop metrics"}
 	}
@@ -95,7 +178,7 @@ func captureFrame() ([]byte, error) {
 	}
 	defer procDeleteObject.Call(bmp)
 	procSelectObject.Call(mem, bmp)
-	r, _, _ := procBitBlt.Call(mem, 0, 0, w, h, hdc, 0, 0, srcCopy)
+	r, _, _ := procBitBlt.Call(mem, 0, 0, w, h, hdc, x, y, srcCopy)
 	if r == 0 {
 		return nil, &guest.FrameError{Code: "no_user_session", Message: "BitBlt failed (no user desktop)"}
 	}
@@ -125,5 +208,5 @@ func captureFrame() ([]byte, error) {
 			img.Pix[i+3] = 0xff
 		}
 	}
-	return encodeJPEG(img)
+	return encodeJPEG(img, p)
 }

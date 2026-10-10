@@ -18,6 +18,7 @@ type session struct {
 	terms      map[string]*termSink
 	displayOut chan []byte
 	displayID  string
+	onUpgrade  func(UpgradeStep)
 	seen       time.Time
 	remote     string
 	since      time.Time
@@ -244,6 +245,11 @@ func (s *session) deliver(fr Frame) {
 			case t.out <- fr.Data:
 			case <-t.done:
 			case <-time.After(termStall):
+			}
+		case StreamUpgrade:
+			var st UpgradeStep
+			if s.onUpgrade != nil && json.Unmarshal(fr.Data, &st) == nil {
+				s.onUpgrade(st)
 			}
 		case "display":
 			if len(fr.Data) == 0 {

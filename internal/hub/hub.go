@@ -35,6 +35,7 @@ type Hub struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	tickets  map[string]streamTicket
+	upgrades map[string]*UpgradeProgress
 }
 
 // Audit is one operator action on a guest. Err is set when the agent refused or failed it.
@@ -58,6 +59,7 @@ func NewHub(token string) *Hub {
 		Token:    token,
 		sessions: map[string]*session{},
 		tickets:  map[string]streamTicket{},
+		upgrades: map[string]*UpgradeProgress{},
 	}
 }
 
@@ -169,6 +171,10 @@ func (h *Hub) admit(hello Hello) error {
 func (h *Hub) accept(conn *websocket.Conn, hello Hello, remote string) *session {
 	s := newSession(conn, hello, remote)
 	key := hello.Key()
+	s.onUpgrade = func(st UpgradeStep) {
+		h.progress(key, func(p *UpgradeProgress) { p.Stage, p.Done, p.Total = st.Stage, st.Done, st.Total })
+	}
+	h.settleUpgrade(key, hello)
 	h.mu.Lock()
 	old := h.sessions[key]
 	h.sessions[key] = s
@@ -243,7 +249,7 @@ func (h *Hub) IssueTerm(key string) (map[string]string, error) {
 }
 
 func (h *Hub) IssueDisplay(key string) (map[string]string, error) {
-	return h.issueStream(key, "display", PathDisplayWS, "view-only JPEG ~2fps, max side 1920; no input. one-shot, expires in 2 minutes. ESXi WSS is never used.")
+	return h.issueStream(key, "display", PathDisplayWS, "view-only JPEG up to 10fps (quality=auto|smooth|hd on the ws URL); no input. one-shot, expires in 2 minutes. ESXi WSS is never used.")
 }
 
 func (h *Hub) issueStream(key, kind, path, note string) (map[string]string, error) {

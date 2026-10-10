@@ -20,7 +20,7 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
-		return upgrade(context.Background(), a.cfg, req), nil
+		return upgrade(context.Background(), a.cfg, req, func(st guest.UpgradeStep) { a.streamUpgrade(fr.ID, st) }), nil
 	case guest.MethodProcsList:
 		list, err := listProcs()
 		return list, asRPC(err)
@@ -74,10 +74,28 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		}
 		return doPower(req.Action)
 	case guest.MethodDisplayOpen:
-		if err := a.display.open(func(p []byte) { a.streamDisplay(fr.ID, p) }); err != nil {
+		var req guest.DisplayOpenRequest
+		_ = json.Unmarshal(fr.Params, &req)
+		res, err := a.display.open(req, func(p []byte) { a.streamDisplay(fr.ID, p) })
+		if err != nil {
 			return nil, err
 		}
-		return guest.DisplayOpenResult{OK: true, FPS: guest.DisplayFPS, MaxSide: guest.DisplayMaxSide}, nil
+		return res, nil
+	case guest.MethodDisplaySelect:
+		var req guest.DisplayOpenRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil {
+			return nil, bad("invalid params")
+		}
+		if err := a.display.selectScreen(req.Screen); err != nil {
+			return nil, err
+		}
+		return map[string]int{"screen": req.Screen}, nil
+	case guest.MethodDisplayQuality:
+		var req guest.DisplayOpenRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil {
+			return nil, bad("invalid params")
+		}
+		return map[string]string{"quality": a.display.setQuality(req.Quality)}, nil
 	case guest.MethodDisplayClose:
 		a.display.close()
 		return map[string]bool{"ok": true}, nil

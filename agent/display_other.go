@@ -8,6 +8,8 @@ func interactiveSession() error {
 	return &guest.FrameError{Code: "not_supported", Message: "display is implemented on windows and darwin"}
 }
 
-func captureFrame() ([]byte, error) {
+func listScreens() []guest.Screen { return nil }
+
+func captureFrame(guest.Screen, displayProfile) ([]byte, error) {
 	return nil, interactiveSession()
 }

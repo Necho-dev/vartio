@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -119,6 +121,7 @@ func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathAgentDownload+"/{version}/{os}/{arch}", h.handleAgentDownload)
 	mux.HandleFunc("GET "+PathReleases, h.wrap(h.handleReleases))
 	mux.HandleFunc("POST "+PathUpgrade, h.wrap(h.handleUpgradeBatch))
+	mux.HandleFunc("GET "+PathUpgrade, h.wrap(h.handleUpgrades))
 	mux.HandleFunc("POST "+PathSessions+"/{id}/upgrade", h.wrap(h.handleUpgrade))
 	mux.HandleFunc("GET "+PathSessions, h.wrap(h.handleSessions))
 	mux.HandleFunc("GET "+PathSessions+"/{id}", h.wrap(h.handleSessionInfo))
@@ -263,7 +266,7 @@ func (h *Hub) handleDisplayGet(w http.ResponseWriter, _ *http.Request) error {
 		ViewOnly: true,
 		FPS:      DisplayFPS,
 		MaxSide:  DisplayMaxSide,
-		Note:     "POST for a one-shot " + PathDisplayWS + " ticket. JPEG ~2fps, max side 1920; no input. Does not fall back to hypervisor screenshot.",
+		Note:     "POST for a one-shot " + PathDisplayWS + " ticket. JPEG up to 10fps, max side 2560, quality=auto|smooth|hd; no input. Does not fall back to hypervisor screenshot.",
 	})
 }
 
@@ -488,6 +491,17 @@ func parseResize(data []byte) (TermOpenRequest, bool) {
 	return TermOpenRequest{Cols: m.Cols, Rows: m.Rows}, true
 }
 
+// displayMsg is a JSON text frame on the display WebSocket. Hub → browser:
+// "info" (screens, current screen, quality), "screen" / "quality" (switched),
+// "error". Browser → hub: "screen" or "quality" to switch.
+type displayMsg struct {
+	Type    string   `json:"type"`
+	Screens []Screen `json:"screens,omitempty"`
+	Screen  int      `json:"screen"`
+	Quality string   `json:"quality,omitempty"`
+	Message string   `json:"message,omitempty"`
+}
+
 func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 	t, ok := h.takeTicket(r.URL.Query().Get("id"), "display")
 	if !ok {
@@ -506,9 +520,23 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 	defer browser.Close()
 
 	ctx := r.Context()
-	if _, err := s.call(ctx, t.ID, MethodDisplayOpen, map[string]any{}); err != nil {
+	raw, err := s.call(ctx, t.ID, MethodDisplayOpen, DisplayOpenRequest{Quality: r.URL.Query().Get("quality")})
+	if err != nil {
 		_ = browser.WriteMessage(websocket.TextMessage, []byte("display.open: "+err.Error()))
 		return
+	}
+	// Text frames to the browser are JSON control messages; binary frames are JPEGs.
+	var wmu sync.Mutex
+	write := func(kind int, b []byte) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return browser.WriteMessage(kind, b)
+	}
+	var res DisplayOpenResult
+	_ = json.Unmarshal(raw, &res)
+	if len(res.Screens) > 0 || res.Quality != "" {
+		b, _ := json.Marshal(displayMsg{Type: "info", Screens: res.Screens, Screen: res.Screen, Quality: res.Quality})
+		_ = write(websocket.TextMessage, b)
 	}
 	opened := time.Now()
 	h.audit(t.Key, "display.open", "", clientIP(r), nil)
@@ -531,12 +559,45 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 	defer idle.Stop()
 	errc := make(chan error, 2)
 	go func() {
+		n := 0
 		for {
-			if _, _, err := browser.ReadMessage(); err != nil {
+			kind, data, err := browser.ReadMessage()
+			if err != nil {
 				errc <- err
 				return
 			}
-			// view-only: discard any client bytes
+			// View-only: a browser may only pick another monitor or quality profile.
+			var m displayMsg
+			if kind != websocket.TextMessage || json.Unmarshal(data, &m) != nil {
+				continue
+			}
+			var method, what string
+			var params DisplayOpenRequest
+			switch {
+			case m.Type == "screen" && len(res.Screens) > 0:
+				method, what, params = MethodDisplaySelect, "切换屏幕", DisplayOpenRequest{Screen: m.Screen}
+			case m.Type == "quality" && res.Quality != "":
+				method, what, params = MethodDisplayQuality, "切换清晰度", DisplayOpenRequest{Quality: m.Quality}
+			default:
+				continue
+			}
+			n++
+			c, cancel := context.WithTimeout(ctx, TermOpenTimeout)
+			out, err := s.call(c, fmt.Sprintf("%s-ctl-%d", t.ID, n), method, params)
+			cancel()
+			reply := displayMsg{Type: m.Type, Screen: m.Screen, Quality: m.Quality}
+			if err != nil {
+				reply = displayMsg{Type: "error", Message: what + "失败：" + err.Error()}
+			} else if m.Type == "quality" {
+				var q struct {
+					Quality string `json:"quality"`
+				}
+				if json.Unmarshal(out, &q) == nil && q.Quality != "" {
+					reply.Quality = q.Quality
+				}
+			}
+			b, _ := json.Marshal(reply)
+			_ = write(websocket.TextMessage, b)
 		}
 	}()
 	go func() {
@@ -560,7 +621,7 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				idle.Reset(DisplayIdle)
-				if err := browser.WriteMessage(websocket.BinaryMessage, b); err != nil {
+				if err := write(websocket.BinaryMessage, b); err != nil {
 					errc <- err
 					return
 				}

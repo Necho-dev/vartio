@@ -1,9 +1,11 @@
 // @ts-check
 import { $, API, app, state, esc, rate, dur, ago, meter, osLabel, osKey, OS_NAMES, ip, api, every } from "./core.js";
 import { icon } from "./icons.js";
-import { latestAgent, outdated, canUpgrade, upgradeAll, upgradeOne } from "./upgrade.js";
+import { latestAgent, outdated, canUpgrade, upgradeAll, upgradeOne, upgradeNotice } from "./upgrade.js";
 
 let latest = "";
+/** Refreshes the dashboard data; set while the dashboard is mounted. */
+let reload = () => {};
 
 export async function dashboard() {
   app.innerHTML = `
@@ -35,6 +37,7 @@ export async function dashboard() {
     state.sort = { key: ms.value, dir: ms.value === "name" ? 1 : -1 };
     renderTable();
   });
+  reload = load;
   await load();
   every(5000, load);
 }
@@ -49,23 +52,8 @@ function renderBanner() {
     <span><b>${behind.length}</b> 台在线探针落后于 ${esc(latest)}${manual ? `<span class="faint">（其中 ${manual} 台版本过旧，需手动更新一次）</span>` : ""}</span>
     ${auto.length ? `<button class="btn" id="upAll">全部升级（${auto.length}）</button>` : ""}</div>`;
   const btn = /** @type {HTMLButtonElement | null} */ ($("#upAll"));
-  if (btn) btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    btn.textContent = "升级中…";
-    try {
-      const res = await upgradeAll(auto.length, latest);
-      if (res) {
-        const bad = res.filter((r) => !r.ok);
-        alert(`已下发 ${res.length} 台：${res.length - bad.length} 台校验通过并重启中` +
-          (bad.length ? `\n\n失败：\n${bad.map((r) => `${nameOf(r.id)}：${r.message}`).join("\n")}` : ""));
-      }
-    } catch (e) { alert(/** @type {Error} */ (e).message); }
-    btn.disabled = false;
-  });
+  if (btn) btn.addEventListener("click", () => upgradeAll(auto, latest, reload));
 }
-
-/** @param {string} id */
-const nameOf = (id) => { const s = state.systems.find((x) => x.id === id); return s ? s.name || s.hostname : id; };
 
 function renderStats() {
   const s = state.systems, on = s.filter((x) => x.online);
@@ -160,28 +148,10 @@ export function renderTable() {
   wrap.querySelectorAll("button.ver-up").forEach((b) => b.addEventListener("click", (e) => {
     e.stopPropagation();
     const s = state.systems.find((x) => x.id === b.dataset.up);
-    if (s) upgradeRow(s, /** @type {HTMLButtonElement} */ (b));
+    if (!s) return;
+    if (canUpgrade(s)) upgradeOne(s, latest, reload);
+    else upgradeNotice(s, latest);
   }));
-}
-
-/** @param {SystemView} s @param {HTMLButtonElement} b */
-async function upgradeRow(s, b) {
-  if (!canUpgrade(s)) {
-    alert(`${s.name || s.hostname} 的探针 ${s.version} ${s.online ? "不支持远程升级" : "不在线"}。\n\n` +
-      (s.online ? `请手动替换为 ${latest} 一次，之后即可在这里一键升级。` : "上线后再试。"));
-    return;
-  }
-  b.disabled = true;
-  b.classList.add("busy");
-  try {
-    const r = await upgradeOne(s, latest);
-    if (r) b.title = "已校验，正在重启…";
-    else { b.disabled = false; b.classList.remove("busy"); }
-  } catch (e) {
-    alert("升级失败：" + /** @type {Error} */ (e).message);
-    b.disabled = false;
-    b.classList.remove("busy");
-  }
 }
 
 /** @param {SystemView} s */

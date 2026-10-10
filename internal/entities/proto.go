@@ -23,6 +23,8 @@ const (
 	MethodPower          = "power"
 	MethodDisplayOpen    = "display.open"
 	MethodDisplayClose   = "display.close"
+	MethodDisplaySelect  = "display.select"
+	MethodDisplayQuality = "display.quality"
 	MethodFilesList      = "files.list"
 	MethodFilesGet       = "files.get"
 	MethodFilesPut       = "files.put"
@@ -50,9 +52,9 @@ const (
 	FileChunk       = 256 << 10
 	FileChunkWait   = 20 * time.Second
 	FileOpTimeout   = 10 * time.Minute
-	DisplayFPS      = 2
-	DisplayMaxSide  = 1920
-	DisplayJPEGQ    = 88
+	// DisplayFPS and DisplayMaxSide are the ceilings across the quality profiles.
+	DisplayFPS     = 10
+	DisplayMaxSide = 2560
 	// MaxTerms caps concurrent terminal sessions (browser tabs) per guest.
 	MaxTerms = 8
 )
@@ -128,6 +130,41 @@ type UpgradeResult struct {
 	From    string `json:"from"`
 	To      string `json:"to"`
 	Message string `json:"message,omitempty"`
+}
+
+// StreamUpgrade frames carry an UpgradeStep for the agent.upgrade call with the same id.
+const StreamUpgrade = "upgrade"
+
+// Upgrade stages, in order. The agent reports download/verify/selftest; the hub
+// sets the rest from the call result and the next hello's UpgradeReport.
+const (
+	UpgradeQueued     = "queued"
+	UpgradeDownload   = "download"
+	UpgradeVerify     = "verify"
+	UpgradeSelfTest   = "selftest"
+	UpgradeRestart    = "restart"
+	UpgradeDone       = "done"
+	UpgradeFailed     = "failed"
+	UpgradeRolledBack = "rolled_back"
+)
+
+type UpgradeStep struct {
+	Stage string `json:"stage"`
+	Done  int64  `json:"done,omitempty"`
+	Total int64  `json:"total,omitempty"`
+}
+
+// UpgradeProgress is the hub's view of one device's latest upgrade.
+type UpgradeProgress struct {
+	ID      string    `json:"id"`
+	From    string    `json:"from,omitempty"`
+	To      string    `json:"to,omitempty"`
+	Stage   string    `json:"stage"`
+	Done    int64     `json:"done,omitempty"`
+	Total   int64     `json:"total,omitempty"`
+	Message string    `json:"message,omitempty"`
+	Started time.Time `json:"started"`
+	Updated time.Time `json:"updated"`
 }
 
 type UpgradeReport struct {
@@ -370,12 +407,44 @@ type SessionInfo struct {
 	Upgrade *UpgradeReport `json:"upgrade,omitempty"`
 }
 
+// DisplayOpenRequest picks the monitor to stream; Screen indexes
+// DisplayOpenResult.Screens, and index 0 is always the primary monitor.
+type DisplayOpenRequest struct {
+	Screen  int    `json:"screen"`
+	Quality string `json:"quality,omitempty"`
+}
+
+// Display quality profiles. Auto adapts frame rate and picture quality to the
+// link and the machine; smooth favours frame rate, hd favours picture quality.
+const (
+	DisplayAuto   = "auto"
+	DisplaySmooth = "smooth"
+	DisplayHD     = "hd"
+)
+
 type DisplayOpenResult struct {
 	OK      bool `json:"ok"`
 	FPS     int  `json:"fps"`
 	MaxSide int  `json:"maxSide"`
 	Width   int  `json:"width,omitempty"`
 	Height  int  `json:"height,omitempty"`
+	// Screens is empty for agents that can only capture the primary monitor.
+	Screens []Screen `json:"screens,omitempty"`
+	Screen  int      `json:"screen"`
+	// Quality is empty for agents without quality profiles.
+	Quality string `json:"quality,omitempty"`
+}
+
+// Screen is one monitor in desktop coordinates (pixels, origin at the
+// primary monitor's top-left corner).
+type Screen struct {
+	Index   int    `json:"index"`
+	Name    string `json:"name"`
+	X       int    `json:"x"`
+	Y       int    `json:"y"`
+	Width   int    `json:"width"`
+	Height  int    `json:"height"`
+	Primary bool   `json:"primary,omitempty"`
 }
 
 type DisplayInfo struct {
@@ -523,7 +592,7 @@ func TimeoutFor(method string, execSec int) time.Duration {
 		return ActionTimeout
 	case MethodPower:
 		return PowerTimeout
-	case MethodTermOpen, MethodTermClose, MethodTermResize, MethodDisplayOpen, MethodDisplayClose:
+	case MethodTermOpen, MethodTermClose, MethodTermResize, MethodDisplayOpen, MethodDisplayClose, MethodDisplaySelect, MethodDisplayQuality:
 		return TermOpenTimeout
 	case MethodFilesList:
 		return ListTimeout

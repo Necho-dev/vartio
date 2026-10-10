@@ -106,7 +106,7 @@ hub 侧：
 - `POST .../exec` — `{command, args?, cwd?, shell, timeoutSec}`
 - `POST .../term` → `/v1/probe/ws/term?id=&cols=&rows=`（2 分钟一次性）。每张票一个独立 PTY，同一台最多 8 个并发会话（监控页终端的多标签页）；agent 在 Hello 里声明 `caps: ["term.multi"]`（≥1.4.0），旧 agent 只支持单会话，新开会顶掉旧的
 - `POST .../power` — `shutdown|reboot`，要 `confirm`。没有 `on`
-- `GET|POST .../display` — GET 说明；POST 出 `/v1/probe/ws/display` 票。只读 JPEG ~2fps、最长边 1920、质量 88，**无 input**。无交互会话 `409 no_user_session`，不回退宿主机截图。Windows 服务在 Session 0 里看不到用户桌面，画面要在用户会话里跑探针（或另做用户态助手）
+- `GET|POST .../display` — GET 说明；POST 出 `/v1/probe/ws/display` 票。只读 JPEG 二进制帧，**无 input**。清晰度（agent ≥ 1.12.0）在 ws URL 上带 `&quality=auto|smooth|hd`：`smooth` 10fps / 最长边 1280 / 质量 60，`hd` 3fps / 2560 / 90，`auto`（默认）在 2/1280/55 … 10/1920/82 五档间按 2 秒窗口的发送耗时自动升降。多显示器（agent ≥ 1.11.0）：连上后 hub 先发文本帧 `{"type":"info","screens":[{index,name,x,y,width,height,primary}],"screen":0,"quality":"auto"}`（0 号恒为主屏）；浏览器发 `{"type":"screen","screen":N}` / `{"type":"quality","quality":"hd"}` 切换，hub 转成 `display.select` / `display.quality` 下发并回同类型消息，失败回 `{"type":"error","message":…}`；旧 agent 不发列表，只看主屏。macOS ≥ 14 用 ScreenCaptureKit（运行时 `dlopen`），失败退回 `screencapture`。macOS 按 CoreGraphics 顺序用 `screencapture -D`，Windows 用 `EnumDisplayMonitors` + 每显示器 DPI 感知截取。无交互会话 `409 no_user_session`，不回退宿主机截图。Windows 服务在 Session 0 里看不到用户桌面，画面要在用户会话里跑探针（或另做用户态助手）
 - `GET .../files?path=` — 列表；空 path 为暂存目录
 - `GET .../files/content?path=` — 下载，上限 512MB，SHA-256
 - `PUT .../files?path=` — 上传；覆盖要 `confirm`。相对路径落在暂存目录（Windows `C:\ProgramData\probe-agent\tmp`）
@@ -178,12 +178,24 @@ agent ≥ 1.9.0 在 Hello 里声明 `caps: ["upgrade"]` 和 `runner`（见上文
    - Unix：`exec` 原地换成新版本，PID 不变
    - Windows 服务：看门狗停止并重新启动服务
    - Windows 托盘 / 前台进程：旧进程先移除托盘图标再退出，看门狗等它退出后启动新版本（前台进程用新控制台，托盘不带控制台）
-4. 确认：新版本连上 hub、收到 HelloOK 后删掉状态文件。看门狗在试用期（`GUEST_UPGRADE_PROBATION`，默认 `2m`）内看到文件被删就退出
+4. 确认：新版本连上 hub、收到 HelloOK 后删掉状态文件。看门狗在试用期（`GUEST_UPGRADE_PROBATION`，默认 `2m`）内看到文件被删就退出。确认后（≥ 1.13.0）新版本删除 `probe-agent.old*`；Windows 上看门狗退出前文件被占用，会每 3 秒重试，最多约 1 分钟。不在试用期的正常启动也会顺带清理残留
 5. 回滚：试用期过了还没确认，看门狗停掉新进程，`probe-agent` → `.bad`，`.old` → `probe-agent`，再按原方式启动旧版本。旧版本下次连上时上报结果，hub 记 `upgrade.failed`
 
 看门狗日志在 `probe-agent.upgrade.log`。Unix 前台运行时，回滚后由看门狗重新启动的进程日志写到 `probe-agent.log`。`GUEST_UPGRADE=off` 拒绝一切远程升级。
 
 终端前台运行也能升级，但重启或注销后不会自动启动，详情页会提示改用 `install`。
+
+进度：agent（≥ 1.13.0）在 `agent.upgrade` 调用期间以同一 id 发 `stream: "upgrade"` 帧，`data` 为 `{stage, done, total}`（`download` 带已下载字节数、`verify`、`selftest`）。hub 按设备记录 `queued → download → verify → selftest → restart → done | failed | rolled_back`：调用返回成功记为 `restart`，新版本再次 hello 时按 `UpgradeReport` 记 `done` 或 `rolled_back`。同一设备未结束的升级会拒绝再次下发（`409 upgrade_busy`）。监控页用自绘弹窗确认，开始后每 0.7 秒轮询 `GET /v1/probe/upgrade` 画进度条；关闭弹窗只是停止观察，升级继续。旧 agent 不发进度帧，弹窗会从「下发中」直接跳到「重启中」。
+
+### macOS 签名与录屏权限
+
+macOS 把「录屏与系统录音」授权绑定在二进制的 designated requirement 上。ad-hoc 签名的要求就是本次构建的 cdhash，每次升级都会失效，系统再次弹窗，设置里还会残留旧条目。打包脚本对 darwin 产物用固定证书和固定标识符 `probe-agent` 签名，要求变成 `identifier "probe-agent" and certificate leaf = H"…"`，以后升级授权不会丢：
+
+```bash
+scripts/probe-agent-macos-sign-setup.sh   # 只需一次：在 ~/.config/probe-agent/signing.keychain-db 生成自签名代码签名证书
+```
+
+证书放在独立 keychain，随机密码存在旁边的 `signing.pass`（0600），不碰登录 keychain；打包时临时加入 keychain 搜索列表，签完恢复。目录要备份，换证书意味着每台 Mac 再授权一次。没有证书时退回 ad-hoc 签名，脚本会告警。第一次换成证书签名的版本需要在设置里删掉旧的 `probe-agent` / `probe-agent.old` 条目，再给新版本授权一次。截屏失败且 `CGPreflightScreenCaptureAccess` 为假时，画面窗口会直接提示去开启权限。
 
 ### 发布
 
@@ -207,3 +219,4 @@ agent 用 `X-Guest-Token`：
 - `GET /v1/probe/releases` — `{latest, versions: [{version, created, platforms}]}`
 - `POST /v1/probe/sessions/{id}/upgrade` — `{version?, confirm: true}`，`version` 不传时用 latest。agent 太旧返回 `409 upgrade_unsupported`，版本相同返回 `409 already_current`
 - `POST /v1/probe/upgrade` — `{version?, ids?, confirm: true}`；不传 `ids` 时选所有在线、可升级、且落后于目标版本的探针，并发 4 台，返回 `[{id, ok, from, to, message?}]`
+- `GET /v1/probe/upgrade` — 最近 30 分钟的升级进度 `[{id, from, to, stage, done?, total?, message?, started, updated}]`，新的在前

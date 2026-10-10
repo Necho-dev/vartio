@@ -15,6 +15,31 @@ out=dist/probe-agent/$ver
 targets=("$@")
 [ ${#targets[@]} -gt 0 ] || targets=(windows/amd64 windows/arm64 darwin/arm64 darwin/amd64 linux/amd64 linux/arm64)
 
+# macOS keeps Screen Recording grants across upgrades only if every build has the
+# same identifier and certificate (scripts/probe-agent-macos-sign-setup.sh).
+sign_dir=${PROBE_SIGN_DIR:-$HOME/.config/probe-agent}
+sign_kc=$sign_dir/signing.keychain-db
+sign_name=${PROBE_SIGN_NAME:-probe-agent self-signed}
+sign_darwin() {
+  if [ -f "$sign_kc" ] && [ -f "$sign_dir/signing.pass" ]; then
+    security unlock-keychain -p "$(cat "$sign_dir/signing.pass")" "$sign_kc"
+    # codesign only finds identities in the search list; add ours for this call.
+    local list=() line rc=0
+    while IFS= read -r line; do
+      line=${line#"${line%%[![:space:]]*}"}
+      line=${line#\"}
+      list+=("${line%\"}")
+    done < <(security list-keychains -d user)
+    security list-keychains -d user -s "${list[@]}" "$sign_kc"
+    codesign --force --sign "$sign_name" --identifier probe-agent --timestamp=none "$1" || rc=$?
+    security list-keychains -d user -s "${list[@]}"
+    return $rc
+  else
+    echo "  WARNING: no signing identity, $1 is ad-hoc signed; macOS asks for Screen Recording again after each upgrade (run: scripts/probe-agent-macos-sign-setup.sh)" >&2
+    codesign --force --sign - --identifier probe-agent "$1"
+  fi
+}
+
 echo "probe-agent $ver -> $out"
 [ -f "$env_tpl" ] || echo "  (no $env_tpl, packages ship without probe-agent.env)"
 mkdir -p "$out"
@@ -34,6 +59,7 @@ for t in "${targets[@]}"; do
     cgo=1
   fi
   CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$ldflags" -o "$dir/probe-agent$ext" ./cmd/probe-agent
+  [ "$os" = darwin ] && sign_darwin "$dir/probe-agent"
   if [ -f "$env_tpl" ]; then
     if [ "$os" = windows ]; then
       tr -d '\r' <"$env_tpl" | sed 's/$/\r/' >"$dir/probe-agent.env"

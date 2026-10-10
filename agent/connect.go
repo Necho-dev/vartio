@@ -197,6 +197,13 @@ func (a *agent) streamDisplay(id string, p []byte) {
 	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: "display", Data: p})
 }
 
+func (a *agent) streamUpgrade(id string, st guest.UpgradeStep) {
+	b, _ := json.Marshal(st)
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: guest.StreamUpgrade, Data: b})
+}
+
 func hostname() string {
 	h, _ := os.Hostname()
 	return h

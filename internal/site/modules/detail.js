@@ -37,6 +37,7 @@ export async function detail(id) {
       ${panel("dio", "磁盘 I/O", "全部物理磁盘读写吞吐")}
       ${panel("net", "网络带宽", "物理网卡收发速率（已排除回环/虚拟网卡）")}
       ${panel("load", "系统负载", "")}
+      ${panel("procs", "进程数", "运行中的进程总数")}
       ${panel("temp", "温度", "传感器最高温度", true)}
     </section>
     <section class="grid2">
@@ -194,19 +195,7 @@ function renderHero(s) {
   $("#procBtn").addEventListener("click", () => openProcs(s));
   $("#filesBtn").addEventListener("click", () => openFiles(s));
   const upBtn = /** @type {HTMLButtonElement | null} */ ($("#upBtn"));
-  if (upBtn) upBtn.addEventListener("click", async () => {
-    upBtn.disabled = true;
-    upBtn.textContent = "下载校验中…";
-    try {
-      const r = await upgradeOne(s, latest);
-      upBtn.textContent = r ? "已校验，正在重启…" : `升级到 ${latest}`;
-      if (!r) upBtn.disabled = false;
-    } catch (e) {
-      alert("升级失败：" + /** @type {Error} */ (e).message);
-      upBtn.textContent = `升级到 ${latest}`;
-      upBtn.disabled = false;
-    }
-  });
+  if (upBtn) upBtn.addEventListener("click", () => upgradeOne(s, latest));
   const del = $("#delBtn");
   if (del) del.addEventListener("click", async () => {
     if (!confirm(`删除 ${s.name} 及其全部历史数据？`)) return;
@@ -275,20 +264,24 @@ async function loadSeries(s) {
     { label: "上行", color: C.violet, data: d.netTx }] }, s.online ? `↓ ${rate(l.netRxBps)} · ↑ ${rate(l.netTxBps)}` : "");
 
   const hasLoad = d.load1.some((v) => v > 0);
-  $("#p-load").querySelector("h3").textContent = hasLoad ? "系统负载" : "进程数";
   const winLoad = s.info?.os === "windows";
-  $("#desc-load").textContent = !hasLoad ? "运行中的进程总数（agent ≥ 1.8.1 提供 Windows 近似负载）"
-    : winLoad ? "近似负载：CPU 折算 + 处理器队列长度（1 / 5 / 15 分钟）" : "1 / 5 / 15 分钟平均负载";
+  const hasTemp = d.temp.some((v) => v != null);
+  $("#p-load").hidden = !hasLoad;
+  $("#p-temp").hidden = !hasTemp;
+  const shown = [...$("#charts").children].filter((p) => !(/** @type {HTMLElement} */ (p).hidden));
+  shown.forEach((p, i) => p.classList.toggle("span-row", shown.length % 2 === 1 && i === shown.length - 1));
+  $("#p-load").querySelector("h3").textContent = winLoad ? "系统负载（估算）" : "系统负载";
+  $("#desc-load").textContent = winLoad
+    ? "Windows 无原生 load average，由 CPU 使用率与处理器队列长度折算"
+    : "1 / 5 / 15 分钟平均负载";
   if (hasLoad) chart("load", { ...base, fmt: (v) => (v == null ? "—" : v.toFixed(2)), series: [
     { label: "load1", color: C.pink, data: d.load1 },
     { label: "load5", color: C.violet, data: d.load5, area: false, width: 1.3 },
     { label: "load15", color: C.cyan, data: d.load15, area: false, width: 1.3 }] },
     s.online && l.load ? l.load.map((x) => x.toFixed(2)).join(" / ") : "");
-  else chart("load", { ...base, fmt: (v) => (v == null ? "—" : Math.round(v) + ""), series: [{ label: "进程", color: C.pink, data: d.procs }] },
+  chart("procs", { ...base, fmt: (v) => (v == null ? "—" : Math.round(v) + ""), series: [{ label: "进程", color: C.orange, data: d.procs }] },
     s.online && l.procs ? l.procs + " 个" : "");
 
-  const hasTemp = d.temp.some((v) => v != null);
-  $("#p-temp").hidden = !hasTemp;
   if (hasTemp) {
     chart("temp", { ...base, fmt: (v) => (v == null ? "—" : v.toFixed(0) + "°C"), series: [{ label: "最高", color: C.yellow, data: d.temp }] },
       s.online && l.tempMax ? l.tempMax.toFixed(0) + "°C" : "");

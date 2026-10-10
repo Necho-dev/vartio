@@ -9,6 +9,21 @@ import (
 	"testing"
 )
 
+func TestRemoveOld(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "probe-agent")
+	for _, p := range []string{exe, exe + ".old", exe + ".old.1700000000", exe + ".bad"} {
+		if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removeOld(exe)
+	left, _ := filepath.Glob(filepath.Join(dir, "*"))
+	if len(left) != 2 || left[0] != exe || left[1] != exe+".bad" {
+		t.Fatalf("left %v", left)
+	}
+}
+
 func TestSwapInAndBack(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "probe-agent")

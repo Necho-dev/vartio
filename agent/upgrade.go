@@ -101,6 +101,7 @@ func startupReport() *guest.UpgradeReport {
 	}
 	st, err := readState(statePath(exe))
 	if err != nil {
+		go removeOld(exe)
 		return nil
 	}
 	switch {
@@ -134,8 +135,32 @@ func confirmUpgrade() {
 	}
 	if exe, err := selfExe(); err == nil {
 		_ = os.Remove(statePath(exe))
+		go removeOld(exe)
 	}
 	report.r = nil
+}
+
+// removeOld deletes the previous build kept for rollback once it is no longer
+// needed. On Windows the watchdog runs from it until it sees the confirmation,
+// so locked files are retried for a while.
+func removeOld(exe string) {
+	olds, _ := filepath.Glob(exe + ".old*")
+	for i := 0; len(olds) > 0; i++ {
+		rest := olds[:0]
+		for _, p := range olds {
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				rest = append(rest, p)
+			}
+		}
+		if olds = rest; len(olds) == 0 {
+			return
+		}
+		if i == 20 {
+			log.Printf("upgrade: could not remove %v", olds)
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 func hubBase(control string) (*url.URL, error) {
@@ -169,8 +194,11 @@ func (cfg config) hubGet(ctx context.Context, path string, q url.Values) (*http.
 }
 
 // upgrade stages req and, if that succeeds, restarts into it shortly after the
-// caller has had time to send the reply.
-func upgrade(ctx context.Context, cfg config, req guest.UpgradeRequest) guest.UpgradeResult {
+// caller has had time to send the reply. step (may be nil) receives progress.
+func upgrade(ctx context.Context, cfg config, req guest.UpgradeRequest, step func(guest.UpgradeStep)) guest.UpgradeResult {
+	if step == nil {
+		step = func(guest.UpgradeStep) {}
+	}
 	res := guest.UpgradeResult{From: agentVersion, To: req.Version}
 	fail := func(format string, args ...any) guest.UpgradeResult {
 		res.Message = fmt.Sprintf(format, args...)
@@ -196,7 +224,7 @@ func upgrade(ctx context.Context, cfg config, req guest.UpgradeRequest) guest.Up
 	}
 	staged := exe + ".new"
 	setLink(func(s *linkState) { s.Upgrading = req.Version })
-	if err := stage(ctx, cfg, req, staged); err != nil {
+	if err := stage(ctx, cfg, req, staged, step); err != nil {
 		_ = os.Remove(staged)
 		upgrading.Store(false)
 		setLink(func(s *linkState) { s.Upgrading = "" })
@@ -220,7 +248,23 @@ func upgrade(ctx context.Context, cfg config, req guest.UpgradeRequest) guest.Up
 	return res
 }
 
-func stage(ctx context.Context, cfg config, req guest.UpgradeRequest, dst string) error {
+// progressWriter reports bytes written at most every 300ms.
+type progressWriter struct {
+	n, total int64
+	last     time.Time
+	step     func(guest.UpgradeStep)
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	if time.Since(w.last) >= 300*time.Millisecond {
+		w.last = time.Now()
+		w.step(guest.UpgradeStep{Stage: guest.UpgradeDownload, Done: w.n, Total: w.total})
+	}
+	return len(p), nil
+}
+
+func stage(ctx context.Context, cfg config, req guest.UpgradeRequest, dst string, step func(guest.UpgradeStep)) error {
 	a := req.Artifact
 	if a.Size <= 0 || a.Size > maxArtifact {
 		return fmt.Errorf("构建大小 %d 不合理", a.Size)
@@ -244,16 +288,20 @@ func stage(ctx context.Context, cfg config, req guest.UpgradeRequest, dst string
 		return fmt.Errorf("写入失败：%v", err)
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxArtifact+1))
+	pw := &progressWriter{total: a.Size, step: step}
+	step(guest.UpgradeStep{Stage: guest.UpgradeDownload, Total: a.Size})
+	n, err := io.Copy(io.MultiWriter(f, h, pw), io.LimitReader(resp.Body, maxArtifact+1))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		return fmt.Errorf("下载中断：%v", err)
 	}
+	step(guest.UpgradeStep{Stage: guest.UpgradeVerify, Done: n, Total: a.Size})
 	if err := release.Verify(keys, req.Version, a, n, hex.EncodeToString(h.Sum(nil))); err != nil {
 		return fmt.Errorf("校验失败：%v", err)
 	}
+	step(guest.UpgradeStep{Stage: guest.UpgradeSelfTest, Done: n, Total: a.Size})
 	return selfTest(ctx, dst, req.Version)
 }
 
@@ -349,7 +397,7 @@ func checkLatest(ctx context.Context, cfg config) error {
 		return nil
 	}
 	log.Printf("auto update: %s available", l.Version)
-	if res := upgrade(ctx, cfg, guest.UpgradeRequest{Version: l.Version, Artifact: l.Artifact, URL: l.URL, Mode: "auto"}); !res.OK {
+	if res := upgrade(ctx, cfg, guest.UpgradeRequest{Version: l.Version, Artifact: l.Artifact, URL: l.URL, Mode: "auto"}, nil); !res.OK {
 		return errors.New(res.Message)
 	}
 	return nil

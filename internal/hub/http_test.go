@@ -115,6 +115,71 @@ func TestDisplayWSViewOnly(t *testing.T) {
 	}
 }
 
+func TestDisplayWSSelectScreen(t *testing.T) {
+	h := NewHub("dev")
+	srv := httptest.NewServer(h.DevHandler())
+	t.Cleanup(srv.Close)
+	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect?token=dev", Hello{BiosUUID: "disp-2"})
+	screens := []Screen{{Index: 0, Name: "A", Width: 1920, Height: 1080, Primary: true}, {Index: 1, Name: "B", X: 1920, Width: 1080, Height: 1920}}
+	selected := make(chan int, 1)
+	go func() {
+		for {
+			var fr Frame
+			if err := conn.ReadJSON(&fr); err != nil {
+				return
+			}
+			switch fr.Method {
+			case MethodDisplayOpen:
+				var req DisplayOpenRequest
+				_ = json.Unmarshal(fr.Params, &req)
+				if req.Quality != "hd" {
+					t.Errorf("open quality %q", req.Quality)
+				}
+				b, _ := json.Marshal(DisplayOpenResult{OK: true, FPS: 10, MaxSide: 2560, Screens: screens, Quality: DisplayAuto})
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: b})
+			case MethodDisplaySelect:
+				var req DisplayOpenRequest
+				_ = json.Unmarshal(fr.Params, &req)
+				selected <- req.Screen
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"screen":1}`)})
+			case MethodDisplayQuality:
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"quality":"smooth"}`)})
+			case MethodDisplayClose:
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
+			}
+		}
+	}()
+	waitOnline(t, h, "disp-2")
+	ticket, err := h.IssueDisplay("disp-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+ticket["ws"]+"&quality=hd", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	var m displayMsg
+	if err := c.ReadJSON(&m); err != nil || m.Type != "info" || len(m.Screens) != 2 || m.Screen != 0 || m.Quality != DisplayAuto {
+		t.Fatalf("info msg %+v %v", m, err)
+	}
+	if err := c.WriteJSON(displayMsg{Type: "screen", Screen: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-selected; got != 1 {
+		t.Fatalf("agent got screen %d", got)
+	}
+	if err := c.ReadJSON(&m); err != nil || m.Type != "screen" || m.Screen != 1 {
+		t.Fatalf("switch reply %+v %v", m, err)
+	}
+	if err := c.WriteJSON(displayMsg{Type: "quality", Quality: "smooth"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReadJSON(&m); err != nil || m.Type != "quality" || m.Quality != DisplaySmooth {
+		t.Fatalf("quality reply %+v %v", m, err)
+	}
+}
+
 func TestOldGuestPathsGone(t *testing.T) {
 	h := NewHub("dev")
 	srv := httptest.NewServer(h.DevHandler())

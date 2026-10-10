@@ -219,6 +219,7 @@ table.sys tr.offline td { opacity: .55; }
 .btn.danger { color: var(--red); }
 
 .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
+.grid2 > .span-row { grid-column: 1 / -1; }
 .panel { padding: 16px 18px 12px; }
 .panel h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .panel .desc { margin: 1px 0 10px; font-size: 12px; color: var(--muted); }
@@ -321,6 +322,10 @@ html:has(.modal:not([hidden])), html:has(.drawer:not([hidden])) { overflow: hidd
 .term .xterm .xterm-viewport::-webkit-scrollbar-thumb { background: var(--term-thumb); border: 2px solid transparent; background-clip: content-box; border-radius: 8px; }
 .term .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--term-thumb-hover); background-clip: content-box; }
 
+.screen-bar { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; overflow-x: auto; }
+.screen-bar .seg { flex: none; }
+.screen-bar .seg button { white-space: nowrap; }
+.screen-bar .seg b { font-weight: 600; margin-right: 2px; }
 .screen { display: grid; place-items: center; min-height: 300px; background: #000; border-radius: 9px; overflow: hidden; }
 .screen img { max-width: 100%; max-height: 76vh; display: block; object-fit: contain; }
 .modal-box.is-full .screen { position: relative; flex: 1; min-height: 0; border-radius: 6px; }
@@ -508,6 +513,22 @@ table.procs .mini i { display: block; height: 100%; background: var(--blue); }
 .ver-up:hover { background: color-mix(in srgb, var(--cyan) 16%, transparent); }
 .ver-up:disabled { cursor: progress; opacity: .5; }
 .ver-up .i { width: 13px; height: 13px; }
+.upd .form-actions { margin-top: 20px; }
+.upd-desc { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.upd-desc b { color: var(--text); }
+.upd-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; max-height: min(52vh, 420px); overflow: auto; }
+.upd-head { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.upd-head b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upd-head .faint { flex: none; font-size: 12px; }
+.upd-st { margin-left: auto; color: var(--muted); font-size: 12px; text-align: right; }
+.upd-list li.ok .upd-st { color: var(--green); }
+.upd-list li.bad .upd-st { color: var(--red); }
+.upd-bar { height: 6px; margin-top: 6px; border-radius: 3px; background: color-mix(in srgb, var(--text) 8%, transparent); overflow: hidden; }
+.upd-bar i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--cyan); transition: width .4s ease; }
+.upd-list li.ok .upd-bar i { background: var(--green); }
+.upd-list li.bad .upd-bar i { background: var(--red); }
+.upd-list li.wait .upd-bar i { background: linear-gradient(90deg, var(--cyan) 0 40%, color-mix(in srgb, var(--cyan) 45%, transparent) 50%, var(--cyan) 60% 100%); background-size: 200% 100%; animation: upd-wait 1.2s linear infinite; }
+@keyframes upd-wait { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 .run-hint { display: flex; gap: 6px; align-items: flex-start; margin: 10px 0 0; font-size: 12px; line-height: 1.5; }
 .run-hint .i { flex: none; width: 13px; height: 13px; margin-top: 2px; color: var(--orange); }
 .run-hint code { color: var(--text); padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, var(--text) 7%, transparent); white-space: nowrap; }

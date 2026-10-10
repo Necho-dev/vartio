@@ -139,6 +139,19 @@ interface BatchResult {
   message?: string;
 }
 
+/** guest.UpgradeProgress from GET /upgrade. */
+interface UpgradeProgress {
+  id: string;
+  from?: string;
+  to?: string;
+  stage: "queued" | "download" | "verify" | "selftest" | "restart" | "done" | "failed" | "rolled_back";
+  done?: number;
+  total?: number;
+  message?: string;
+  started: string;
+  updated: string;
+}
+
 /** monitor.Series; every array is aligned to t (unix ms). */
 interface Series {
   stepSec: number;

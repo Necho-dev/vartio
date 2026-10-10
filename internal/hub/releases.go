@@ -155,7 +155,59 @@ func (h *Hub) handleReleases(w http.ResponseWriter, r *http.Request) error {
 	return writeJSON(w, out)
 }
 
-// Upgrade asks one agent to install version ("" = latest).
+// upgradeKeep is how long finished upgrades stay visible in GET /upgrade.
+const upgradeKeep = 30 * time.Minute
+
+// progress updates the device's in-flight upgrade, if any.
+func (h *Hub) progress(key string, fn func(*UpgradeProgress)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if p := h.upgrades[key]; p != nil && !upgradeFinal(p.Stage) {
+		fn(p)
+		p.Updated = time.Now()
+	}
+}
+
+func upgradeFinal(stage string) bool {
+	return stage == UpgradeDone || stage == UpgradeFailed || stage == UpgradeRolledBack
+}
+
+// settleUpgrade closes an upgrade waiting for the restart once the agent says hello again.
+func (h *Hub) settleUpgrade(key string, hello Hello) {
+	h.progress(key, func(p *UpgradeProgress) {
+		if p.Stage != UpgradeRestart {
+			return
+		}
+		switch r := hello.Upgrade; {
+		case r != nil && !r.OK:
+			p.Stage, p.Message = UpgradeRolledBack, r.Error
+		case hello.Version == p.To:
+			p.Stage = UpgradeDone
+		}
+	})
+}
+
+// Upgrades lists recent upgrades, newest first.
+func (h *Hub) Upgrades() []UpgradeProgress {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]UpgradeProgress, 0, len(h.upgrades))
+	for k, p := range h.upgrades {
+		if time.Since(p.Updated) > upgradeKeep {
+			delete(h.upgrades, k)
+			continue
+		}
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Started.After(out[j].Started) })
+	return out
+}
+
+func (h *Hub) handleUpgrades(w http.ResponseWriter, r *http.Request) error {
+	return writeJSON(w, h.Upgrades())
+}
+
+// Upgrade asks one agent to install version ("" = latest) and tracks it in Upgrades.
 func (h *Hub) Upgrade(ctx context.Context, key, version string) (UpgradeResult, error) {
 	s, err := h.lookup(key)
 	if err != nil {
@@ -164,12 +216,42 @@ func (h *Hub) Upgrade(ctx context.Context, key, version string) (UpgradeResult, 
 	if s == nil {
 		return UpgradeResult{}, esxi.ErrGuestOffline()
 	}
+	id := s.hello.Key()
+	now := time.Now()
+	h.mu.Lock()
+	if p := h.upgrades[id]; p != nil && !upgradeFinal(p.Stage) && time.Since(p.Updated) < 5*time.Minute {
+		h.mu.Unlock()
+		return UpgradeResult{}, &esxi.Error{Status: http.StatusConflict, Code: "upgrade_busy", Message: "该主机已有升级在进行"}
+	}
+	h.upgrades[id] = &UpgradeProgress{ID: id, From: s.hello.Version, To: version, Stage: UpgradeQueued, Started: now, Updated: now}
+	h.mu.Unlock()
+	res, err := h.upgrade(ctx, s, version)
+	h.progress(id, func(p *UpgradeProgress) {
+		if res.To != "" {
+			p.To = res.To
+		}
+		if err != nil {
+			p.Stage, p.Message = UpgradeFailed, err.Error()
+			var api *esxi.Error
+			if errors.As(err, &api) {
+				p.Message = api.Message
+			}
+			return
+		}
+		p.Stage, p.Done = UpgradeRestart, p.Total
+	})
+	return res, err
+}
+
+func (h *Hub) upgrade(ctx context.Context, s *session, version string) (UpgradeResult, error) {
+	key := s.hello.Key()
 	hello := s.hello
 	if !hello.Has(CapUpgrade) {
 		return UpgradeResult{}, &esxi.Error{Status: http.StatusConflict, Code: "upgrade_unsupported",
 			Message: fmt.Sprintf("agent %s 不支持远程升级，需手动更新一次到支持远程升级的版本", hello.Version)}
 	}
 	var m *release.Manifest
+	var err error
 	if version == "" {
 		if m = h.Releases.Latest(); m == nil {
 			return UpgradeResult{}, &esxi.Error{Status: http.StatusNotFound, Code: "not_found", Message: "hub 上没有已签名的 agent 版本"}
@@ -185,6 +267,7 @@ func (h *Hub) Upgrade(ctx context.Context, key, version string) (UpgradeResult, 
 		return UpgradeResult{}, &esxi.Error{Status: http.StatusNotFound, Code: "not_found",
 			Message: fmt.Sprintf("%s 没有 %s/%s 的构建", m.Version, hello.OS, hello.Arch)}
 	}
+	h.progress(key, func(p *UpgradeProgress) { p.To, p.Stage, p.Total = m.Version, UpgradeDownload, a.Size })
 	raw, err := h.Call(ctx, key, MethodUpgrade, UpgradeRequest{Version: m.Version, Artifact: *a, URL: downloadPath(m.Version, a.OS, a.Arch), Mode: "push"})
 	if err != nil {
 		return UpgradeResult{}, err
