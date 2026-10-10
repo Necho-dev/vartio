@@ -112,6 +112,8 @@ func (s *session) info() SessionInfo {
 		Online:      true,
 		LastSeenUTC: s.seen.UTC().Format(time.RFC3339),
 		Version:     s.hello.Version,
+		DeviceID:    s.hello.Key(),
+		Device:      s.hello.Device,
 		BiosUUID:    s.hello.BiosUUID,
 		HostName:    s.hello.HostName,
 		MACs:        append([]string(nil), s.hello.MACs...),
@@ -124,6 +126,36 @@ func (s *session) touch() {
 	s.mu.Lock()
 	s.seen = time.Now()
 	s.mu.Unlock()
+}
+
+// alive pings the agent and reports whether any frame or pong arrives within d.
+func (s *session) alive(d time.Duration) bool {
+	s.mu.Lock()
+	t0 := time.Now()
+	err := s.conn.WriteControl(websocket.PingMessage, nil, t0.Add(d))
+	s.mu.Unlock()
+	if err != nil {
+		return false
+	}
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-s.closed:
+			return false
+		case <-deadline.C:
+			return false
+		case <-tick.C:
+			s.mu.Lock()
+			ok := s.seen.After(t0)
+			s.mu.Unlock()
+			if ok {
+				return true
+			}
+		}
+	}
 }
 
 func (s *session) close() {

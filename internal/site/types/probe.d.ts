@@ -75,13 +75,31 @@ interface Sample {
 /** monitor.Event */
 interface SystemEvent {
   ts: string;
-  kind: "online" | "offline" | string;
+  kind: string;
+  category: "lifecycle" | "change" | "audit";
+  level: "info" | "warn";
+  /** agent source IP at the time */
+  ip?: string;
+  /** agent version at the time */
+  version?: string;
+  /** operator IP (audit events) */
+  actor?: string;
   detail?: string;
+}
+
+/** guest.DeviceFacts: short digests of the fingerprint inputs. */
+interface DeviceFacts {
+  mid?: string;
+  hw?: string;
+  mac?: string;
 }
 
 /** monitor.SystemView; events only on GET /monitor/systems/{id}. */
 interface SystemView {
+  /** device fingerprint; BIOS UUID for agents before 1.8 */
+  id: string;
   biosUuid: string;
+  device?: DeviceFacts;
   name: string;
   hostname: string;
   version: string;

@@ -74,7 +74,7 @@ export function createTransfers(fm) {
     return new Promise((resolve) => {
       const xhr = new XMLHttpRequest();
       x.abort = () => { xhr.abort(); };
-      xhr.open("PUT", `${API}/sessions/${fm.bios}/files?path=${encodeURIComponent(x.dest)}${x.overwrite ? "&confirm=true" : ""}`);
+      xhr.open("PUT", `${API}/sessions/${fm.sid}/files?path=${encodeURIComponent(x.dest)}${x.overwrite ? "&confirm=true" : ""}`);
       if (state.token) xhr.setRequestHeader("Authorization", "Bearer " + state.token);
       xhr.upload.onprogress = (ev) => {
         x.done = ev.loaded;
@@ -109,7 +109,7 @@ export function createTransfers(fm) {
     tickQueue();
     try {
       const headers = state.token ? { Authorization: "Bearer " + state.token } : {};
-      const res = await fetch(`${API}/sessions/${fm.bios}/files/content?path=${encodeURIComponent(x.src)}`, { headers, signal: ctl.signal });
+      const res = await fetch(`${API}/sessions/${fm.sid}/files/content?path=${encodeURIComponent(x.src)}`, { headers, signal: ctl.signal });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         throw new Error((data && (data.message || data.code)) || res.statusText);

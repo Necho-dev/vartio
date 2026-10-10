@@ -15,47 +15,59 @@ import (
 	"govmomi-wmks/internal/esxi"
 )
 
-// Hub holds outbound agent sessions. Control plane never dials a guest.
+// Hub holds outbound agent sessions keyed by device id (Hello.Key). Control plane
+// never dials a guest. VM-scoped callers that only know a BIOS UUID still resolve
+// as long as exactly one online session reports it.
 type Hub struct {
 	Token string
 	// Ambiguous is optional. When true for a biosUuid, VM-scoped APIs return guest_unbound.
 	Ambiguous func(biosUUID string) bool
-	// OnConnect / OnDisconnect are optional; set before the hub serves traffic.
+	// OnConnect / OnDisconnect / OnReject / OnAudit are optional; set before the hub serves traffic.
 	OnConnect    func(SessionInfo)
 	OnDisconnect func(SessionInfo)
+	// OnReject reports a hello refused because the same device id is already live.
+	OnReject func(hello Hello, remote, reason string)
+	// OnAudit receives operator actions performed through the probe API.
+	OnAudit func(Audit)
 
-	mu      sync.Mutex
-	byBIOS  map[string]*session
-	tickets map[string]streamTicket
+	mu       sync.Mutex
+	sessions map[string]*session
+	tickets  map[string]streamTicket
+}
+
+// Audit is one operator action on a guest. Err is set when the agent refused or failed it.
+type Audit struct {
+	Key    string
+	Kind   string
+	Detail string
+	Actor  string
+	Err    string
 }
 
 type streamTicket struct {
 	ID        string
-	BiosUUID  string
+	Key       string
 	Kind      string
 	ExpiresAt time.Time
 }
 
 func NewHub(token string) *Hub {
 	return &Hub{
-		Token:   token,
-		byBIOS:  map[string]*session{},
-		tickets: map[string]streamTicket{},
+		Token:    token,
+		sessions: map[string]*session{},
+		tickets:  map[string]streamTicket{},
 	}
 }
 
-func (h *Hub) Online(biosUUID string) bool {
-	biosUUID = normUUID(biosUUID)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	_, ok := h.byBIOS[biosUUID]
-	return ok
+func (h *Hub) Online(key string) bool {
+	s, _ := h.lookup(key)
+	return s != nil
 }
 
-func (h *Hub) Info(biosUUID string) (SessionInfo, bool) {
-	s := h.get(biosUUID)
+func (h *Hub) Info(key string) (SessionInfo, bool) {
+	s, _ := h.lookup(key)
 	if s == nil {
-		return SessionInfo{Online: false, BiosUUID: normUUID(biosUUID)}, false
+		return SessionInfo{Online: false, BiosUUID: normUUID(key)}, false
 	}
 	return s.info(), true
 }
@@ -63,25 +75,72 @@ func (h *Hub) Info(biosUUID string) (SessionInfo, bool) {
 func (h *Hub) List() []SessionInfo {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]SessionInfo, 0, len(h.byBIOS))
-	for _, s := range h.byBIOS {
+	out := make([]SessionInfo, 0, len(h.sessions))
+	for _, s := range h.sessions {
 		out = append(out, s.info())
 	}
 	return out
 }
 
-func (h *Hub) get(biosUUID string) *session {
+// Resolve maps a device id or a BIOS UUID to the live session's device id.
+func (h *Hub) Resolve(key string) string {
+	if s, _ := h.lookup(key); s != nil {
+		return s.hello.Key()
+	}
+	return normUUID(key)
+}
+
+// lookup finds a session by device id, then by BIOS UUID. Two online agents sharing
+// a BIOS UUID (cloned VMs) make the BIOS form ambiguous.
+func (h *Hub) lookup(key string) (*session, error) {
+	key = normUUID(key)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.byBIOS[normUUID(biosUUID)]
+	if s := h.sessions[key]; s != nil {
+		return s, nil
+	}
+	var hit *session
+	for _, s := range h.sessions {
+		if s.hello.BiosUUID != key {
+			continue
+		}
+		if hit != nil {
+			return nil, esxi.ErrGuestUnbound("biosUuid %q is reported by more than one online agent; use the device id", key)
+		}
+		hit = s
+	}
+	return hit, nil
+}
+
+// Alive reports whether the session under exactly this device id still answers pings.
+func (h *Hub) Alive(key string) bool {
+	h.mu.Lock()
+	s := h.sessions[normUUID(key)]
+	h.mu.Unlock()
+	return s != nil && s.alive(3*time.Second)
+}
+
+// Kick closes the session under exactly this device id; OnDisconnect follows.
+func (h *Hub) Kick(key string) {
+	h.mu.Lock()
+	s := h.sessions[normUUID(key)]
+	h.mu.Unlock()
+	if s != nil {
+		s.close()
+	}
+}
+
+func (h *Hub) get(key string) *session {
+	s, _ := h.lookup(key)
+	return s
 }
 
 func (h *Hub) drop(s *session) {
+	key := s.hello.Key()
 	h.mu.Lock()
-	cur := h.byBIOS[normUUID(s.hello.BiosUUID)]
-	removed := cur == s
+	removed := h.sessions[key] == s
 	if removed {
-		delete(h.byBIOS, normUUID(s.hello.BiosUUID))
+		delete(h.sessions, key)
 	}
 	h.mu.Unlock()
 	s.close()
@@ -92,15 +151,29 @@ func (h *Hub) drop(s *session) {
 	}
 }
 
-func (h *Hub) accept(conn *websocket.Conn, hello Hello, remote string) *session {
-	hello.BiosUUID = normUUID(hello.BiosUUID)
-	s := newSession(conn, hello, remote)
+// admit refuses a hello whose device id belongs to a session that still answers
+// pings: that is a second machine with the same fingerprint, not a reconnect. A
+// half-open old session (agent already gone) is replaced.
+func (h *Hub) admit(hello Hello) error {
 	h.mu.Lock()
-	if old := h.byBIOS[hello.BiosUUID]; old != nil {
+	old := h.sessions[hello.Key()]
+	h.mu.Unlock()
+	if old == nil || !old.alive(3*time.Second) {
+		return nil
+	}
+	return &RPCError{Code: "device_conflict", Message: "device id " + hello.Key() + " is already connected from " + old.remote}
+}
+
+func (h *Hub) accept(conn *websocket.Conn, hello Hello, remote string) *session {
+	s := newSession(conn, hello, remote)
+	key := hello.Key()
+	h.mu.Lock()
+	old := h.sessions[key]
+	h.sessions[key] = s
+	h.mu.Unlock()
+	if old != nil {
 		old.close()
 	}
-	h.byBIOS[hello.BiosUUID] = s
-	h.mu.Unlock()
 	if h.OnConnect != nil {
 		h.OnConnect(s.info())
 	}
@@ -113,6 +186,17 @@ func (h *Hub) accept(conn *websocket.Conn, hello Hello, remote string) *session 
 	return s
 }
 
+func (h *Hub) audit(key, kind, detail, actor string, err error) {
+	if h.OnAudit == nil {
+		return
+	}
+	a := Audit{Key: h.Resolve(key), Kind: kind, Detail: detail, Actor: actor}
+	if err != nil {
+		a.Err = err.Error()
+	}
+	h.OnAudit(a)
+}
+
 func (h *Hub) CheckBound(biosUUID string) error {
 	if h.Ambiguous != nil && h.Ambiguous(biosUUID) {
 		return esxi.ErrGuestUnbound("guest agent biosUuid %q is unbound or ambiguous; use display name or moref", biosUUID)
@@ -120,11 +204,14 @@ func (h *Hub) CheckBound(biosUUID string) error {
 	return nil
 }
 
-func (h *Hub) Call(ctx context.Context, biosUUID, method string, params any) (json.RawMessage, error) {
-	if err := h.CheckBound(biosUUID); err != nil {
+func (h *Hub) Call(ctx context.Context, key, method string, params any) (json.RawMessage, error) {
+	if err := h.CheckBound(key); err != nil {
 		return nil, err
 	}
-	s := h.get(biosUUID)
+	s, err := h.lookup(key)
+	if err != nil {
+		return nil, err
+	}
 	if s == nil {
 		return nil, esxi.ErrGuestOffline()
 	}
@@ -149,19 +236,23 @@ func (h *Hub) Call(ctx context.Context, biosUUID, method string, params any) (js
 	return raw, nil
 }
 
-func (h *Hub) IssueTerm(biosUUID string) (map[string]string, error) {
-	return h.issueStream(biosUUID, "term", PathTermWS, "open in a browser; one-shot, expires in 2 minutes. view/type shell only. ESXi WSS is never used.")
+func (h *Hub) IssueTerm(key string) (map[string]string, error) {
+	return h.issueStream(key, "term", PathTermWS, "open in a browser; one-shot, expires in 2 minutes. view/type shell only. ESXi WSS is never used.")
 }
 
-func (h *Hub) IssueDisplay(biosUUID string) (map[string]string, error) {
-	return h.issueStream(biosUUID, "display", PathDisplayWS, "view-only JPEG ~2fps, max side 1920; no input. one-shot, expires in 2 minutes. ESXi WSS is never used.")
+func (h *Hub) IssueDisplay(key string) (map[string]string, error) {
+	return h.issueStream(key, "display", PathDisplayWS, "view-only JPEG ~2fps, max side 1920; no input. one-shot, expires in 2 minutes. ESXi WSS is never used.")
 }
 
-func (h *Hub) issueStream(biosUUID, kind, path, note string) (map[string]string, error) {
-	if err := h.CheckBound(biosUUID); err != nil {
+func (h *Hub) issueStream(key, kind, path, note string) (map[string]string, error) {
+	if err := h.CheckBound(key); err != nil {
 		return nil, err
 	}
-	if h.get(biosUUID) == nil {
+	s, err := h.lookup(key)
+	if err != nil {
+		return nil, err
+	}
+	if s == nil {
 		return nil, esxi.ErrGuestOffline()
 	}
 	id, err := randomID()
@@ -175,7 +266,7 @@ func (h *Hub) issueStream(biosUUID, kind, path, note string) (map[string]string,
 			delete(h.tickets, k)
 		}
 	}
-	h.tickets[id] = streamTicket{ID: id, BiosUUID: normUUID(biosUUID), Kind: kind, ExpiresAt: time.Now().Add(TicketTTL)}
+	h.tickets[id] = streamTicket{ID: id, Key: s.hello.Key(), Kind: kind, ExpiresAt: time.Now().Add(TicketTTL)}
 	h.mu.Unlock()
 	return map[string]string{
 		"ws":   path + "?id=" + id,

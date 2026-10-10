@@ -4,7 +4,7 @@ import { icon } from "../icons.js";
 import { fileIcon, listHTML, view } from "./common.js";
 import { ask } from "./dialog.js";
 
-// Recycle bin overlay: list, restore, purge and empty via /sessions/{bios}/trash.
+// Recycle bin overlay: list, restore, purge and empty via /sessions/{id}/trash.
 /** @param {import("./common.js").FilesCtx} fm */
 export async function openTrash(fm) {
   if (view.cur) view.cur.close();
@@ -66,7 +66,7 @@ export async function openTrash(fm) {
     render();
   };
   /** @param {TrashRequest} [json] @returns {Promise<TrashResult>} */
-  const trashAPI = (json) => api(`/sessions/${fm.bios}/trash`, json ? { method: "POST", json } : {});
+  const trashAPI = (json) => api(`/sessions/${fm.sid}/trash`, json ? { method: "POST", json } : {});
   const fail = (e) => {
     const msg = q("empty-msg");
     msg.hidden = false;

@@ -53,7 +53,7 @@ export async function preview(fm, it) {
   let buf;
   try {
     const headers = state.token ? { Authorization: "Bearer " + state.token } : {};
-    const res = await fetch(`${API}/sessions/${fm.bios}/files/content?path=${encodeURIComponent(it.path)}`, { headers, signal: ctl.signal });
+    const res = await fetch(`${API}/sessions/${fm.sid}/files/content?path=${encodeURIComponent(it.path)}&preview=1`, { headers, signal: ctl.signal });
     if (!res.ok) {
       const data = await res.json().catch(() => null);
       if (res.status === 401) showLogin();

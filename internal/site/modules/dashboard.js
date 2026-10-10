@@ -82,7 +82,7 @@ function filtered() {
     if (c.startsWith("os:") && osKey(s) !== c.slice(3)) return false;
     if (c.startsWith("tag:") && !(s.tags || []).includes(c.slice(4))) return false;
     if (q) {
-      const hay = [s.name, s.hostname, s.biosUuid, ip(s), s.remoteAddr, osLabel(s), ...(s.tags || [])].join(" ").toLowerCase();
+      const hay = [s.name, s.hostname, s.id, s.biosUuid, ip(s), s.remoteAddr, osLabel(s), ...(s.tags || [])].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -116,8 +116,8 @@ export function renderTable() {
 function row(s) {
   const l = s.latest, on = s.online && l;
   const up = s.online && s.info && s.info.bootTime ? Date.now() / 1000 - s.info.bootTime : 0;
-  return `<tr data-id="${esc(s.biosUuid)}" class="${s.online ? "" : "offline"}">
-    <td><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div>${esc(s.name || s.hostname || s.biosUuid)}<div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div></div></div></td>
+  return `<tr data-id="${esc(s.id)}" class="${s.online ? "" : "offline"}">
+    <td><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div>${esc(s.name || s.hostname || s.id)}<div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div></div></div></td>
     <td>${on ? meter(l.cpuPct) : `<span class="faint">—</span>`}</td>
     <td>${on ? meter(l.memPct) : `<span class="faint">—</span>`}</td>
     <td>${l ? meter(l.diskPct) : `<span class="faint">—</span>`}</td>

@@ -24,6 +24,8 @@ ICONS = [
     "chevron-left", "chevron-right", "arrow-up", "arrow-down", "arrow-up-down", "house", "refresh-cw",
     "folder-plus", "upload", "folder-up", "download", "pencil-line", "trash", "plus", "rotate-ccw",
     "triangle-alert", "folder", "file", "file-text", "file-image", "file-archive",
+    # events
+    "network", "package", "user", "copy", "check",
 ]
 
 TEMPLATE = """// @ts-check

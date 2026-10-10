@@ -58,7 +58,7 @@ export function openProcs(s) {
     if (loading) return;
     loading = true;
     try {
-      list = /** @type {ProcInfo[]} */ (await api(`/sessions/${encodeURIComponent(s.biosUuid)}/procs`));
+      list = /** @type {ProcInfo[]} */ (await api(`/sessions/${encodeURIComponent(s.id)}/procs`));
       at = new Date();
       draw();
     } catch (e) {

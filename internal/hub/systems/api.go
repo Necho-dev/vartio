@@ -4,7 +4,9 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,21 +45,42 @@ func (m *Monitor) Register(mux *http.ServeMux, authRequired bool) {
 	mux.HandleFunc("GET "+PathSystems, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, m.List())
 	})
-	mux.HandleFunc("GET "+PathSystems+"/{bios}", func(w http.ResponseWriter, r *http.Request) {
-		sys, ok := m.Get(r.PathValue("bios"))
+	mux.HandleFunc("GET "+PathSystems+"/{id}", func(w http.ResponseWriter, r *http.Request) {
+		sys, ok := m.Get(r.PathValue("id"))
 		if !ok {
 			writeErr(w, errNotFound)
 			return
 		}
 		out := detail{System: sys, Events: []Event{}}
 		if m.Store != nil {
-			if ev, err := m.Store.Events(r.Context(), sys.BiosUUID, 30); err == nil {
+			if ev, err := m.Store.Events(r.Context(), sys.ID, "", 50); err == nil {
 				out.Events = ev
 			}
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
-	mux.HandleFunc("PATCH "+PathSystems+"/{bios}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+PathSystems+"/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		sys, ok := m.Get(r.PathValue("id"))
+		if !ok {
+			writeErr(w, errNotFound)
+			return
+		}
+		if m.Store == nil {
+			writeJSON(w, http.StatusOK, []Event{})
+			return
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 500 {
+			limit = 100
+		}
+		ev, err := m.Store.Events(r.Context(), sys.ID, r.URL.Query().Get("category"), limit)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ev)
+	})
+	mux.HandleFunc("PATCH "+PathSystems+"/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name *string  `json:"name"`
 			Tags []string `json:"tags"`
@@ -66,21 +89,21 @@ func (m *Monitor) Register(mux *http.ServeMux, authRequired bool) {
 			writeErr(w, esxi.ErrBad("invalid json"))
 			return
 		}
-		sys, err := m.Update(r.Context(), r.PathValue("bios"), body.Name, body.Tags)
+		sys, err := m.Update(r.Context(), r.PathValue("id"), clientIP(r), body.Name, body.Tags)
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, sys)
 	})
-	mux.HandleFunc("DELETE "+PathSystems+"/{bios}", func(w http.ResponseWriter, r *http.Request) {
-		if err := m.Delete(r.Context(), r.PathValue("bios")); err != nil {
+	mux.HandleFunc("DELETE "+PathSystems+"/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := m.Delete(r.Context(), r.PathValue("id")); err != nil {
 			writeErr(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	mux.HandleFunc("GET "+PathSystems+"/{bios}/series", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+PathSystems+"/{id}/series", func(w http.ResponseWriter, r *http.Request) {
 		span, ok := ranges[r.URL.Query().Get("range")]
 		if !ok {
 			span = time.Hour
@@ -90,7 +113,12 @@ func (m *Monitor) Register(mux *http.ServeMux, authRequired bool) {
 			writeJSON(w, http.StatusOK, newSeries(step))
 			return
 		}
-		out, err := m.Store.Series(r.Context(), strings.ToLower(r.PathValue("bios")), time.Now().Add(-span), step)
+		sys, ok := m.Get(r.PathValue("id"))
+		if !ok {
+			writeErr(w, errNotFound)
+			return
+		}
+		out, err := m.Store.Series(r.Context(), sys.ID, time.Now().Add(-span), step)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -140,4 +168,16 @@ func writeErr(w http.ResponseWriter, err error) {
 		api = &esxi.Error{Status: http.StatusInternalServerError, Code: "error", Message: err.Error()}
 	}
 	writeJSON(w, api.Status, map[string]string{"code": api.Code, "message": api.Message})
+}
+
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if ip := strings.TrimSpace(strings.Split(xff, ",")[0]); ip != "" {
+			return ip
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }

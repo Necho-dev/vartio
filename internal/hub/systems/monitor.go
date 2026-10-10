@@ -15,19 +15,23 @@ import (
 	"govmomi-wmks/internal/guest"
 )
 
+// System is one monitored machine, keyed by the agent's device fingerprint (ID).
+// Agents before 1.8 have no fingerprint and use their BIOS UUID as ID.
 type System struct {
-	BiosUUID    string        `json:"biosUuid"`
-	Name        string        `json:"name"`
-	HostName    string        `json:"hostname"`
-	Version     string        `json:"version"`
-	RemoteAddr  string        `json:"remoteAddr"`
-	Tags        []string      `json:"tags"`
-	Online      bool          `json:"online"`
-	FirstSeen   time.Time     `json:"firstSeen"`
-	LastSeen    time.Time     `json:"lastSeen"`
-	ConnectedAt time.Time     `json:"connectedAt"`
-	Info        guest.SysInfo `json:"info"`
-	Latest      *Sample       `json:"latest,omitempty"`
+	ID          string             `json:"id"`
+	BiosUUID    string             `json:"biosUuid"`
+	Device      *guest.DeviceFacts `json:"device,omitempty"`
+	Name        string             `json:"name"`
+	HostName    string             `json:"hostname"`
+	Version     string             `json:"version"`
+	RemoteAddr  string             `json:"remoteAddr"`
+	Tags        []string           `json:"tags"`
+	Online      bool               `json:"online"`
+	FirstSeen   time.Time          `json:"firstSeen"`
+	LastSeen    time.Time          `json:"lastSeen"`
+	ConnectedAt time.Time          `json:"connectedAt"`
+	Info        guest.SysInfo      `json:"info"`
+	Latest      *Sample            `json:"latest,omitempty"`
 }
 
 type Sample struct {
@@ -55,10 +59,27 @@ type Sample struct {
 	NICs         []guest.NICInfo    `json:"nics,omitempty"`
 }
 
+// Event categories and levels.
+const (
+	CatLifecycle = "lifecycle"
+	CatChange    = "change"
+	CatAudit     = "audit"
+
+	LevelInfo = "info"
+	LevelWarn = "warn"
+)
+
+// Event is one entry in a system's history. IP and Version describe the agent
+// (its source address and build) at the time; Actor is the operator's IP for audits.
 type Event struct {
-	TS     time.Time `json:"ts"`
-	Kind   string    `json:"kind"`
-	Detail string    `json:"detail,omitempty"`
+	TS       time.Time `json:"ts"`
+	Kind     string    `json:"kind"`
+	Category string    `json:"category"`
+	Level    string    `json:"level"`
+	IP       string    `json:"ip,omitempty"`
+	Version  string    `json:"version,omitempty"`
+	Actor    string    `json:"actor,omitempty"`
+	Detail   string    `json:"detail,omitempty"`
 }
 
 type counters struct {
@@ -72,10 +93,11 @@ type Monitor struct {
 	Interval  time.Duration
 	Retention time.Duration
 
-	mu      sync.Mutex
-	systems map[string]*System
-	prev    map[string]counters
-	polling map[string]bool
+	mu       sync.Mutex
+	systems  map[string]*System
+	prev     map[string]counters
+	polling  map[string]bool
+	rejected map[string]time.Time
 }
 
 func New(hub *guest.Hub, store *Store, interval, retention time.Duration) *Monitor {
@@ -87,12 +109,15 @@ func New(hub *guest.Hub, store *Store, interval, retention time.Duration) *Monit
 	}
 	m := &Monitor{
 		Hub: hub, Store: store, Interval: interval, Retention: retention,
-		systems: map[string]*System{},
-		prev:    map[string]counters{},
-		polling: map[string]bool{},
+		systems:  map[string]*System{},
+		prev:     map[string]counters{},
+		polling:  map[string]bool{},
+		rejected: map[string]time.Time{},
 	}
 	hub.OnConnect = m.onConnect
 	hub.OnDisconnect = m.onDisconnect
+	hub.OnReject = m.onReject
+	hub.OnAudit = m.onAudit
 	return m
 }
 
@@ -107,7 +132,7 @@ func (m *Monitor) Load(ctx context.Context) error {
 	m.mu.Lock()
 	for _, s := range list {
 		s.Online = false
-		m.systems[s.BiosUUID] = s
+		m.systems[s.ID] = s
 	}
 	m.mu.Unlock()
 	return nil
@@ -125,7 +150,7 @@ func (m *Monitor) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			for _, s := range m.Hub.List() {
-				go m.poll(ctx, s.BiosUUID)
+				go m.poll(ctx, s.DeviceID)
 			}
 		case <-prune.C:
 			m.prune(ctx)
@@ -148,11 +173,52 @@ func (m *Monitor) prune(ctx context.Context) {
 
 func (m *Monitor) onConnect(info guest.SessionInfo) {
 	at := parseTime(info.ConnectedAt)
+	key := info.DeviceID
+	var events []Event
 	m.mu.Lock()
-	sys := m.systems[info.BiosUUID]
+	var old *System
+	why, oldOnline := "", false
+	if m.systems[key] == nil {
+		old, why = m.adoptLocked(info)
+		oldOnline = old != nil && old.Online
+	}
+	m.mu.Unlock()
+	// The old agent may still look online for a moment after a restart; only a
+	// session that no longer answers pings is the same machine coming back.
+	if oldOnline {
+		if m.Hub.Alive(old.ID) {
+			old = nil
+		} else {
+			m.Hub.Kick(old.ID)
+		}
+	}
+	m.mu.Lock()
+	sys := m.systems[key]
+	rekeyFrom := ""
+	if sys == nil && old != nil && m.systems[old.ID] == old {
+		rekeyFrom = old.ID
+		delete(m.systems, old.ID)
+		delete(m.prev, old.ID)
+		old.ID = key
+		sys = old
+		m.systems[key] = sys
+		events = append(events, Event{Kind: "rekey", Category: CatLifecycle, Level: LevelWarn,
+			Detail: why + "：" + rekeyFrom + " → " + key})
+	}
 	if sys == nil {
-		sys = &System{BiosUUID: info.BiosUUID, Name: info.HostName, Tags: []string{}, FirstSeen: at}
-		m.systems[info.BiosUUID] = sys
+		sys = &System{ID: key, Name: info.HostName, Tags: []string{}, FirstSeen: at}
+		m.systems[key] = sys
+	}
+	events = append(events, Event{Kind: "online", Category: CatLifecycle, Level: LevelInfo})
+	if sys.Version != "" && info.Version != "" && sys.Version != info.Version {
+		events = append(events, Event{Kind: "upgrade", Category: CatLifecycle, Level: LevelInfo, Detail: sys.Version + " → " + info.Version})
+	}
+	if sys.RemoteAddr != "" && info.RemoteAddr != "" && sys.RemoteAddr != info.RemoteAddr {
+		events = append(events, Event{Kind: "remote", Category: CatChange, Level: LevelInfo, Detail: sys.RemoteAddr + " → " + info.RemoteAddr})
+	}
+	sys.BiosUUID = info.BiosUUID
+	if info.Device != nil {
+		sys.Device = info.Device
 	}
 	sys.HostName = info.HostName
 	sys.Version = info.Version
@@ -161,68 +227,178 @@ func (m *Monitor) onConnect(info guest.SessionInfo) {
 	sys.ConnectedAt = at
 	sys.LastSeen = at
 	snap := *sys
-	delete(m.prev, info.BiosUUID)
+	delete(m.prev, key)
 	m.mu.Unlock()
 	if m.Store != nil {
-		if err := m.Store.Connect(context.Background(), snap); err != nil {
-			log.Printf("monitor connect %s: %v", info.BiosUUID, err)
+		ctx := context.Background()
+		if rekeyFrom != "" {
+			if err := m.Store.Rekey(ctx, rekeyFrom, key); err != nil {
+				log.Printf("monitor rekey %s -> %s: %v", rekeyFrom, key, err)
+			}
+		}
+		if err := m.Store.Connect(ctx, snap); err != nil {
+			log.Printf("monitor connect %s: %v", key, err)
 		}
 	}
+	m.emit(key, time.Now(), events...)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		m.poll(context.Background(), info.BiosUUID)
+		m.poll(context.Background(), key)
 	}()
+}
+
+// adoptLocked finds the record a newly fingerprinted agent should inherit: its own
+// pre-fingerprint row (keyed by BIOS UUID), or a row whose fingerprint inputs still
+// match on two of three (e.g. only the NIC changed). Ambiguity adopts nothing. An
+// online candidate is returned too; the caller checks it is really gone.
+func (m *Monitor) adoptLocked(info guest.SessionInfo) (*System, string) {
+	var hit *System
+	why := ""
+	n := 0
+	for _, s := range m.systems {
+		switch {
+		case s.Device == nil && s.ID == info.BiosUUID && info.DeviceID != info.BiosUUID:
+			hit, why = s, "BIOS UUID 记录迁移为设备指纹"
+		case s.Device != nil && info.Device != nil && s.Device.Matches(info.Device) >= 2:
+			hit, why = s, "设备指纹变更（"+changedPart(s.Device, info.Device)+"）"
+		default:
+			continue
+		}
+		n++
+	}
+	if n != 1 {
+		return nil, ""
+	}
+	return hit, why
+}
+
+func changedPart(a, b *guest.DeviceFacts) string {
+	switch {
+	case a.MAC != b.MAC:
+		return "主网卡 MAC 变化"
+	case a.HW != b.HW:
+		return "硬件 UUID 变化"
+	default:
+		return "系统安装 ID 变化"
+	}
 }
 
 func (m *Monitor) onDisconnect(info guest.SessionInfo) {
 	now := time.Now()
+	key := info.DeviceID
+	detail := ""
 	m.mu.Lock()
-	if sys := m.systems[info.BiosUUID]; sys != nil {
-		sys.Online = false
-		sys.LastSeen = now
+	sys := m.systems[key]
+	if sys == nil || !sys.Online {
+		// already re-keyed to a new fingerprint, or never registered
+		m.mu.Unlock()
+		return
 	}
-	delete(m.prev, info.BiosUUID)
+	sys.Online = false
+	sys.LastSeen = now
+	if !sys.ConnectedAt.IsZero() {
+		detail = "在线 " + now.Sub(sys.ConnectedAt).Round(time.Second).String()
+	}
+	delete(m.prev, key)
 	m.mu.Unlock()
 	if m.Store != nil {
-		if err := m.Store.Disconnect(context.Background(), info.BiosUUID, now); err != nil {
-			log.Printf("monitor disconnect %s: %v", info.BiosUUID, err)
+		if err := m.Store.Disconnect(context.Background(), key, now); err != nil {
+			log.Printf("monitor disconnect %s: %v", key, err)
+		}
+	}
+	m.emit(key, now, Event{Kind: "offline", Category: CatLifecycle, Level: LevelInfo, Detail: detail})
+}
+
+// onReject logs a fingerprint collision, at most every 10 minutes per device, since
+// the refused agent keeps retrying.
+func (m *Monitor) onReject(hello guest.Hello, remote, _ string) {
+	key := hello.Key()
+	now := time.Now()
+	m.mu.Lock()
+	_, known := m.systems[key]
+	last := m.rejected[key]
+	if known && now.Sub(last) >= 10*time.Minute {
+		m.rejected[key] = now
+	} else {
+		known = false
+	}
+	m.mu.Unlock()
+	if known {
+		m.emit(key, now, Event{Kind: "conflict", Category: CatLifecycle, Level: LevelWarn, IP: remote, Version: hello.Version,
+			Detail: "同指纹设备重复接入已拒绝（对方主机名 " + hello.HostName + "，BIOS " + hello.BiosUUID + "）"})
+	}
+}
+
+func (m *Monitor) onAudit(a guest.Audit) {
+	e := Event{Kind: a.Kind, Category: CatAudit, Level: LevelInfo, Actor: a.Actor, Detail: a.Detail}
+	if a.Err != "" {
+		e.Level = LevelWarn
+		e.Detail = strings.TrimSpace(e.Detail + " · 失败：" + a.Err)
+	}
+	m.emit(a.Key, time.Now(), e)
+}
+
+// emit stores events, stamping the agent's current IP and version where unset.
+func (m *Monitor) emit(id string, at time.Time, events ...Event) {
+	if m.Store == nil || len(events) == 0 {
+		return
+	}
+	m.mu.Lock()
+	var ip, ver string
+	if s := m.systems[id]; s != nil {
+		ip, ver = s.RemoteAddr, s.Version
+	}
+	m.mu.Unlock()
+	for _, e := range events {
+		if e.TS.IsZero() {
+			e.TS = at
+		}
+		if e.IP == "" {
+			e.IP = ip
+		}
+		if e.Version == "" {
+			e.Version = ver
+		}
+		if err := m.Store.AddEvent(context.Background(), id, e); err != nil {
+			log.Printf("monitor event %s %s: %v", id, e.Kind, err)
 		}
 	}
 }
 
-func (m *Monitor) poll(ctx context.Context, bios string) {
+func (m *Monitor) poll(ctx context.Context, id string) {
 	m.mu.Lock()
-	if m.polling[bios] {
+	if m.polling[id] {
 		m.mu.Unlock()
 		return
 	}
-	m.polling[bios] = true
+	m.polling[id] = true
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
-		delete(m.polling, bios)
+		delete(m.polling, id)
 		m.mu.Unlock()
 	}()
 
 	c, cancel := context.WithTimeout(ctx, guest.ListTimeout)
 	defer cancel()
 	start := time.Now()
-	met, err := m.Hub.Metrics(c, bios)
+	met, err := m.Hub.Metrics(c, id)
 	if isNotImplemented(err) {
-		met, err = m.legacy(c, bios)
+		met, err = m.legacy(c, id)
 	}
 	if err != nil {
-		log.Printf("monitor poll %s: %v", bios, err)
+		log.Printf("monitor poll %s: %v", id, err)
 		return
 	}
-	smp := m.derive(bios, met, time.Since(start))
+	smp := m.derive(id, met, time.Since(start))
 
 	m.mu.Lock()
-	sys := m.systems[bios]
+	sys := m.systems[id]
 	if sys == nil {
 		m.mu.Unlock()
 		return
 	}
+	events := diff(sys.Info, sys.Latest, met.Info, &smp)
 	sys.Latest = &smp
 	sys.Info = met.Info
 	if met.Info.HostName != "" {
@@ -231,13 +407,14 @@ func (m *Monitor) poll(ctx context.Context, bios string) {
 	sys.LastSeen = smp.TS
 	m.mu.Unlock()
 	if m.Store != nil {
-		if err := m.Store.Record(context.Background(), bios, met.Info, smp); err != nil {
-			log.Printf("monitor record %s: %v", bios, err)
+		if err := m.Store.Record(context.Background(), id, met.Info, smp); err != nil {
+			log.Printf("monitor record %s: %v", id, err)
 		}
 	}
+	m.emit(id, smp.TS, events...)
 }
 
-func (m *Monitor) derive(bios string, met guest.Metrics, latency time.Duration) Sample {
+func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sample {
 	now := time.Now()
 	smp := Sample{
 		TS: now.UTC().Truncate(time.Second), CPUPct: met.CPUPct,
@@ -271,8 +448,8 @@ func (m *Monitor) derive(bios string, met guest.Metrics, latency time.Duration) 
 	}
 	cur := counters{at: now, read: met.DiskRead, write: met.DiskWrite, rx: met.NetRx, tx: met.NetTx}
 	m.mu.Lock()
-	prev, ok := m.prev[bios]
-	m.prev[bios] = cur
+	prev, ok := m.prev[id]
+	m.prev[id] = cur
 	m.mu.Unlock()
 	if ok {
 		dt := cur.at.Sub(prev.at).Seconds()
@@ -287,8 +464,8 @@ func (m *Monitor) derive(bios string, met guest.Metrics, latency time.Duration) 
 }
 
 // legacy maps a pre-1.2 agent's health reply onto Metrics so old agents still show up.
-func (m *Monitor) legacy(ctx context.Context, bios string) (guest.Metrics, error) {
-	h, err := m.Hub.Health(ctx, bios)
+func (m *Monitor) legacy(ctx context.Context, id string) (guest.Metrics, error) {
+	h, err := m.Hub.Health(ctx, id)
 	if err != nil {
 		return guest.Metrics{}, err
 	}
@@ -330,25 +507,42 @@ func (m *Monitor) List() []System {
 	sort.Slice(out, func(i, j int) bool {
 		a, b := strings.ToLower(out[i].Name), strings.ToLower(out[j].Name)
 		if a == b {
-			return out[i].BiosUUID < out[j].BiosUUID
+			return out[i].ID < out[j].ID
 		}
 		return a < b
 	})
 	return out
 }
 
-func (m *Monitor) Get(bios string) (System, bool) {
+// Get finds a system by device id, or by BIOS UUID when exactly one system has it.
+func (m *Monitor) Get(id string) (System, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := m.systems[strings.ToLower(bios)]
+	s := m.findLocked(id)
 	if s == nil {
 		return System{}, false
 	}
 	return *s, true
 }
 
-func (m *Monitor) Update(ctx context.Context, bios string, name *string, tags []string) (System, error) {
-	bios = strings.ToLower(bios)
+func (m *Monitor) findLocked(id string) *System {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if s := m.systems[id]; s != nil {
+		return s
+	}
+	var hit *System
+	for _, s := range m.systems {
+		if s.BiosUUID == id {
+			if hit != nil {
+				return nil
+			}
+			hit = s
+		}
+	}
+	return hit
+}
+
+func (m *Monitor) Update(ctx context.Context, id, actor string, name *string, tags []string) (System, error) {
 	if tags != nil {
 		tags = cleanTags(tags)
 	}
@@ -356,15 +550,30 @@ func (m *Monitor) Update(ctx context.Context, bios string, name *string, tags []
 		n := strings.TrimSpace(*name)
 		name = &n
 	}
+	m.mu.Lock()
+	s := m.findLocked(id)
+	if s == nil {
+		m.mu.Unlock()
+		return System{}, errNotFound
+	}
+	var changes []string
+	if name != nil && *name != s.Name && !(*name == "" && s.Name == s.HostName) {
+		changes = append(changes, "名称 "+s.Name+" → "+*name)
+	}
+	if tags != nil && strings.Join(tags, ",") != strings.Join(s.Tags, ",") {
+		changes = append(changes, "标签 ["+strings.Join(s.Tags, ", ")+"] → ["+strings.Join(tags, ", ")+"]")
+	}
+	key := s.ID
+	m.mu.Unlock()
 	if m.Store != nil {
-		if err := m.Store.UpdateMeta(ctx, bios, name, tags); err != nil && !errors.Is(err, errNotFound) {
+		if err := m.Store.UpdateMeta(ctx, key, name, tags); err != nil && !errors.Is(err, errNotFound) {
 			return System{}, err
 		}
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	s := m.systems[bios]
+	s = m.systems[key]
 	if s == nil {
+		m.mu.Unlock()
 		return System{}, errNotFound
 	}
 	if name != nil {
@@ -376,21 +585,35 @@ func (m *Monitor) Update(ctx context.Context, bios string, name *string, tags []
 	if tags != nil {
 		s.Tags = tags
 	}
-	return *s, nil
+	out := *s
+	m.mu.Unlock()
+	if len(changes) > 0 {
+		m.emit(key, time.Now(), Event{Kind: "meta", Category: CatAudit, Level: LevelInfo, Actor: actor, Detail: strings.Join(changes, "；")})
+	}
+	return out, nil
 }
 
-func (m *Monitor) Delete(ctx context.Context, bios string) error {
-	bios = strings.ToLower(bios)
-	if m.Hub.Online(bios) {
+func (m *Monitor) Delete(ctx context.Context, id string) error {
+	m.mu.Lock()
+	s := m.findLocked(id)
+	key := ""
+	if s != nil {
+		key = s.ID
+	}
+	m.mu.Unlock()
+	if key == "" {
+		return errNotFound
+	}
+	if m.Hub.Online(key) {
 		return esxi.ErrBad("system is online; stop the agent first")
 	}
 	if m.Store != nil {
-		if err := m.Store.Delete(ctx, bios); err != nil {
+		if err := m.Store.Delete(ctx, key); err != nil {
 			return err
 		}
 	}
 	m.mu.Lock()
-	delete(m.systems, bios)
+	delete(m.systems, key)
 	m.mu.Unlock()
 	return nil
 }

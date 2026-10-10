@@ -19,22 +19,34 @@ func readBIOSUUID() (string, error) {
 	if err == nil && !bogusUUID(id) {
 		return id, nil
 	}
-	k, kerr := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Cryptography`, registry.QUERY_VALUE|registry.WOW64_64KEY)
-	if kerr != nil {
-		if err != nil {
-			return "", err
-		}
-		return id, nil
+	if guid := readMachineID(); guid != "" {
+		return guid, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func readHardwareUUID() string {
+	id, err := readSMBIOSUUID()
+	if err != nil || bogusUUID(id) {
+		return ""
+	}
+	return id
+}
+
+func readMachineID() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Cryptography`, registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		return ""
 	}
 	defer k.Close()
-	guid, _, gerr := k.GetStringValue("MachineGuid")
-	if gerr != nil || strings.TrimSpace(guid) == "" {
-		if err != nil {
-			return "", err
-		}
-		return id, nil
+	guid, _, err := k.GetStringValue("MachineGuid")
+	if err != nil {
+		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(guid)), nil
+	return strings.ToLower(strings.TrimSpace(guid))
 }
 
 func bogusUUID(id string) bool {

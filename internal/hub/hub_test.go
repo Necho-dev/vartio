@@ -41,19 +41,24 @@ func TestHubHealthAndReplaceAndOffline(t *testing.T) {
 		t.Fatalf("exec %+v %v", ex, err)
 	}
 
+	if ack := dialAck(t, wsURL, Hello{BiosUUID: "aa-bb", HostName: "two"}); ack.OK || ack.Code != "device_conflict" {
+		t.Fatalf("live duplicate must be refused, got %+v", ack)
+	}
+
+	_ = conn1.Close()
+	waitOffline(t, h, "aa-bb")
 	conn2 := dialHello(t, wsURL, Hello{BiosUUID: "aa-bb", HostName: "two", Version: "t2"})
 	go fakeAgent(t, conn2, map[string]any{
 		MethodHealth: Health{CPU: CPUInfo{LogicalCPUs: 8}},
 	})
 	waitOnline(t, h, "aa-bb")
-	time.Sleep(50 * time.Millisecond)
 
 	got, err = h.Health(context.Background(), "aa-bb")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.CPU.LogicalCPUs != 8 {
-		t.Fatalf("expected replacement session, got %+v", got)
+		t.Fatalf("expected reconnected session, got %+v", got)
 	}
 
 	_ = conn2.Close()
@@ -71,6 +76,60 @@ func TestHubHealthAndReplaceAndOffline(t *testing.T) {
 	var api *esxi.Error
 	if !errors.As(err, &api) || api.Code != "guest_offline" {
 		t.Fatalf("want guest_offline, got %v", err)
+	}
+}
+
+// A session that stopped answering pings (agent gone, TCP half-open) is replaced.
+func TestHubReplacesDeadSession(t *testing.T) {
+	h := NewHub("")
+	srv := httptest.NewServer(h.DevHandler())
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/probe/connect"
+	_ = dialHello(t, wsURL, Hello{BiosUUID: "b1", DeviceID: "dev-1"}) // never reads: no pongs
+	waitOnline(t, h, "dev-1")
+	conn := dialHello(t, wsURL, Hello{BiosUUID: "b1", DeviceID: "dev-1", HostName: "new"})
+	go fakeAgent(t, conn, nil)
+	if info, _ := h.Info("dev-1"); info.HostName != "new" {
+		t.Fatalf("want replacement, got %+v", info)
+	}
+}
+
+// Cloned VMs share a BIOS UUID but differ in device id: both stay online, the BIOS
+// form becomes ambiguous and the device id still routes.
+func TestHubDeviceIDAndSharedBIOS(t *testing.T) {
+	h := NewHub("")
+	srv := httptest.NewServer(h.DevHandler())
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/probe/connect"
+	c1 := dialHello(t, wsURL, Hello{BiosUUID: "same", DeviceID: "AAA"})
+	go fakeAgent(t, c1, map[string]any{MethodHealth: Health{CPU: CPUInfo{LogicalCPUs: 1}}})
+	waitOnline(t, h, "aaa")
+	if got, err := h.Health(context.Background(), "same"); err != nil || got.CPU.LogicalCPUs != 1 {
+		t.Fatalf("unique bios should resolve: %+v %v", got, err)
+	}
+	c2 := dialHello(t, wsURL, Hello{BiosUUID: "same", DeviceID: "bbb"})
+	go fakeAgent(t, c2, map[string]any{MethodHealth: Health{CPU: CPUInfo{LogicalCPUs: 2}}})
+	waitOnline(t, h, "bbb")
+	if got, err := h.Health(context.Background(), "bbb"); err != nil || got.CPU.LogicalCPUs != 2 {
+		t.Fatalf("device id should route: %+v %v", got, err)
+	}
+	_, err := h.Health(context.Background(), "same")
+	var api *esxi.Error
+	if !errors.As(err, &api) || api.Code != "guest_unbound" {
+		t.Fatalf("shared bios want guest_unbound, got %v", err)
+	}
+	if len(h.List()) != 2 {
+		t.Fatalf("both clones online, got %d", len(h.List()))
+	}
+}
+
+func TestDeviceFactsMatches(t *testing.T) {
+	a := &DeviceFacts{MID: "m", HW: "h", MAC: "x"}
+	if n := a.Matches(&DeviceFacts{MID: "m", HW: "h", MAC: "y"}); n != 2 {
+		t.Fatalf("want 2, got %d", n)
+	}
+	if n := a.Matches(&DeviceFacts{HW: "h"}); n != 1 {
+		t.Fatalf("empty parts must not match, got %d", n)
 	}
 }
 
@@ -146,6 +205,35 @@ func TestConfirmRequired(t *testing.T) {
 	if !errors.As(err, &api) || api.Code != "confirm_required" {
 		t.Fatalf("got %v", err)
 	}
+}
+
+func dialAck(t *testing.T, url string, hello Hello) HelloOK {
+	t.Helper()
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(hello); err != nil {
+		t.Fatal(err)
+	}
+	var ack HelloOK
+	if err := conn.ReadJSON(&ack); err != nil {
+		t.Fatal(err)
+	}
+	return ack
+}
+
+func waitOffline(t *testing.T, h *Hub, key string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !h.Online(key) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("session %s still online", key)
 }
 
 func dialHello(t *testing.T, url string, hello Hello) *websocket.Conn {

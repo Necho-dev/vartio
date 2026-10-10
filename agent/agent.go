@@ -10,9 +10,11 @@ import (
 	"syscall"
 
 	"github.com/joho/godotenv"
+
+	"govmomi-wmks/internal/guest"
 )
 
-const agentVersion = "1.7.1"
+const agentVersion = "1.8.0"
 
 func main() {
 	loadEnv()
@@ -20,7 +22,7 @@ func main() {
 		os.Exit(runServiceCommand(os.Args[2:]))
 	}
 	cfg := loadConfig()
-	log.Printf("probe-agent %s control=%s bios=%s", agentVersion, cfg.URL, cfg.BiosUUID)
+	log.Printf("probe-agent %s control=%s device=%s bios=%s", agentVersion, cfg.URL, cfg.DeviceID, cfg.BiosUUID)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := serve(ctx, cfg); err != nil && ctx.Err() == nil {
@@ -43,6 +45,8 @@ type config struct {
 	URL      string
 	Token    string
 	BiosUUID string
+	DeviceID string
+	Device   *guest.DeviceFacts
 	Watches  []watchSpec
 }
 
@@ -76,7 +80,8 @@ func loadConfig() config {
 	for _, n := range splitCSV(os.Getenv("GUEST_WATCH_SERVICES")) {
 		watches = append(watches, watchSpec{Kind: "service", Name: n})
 	}
-	return config{URL: url, Token: token, BiosUUID: bios, Watches: watches}
+	id, facts := deviceID()
+	return config{URL: url, Token: token, BiosUUID: bios, DeviceID: id, Device: facts, Watches: watches}
 }
 
 func splitCSV(s string) []string {

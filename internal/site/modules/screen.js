@@ -9,7 +9,7 @@ export async function openScreen(s) {
     () => { if (ws) ws.close(); if (url) URL.revokeObjectURL(url); }, { wide: true, fullscreen: true });
   const t0 = Date.now();
   try {
-    const tk = await api(`/sessions/${encodeURIComponent(s.biosUuid)}/display`, { method: "POST" });
+    const tk = await api(`/sessions/${encodeURIComponent(s.id)}/display`, { method: "POST" });
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${proto}//${location.host}${tk.ws}`);
     ws.binaryType = "blob";

@@ -65,25 +65,47 @@ func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hello.BiosUUID = normUUID(hello.BiosUUID)
+	hello.DeviceID = normUUID(hello.DeviceID)
 	if hello.BiosUUID == "" {
 		_ = conn.WriteJSON(Frame{Error: &FrameError{Code: "bad_request", Message: "biosUuid required"}})
 		_ = conn.Close()
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
+	remote := clientIP(r)
+	if err := h.admit(hello); err != nil {
+		var rpc *RPCError
+		errors.As(err, &rpc)
+		_ = conn.WriteJSON(HelloOK{OK: false, Code: rpc.Code, Message: rpc.Message})
+		_ = conn.Close()
+		log.Printf("guest rejected device=%s bios=%s from=%s: %s", hello.Key(), hello.BiosUUID, remote, rpc.Message)
+		if h.OnReject != nil {
+			h.OnReject(hello, remote, rpc.Message)
+		}
+		return
+	}
 	if err := conn.WriteJSON(HelloOK{OK: true}); err != nil {
 		_ = conn.Close()
 		return
 	}
-	remote := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(remote); err == nil {
-		remote = host
-	}
 	h.accept(conn, hello, remote)
-	log.Printf("guest connected bios=%s host=%s ver=%s from=%s", hello.BiosUUID, hello.HostName, hello.Version, remote)
+	log.Printf("guest connected device=%s bios=%s host=%s ver=%s from=%s", hello.Key(), hello.BiosUUID, hello.HostName, hello.Version, remote)
 }
 
-// DevHandler is the local /server mux: sessions keyed by biosUuid, no ESXi.
+// clientIP is the peer address without port; a reverse proxy's X-Forwarded-For wins.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if ip := strings.TrimSpace(strings.Split(xff, ",")[0]); ip != "" {
+			return ip
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// DevHandler is the local /server mux: sessions keyed by device id (or biosUuid), no ESXi.
 func (h *Hub) DevHandler() http.Handler {
 	mux := http.NewServeMux()
 	h.RegisterDev(mux)
@@ -94,25 +116,25 @@ func (h *Hub) DevHandler() http.Handler {
 func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathConnect, h.HandleConnect)
 	mux.HandleFunc("GET "+PathSessions, h.wrap(h.handleSessions))
-	mux.HandleFunc("GET "+PathSessions+"/{bios}", h.wrap(h.handleSessionInfo))
-	mux.HandleFunc("GET "+PathSessions+"/{bios}/health", h.wrap(h.handleHealth))
-	mux.HandleFunc("GET "+PathSessions+"/{bios}/procs", h.wrap(h.handleProcsGet))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/procs", h.wrap(h.handleProcsPost))
-	mux.HandleFunc("GET "+PathSessions+"/{bios}/services", h.wrap(h.handleServicesGet))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/services", h.wrap(h.handleServicesPost))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/exec", h.wrap(h.handleExec))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/term", h.wrap(h.handleTerm))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/power", h.wrap(h.handlePower))
+	mux.HandleFunc("GET "+PathSessions+"/{id}", h.wrap(h.handleSessionInfo))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/health", h.wrap(h.handleHealth))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/procs", h.wrap(h.handleProcsGet))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/procs", h.wrap(h.handleProcsPost))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/services", h.wrap(h.handleServicesGet))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/services", h.wrap(h.handleServicesPost))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/exec", h.wrap(h.handleExec))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/term", h.wrap(h.handleTerm))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/power", h.wrap(h.handlePower))
 	mux.HandleFunc("GET "+PathTermWS, h.HandleTermWS)
 	mux.HandleFunc("GET "+PathDisplayWS, h.HandleDisplayWS)
-	mux.HandleFunc("GET "+PathSessions+"/{bios}/display", h.wrap(h.handleDisplayGet))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/display", h.wrap(h.handleDisplayPost))
-	mux.HandleFunc("GET "+PathSessions+"/{bios}/files", h.wrap(h.handleFilesList))
-	mux.HandleFunc("PUT "+PathSessions+"/{bios}/files", h.wrap(h.handleFilesPut))
-	mux.HandleFunc("GET "+PathSessions+"/{bios}/files/content", h.wrap(h.handleFilesContent))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/files/op", h.wrap(h.handleFilesOp))
-	mux.HandleFunc("GET "+PathSessions+"/{bios}/trash", h.wrap(h.handleTrashList))
-	mux.HandleFunc("POST "+PathSessions+"/{bios}/trash", h.wrap(h.handleTrashOp))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/display", h.wrap(h.handleDisplayGet))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/display", h.wrap(h.handleDisplayPost))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/files", h.wrap(h.handleFilesList))
+	mux.HandleFunc("PUT "+PathSessions+"/{id}/files", h.wrap(h.handleFilesPut))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/files/content", h.wrap(h.handleFilesContent))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/files/op", h.wrap(h.handleFilesOp))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/trash", h.wrap(h.handleTrashList))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/trash", h.wrap(h.handleTrashOp))
 }
 
 func (h *Hub) wrap(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
@@ -128,7 +150,7 @@ func (h *Hub) handleSessions(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleSessionInfo(w http.ResponseWriter, r *http.Request) error {
-	info, ok := h.Info(r.PathValue("bios"))
+	info, ok := h.Info(r.PathValue("id"))
 	if !ok {
 		return esxi.ErrGuestOffline()
 	}
@@ -136,7 +158,7 @@ func (h *Hub) handleSessionInfo(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleHealth(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.Health(r.Context(), r.PathValue("bios"))
+	out, err := h.Health(r.Context(), r.PathValue("id"))
 	if err != nil {
 		return err
 	}
@@ -144,7 +166,7 @@ func (h *Hub) handleHealth(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleProcsGet(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.Procs(r.Context(), r.PathValue("bios"))
+	out, err := h.Procs(r.Context(), r.PathValue("id"))
 	if err != nil {
 		return err
 	}
@@ -158,7 +180,8 @@ func (h *Hub) handleProcsPost(w http.ResponseWriter, r *http.Request) error {
 		Confirm bool   `json:"confirm"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	out, err := h.ProcAction(r.Context(), r.PathValue("bios"), body.Name, body.Action, confirmed(r, body.Confirm))
+	out, err := h.ProcAction(r.Context(), r.PathValue("id"), body.Name, body.Action, confirmed(r, body.Confirm))
+	h.record(r, "proc."+body.Action, body.Name, err)
 	if err != nil {
 		return err
 	}
@@ -166,7 +189,7 @@ func (h *Hub) handleProcsPost(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleServicesGet(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.Services(r.Context(), r.PathValue("bios"))
+	out, err := h.Services(r.Context(), r.PathValue("id"))
 	if err != nil {
 		return err
 	}
@@ -180,7 +203,8 @@ func (h *Hub) handleServicesPost(w http.ResponseWriter, r *http.Request) error {
 		Confirm bool   `json:"confirm"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	out, err := h.ServiceAction(r.Context(), r.PathValue("bios"), body.Name, body.Action, confirmed(r, body.Confirm))
+	out, err := h.ServiceAction(r.Context(), r.PathValue("id"), body.Name, body.Action, confirmed(r, body.Confirm))
+	h.record(r, "service."+body.Action, body.Name, err)
 	if err != nil {
 		return err
 	}
@@ -192,7 +216,15 @@ func (h *Hub) handleExec(w http.ResponseWriter, r *http.Request) error {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		return esxi.ErrBad("invalid json")
 	}
-	out, err := h.Exec(r.Context(), r.PathValue("bios"), req)
+	out, err := h.Exec(r.Context(), r.PathValue("id"), req)
+	detail := execLine(req)
+	if err == nil {
+		detail += " → exit " + strconv.Itoa(out.ExitCode)
+		if out.TimedOut {
+			detail += "（超时）"
+		}
+	}
+	h.record(r, "exec", detail, err)
 	if err != nil {
 		return err
 	}
@@ -200,7 +232,7 @@ func (h *Hub) handleExec(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleTerm(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.IssueTerm(r.PathValue("bios"))
+	out, err := h.IssueTerm(r.PathValue("id"))
 	if err != nil {
 		return err
 	}
@@ -213,7 +245,8 @@ func (h *Hub) handlePower(w http.ResponseWriter, r *http.Request) error {
 		Confirm bool   `json:"confirm"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	out, err := h.Power(r.Context(), r.PathValue("bios"), body.Action, confirmed(r, body.Confirm))
+	out, err := h.Power(r.Context(), r.PathValue("id"), body.Action, confirmed(r, body.Confirm))
+	h.record(r, "power."+body.Action, "", err)
 	if err != nil {
 		return err
 	}
@@ -230,7 +263,7 @@ func (h *Hub) handleDisplayGet(w http.ResponseWriter, _ *http.Request) error {
 }
 
 func (h *Hub) handleDisplayPost(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.IssueDisplay(r.PathValue("bios"))
+	out, err := h.IssueDisplay(r.PathValue("id"))
 	if err != nil {
 		return err
 	}
@@ -238,7 +271,7 @@ func (h *Hub) handleDisplayPost(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleFilesList(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.FilesList(r.Context(), r.PathValue("bios"), r.URL.Query().Get("path"))
+	out, err := h.FilesList(r.Context(), r.PathValue("id"), r.URL.Query().Get("path"))
 	if err != nil {
 		return err
 	}
@@ -248,7 +281,12 @@ func (h *Hub) handleFilesList(w http.ResponseWriter, r *http.Request) error {
 func (h *Hub) handleFilesContent(w http.ResponseWriter, r *http.Request) error {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
-	return h.WriteFile(w, ctx, r.PathValue("bios"), r.URL.Query().Get("path"))
+	path := r.URL.Query().Get("path")
+	err := h.WriteFile(w, ctx, r.PathValue("id"), path)
+	if r.URL.Query().Get("preview") == "" {
+		h.record(r, "file.download", path, err)
+	}
+	return err
 }
 
 func (h *Hub) handleFilesOp(w http.ResponseWriter, r *http.Request) error {
@@ -257,7 +295,14 @@ func (h *Hub) handleFilesOp(w http.ResponseWriter, r *http.Request) error {
 		return esxi.ErrBad("invalid json")
 	}
 	req.Confirm = confirmed(r, req.Confirm)
-	out, err := h.FilesOp(r.Context(), r.PathValue("bios"), req)
+	out, err := h.FilesOp(r.Context(), r.PathValue("id"), req)
+	if req.Op != FileOpZip {
+		detail := req.Path
+		if req.Op == FileOpRename {
+			detail += " → " + req.To
+		}
+		h.record(r, "file."+req.Op, detail, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -265,7 +310,7 @@ func (h *Hub) handleFilesOp(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleTrashList(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.Trash(r.Context(), r.PathValue("bios"), TrashRequest{Op: TrashList})
+	out, err := h.Trash(r.Context(), r.PathValue("id"), TrashRequest{Op: TrashList})
 	if err != nil {
 		return err
 	}
@@ -278,7 +323,17 @@ func (h *Hub) handleTrashOp(w http.ResponseWriter, r *http.Request) error {
 		return esxi.ErrBad("invalid json")
 	}
 	req.Confirm = confirmed(r, req.Confirm)
-	out, err := h.Trash(r.Context(), r.PathValue("bios"), req)
+	out, err := h.Trash(r.Context(), r.PathValue("id"), req)
+	detail := ""
+	switch {
+	case len(out.Paths) > 0:
+		detail = strings.Join(out.Paths, ", ")
+	case req.Op == TrashPurge:
+		detail = strconv.Itoa(len(req.IDs)) + " 项"
+	case req.Op == TrashEmpty && err == nil:
+		detail = strconv.Itoa(out.Done) + " 项"
+	}
+	h.record(r, "trash."+req.Op, detail, err)
 	if err != nil {
 		return err
 	}
@@ -294,7 +349,12 @@ func (h *Hub) handleFilesPut(w http.ResponseWriter, r *http.Request) error {
 	sha := strings.TrimSpace(r.Header.Get("X-Content-SHA256"))
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
-	out, err := h.ReadFile(ctx, r.PathValue("bios"), path, r.Body, r.ContentLength, sha, confirmed(r, qConfirm))
+	out, err := h.ReadFile(ctx, r.PathValue("id"), path, r.Body, r.ContentLength, sha, confirmed(r, qConfirm))
+	detail := path
+	if err == nil {
+		detail += " (" + sizeNote(out.Size) + ")"
+	}
+	h.record(r, "file.upload", detail, err)
 	if err != nil {
 		return err
 	}
@@ -307,7 +367,7 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ticket not found or already used", http.StatusGone)
 		return
 	}
-	s := h.get(t.BiosUUID)
+	s := h.get(t.Key)
 	if s == nil {
 		http.Error(w, "guest agent not connected", http.StatusConflict)
 		return
@@ -334,6 +394,11 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 		_ = browser.WriteMessage(websocket.TextMessage, []byte("term.open: "+err.Error()))
 		return
 	}
+	opened := time.Now()
+	h.audit(t.Key, "term.open", "", clientIP(r), nil)
+	defer func() {
+		h.audit(t.Key, "term.close", "时长 "+time.Since(opened).Round(time.Second).String(), clientIP(r), nil)
+	}()
 	defer func() {
 		// Unregistered means the PTY is gone or now owned by a newer terminal.
 		if !s.detachTerm(sink) {
@@ -424,7 +489,7 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ticket not found or already used", http.StatusGone)
 		return
 	}
-	s := h.get(t.BiosUUID)
+	s := h.get(t.Key)
 	if s == nil {
 		http.Error(w, "guest agent not connected", http.StatusConflict)
 		return
@@ -440,6 +505,11 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 		_ = browser.WriteMessage(websocket.TextMessage, []byte("display.open: "+err.Error()))
 		return
 	}
+	opened := time.Now()
+	h.audit(t.Key, "display.open", "", clientIP(r), nil)
+	defer func() {
+		h.audit(t.Key, "display.close", "时长 "+time.Since(opened).Round(time.Second).String(), clientIP(r), nil)
+	}()
 	s.mu.Lock()
 	s.displayID = t.ID
 	s.mu.Unlock()

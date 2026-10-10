@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -55,6 +56,8 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 
 	hello := guest.Hello{
 		BiosUUID: cfg.BiosUUID,
+		DeviceID: cfg.DeviceID,
+		Device:   cfg.Device,
 		HostName: hostname(),
 		Version:  agentVersion,
 		MACs:     listMACs(),
@@ -68,9 +71,16 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 		return false, err
 	}
 	if !ack.OK {
+		if ack.Message != "" {
+			return false, fmt.Errorf("%w: %s: %s", errHello, ack.Code, ack.Message)
+		}
 		return false, errHello
 	}
-	log.Printf("connected as %s", cfg.BiosUUID)
+	log.Printf("connected as %s", cfg.DeviceID)
+	// ReadJSON does not watch ctx; close the socket so shutdown is immediate and
+	// the hub sees the disconnect now rather than at the next poll.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	a := &agent{cfg: cfg, conn: conn, term: newTermHub(), display: newDisplayHub()}
 	defer a.term.close("")
 	defer a.display.close()

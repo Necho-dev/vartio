@@ -14,7 +14,8 @@ import (
 
 const schema = `
 CREATE TABLE IF NOT EXISTS probe_systems (
-	bios_uuid     text PRIMARY KEY,
+	device_id     text PRIMARY KEY,
+	bios_uuid     text NOT NULL DEFAULT '',
 	name          text NOT NULL DEFAULT '',
 	hostname      text NOT NULL DEFAULT '',
 	agent_version text NOT NULL DEFAULT '',
@@ -25,10 +26,11 @@ CREATE TABLE IF NOT EXISTS probe_systems (
 	online        boolean NOT NULL DEFAULT false,
 	first_seen    timestamptz NOT NULL DEFAULT now(),
 	last_seen     timestamptz NOT NULL DEFAULT now(),
-	connected_at  timestamptz
+	connected_at  timestamptz,
+	device        jsonb
 );
 CREATE TABLE IF NOT EXISTS probe_metrics (
-	bios_uuid      text NOT NULL REFERENCES probe_systems(bios_uuid) ON DELETE CASCADE,
+	device_id      text NOT NULL REFERENCES probe_systems(device_id) ON DELETE CASCADE ON UPDATE CASCADE,
 	ts             timestamptz NOT NULL,
 	cpu_pct        real NOT NULL,
 	mem_used       bigint NOT NULL,
@@ -44,20 +46,25 @@ CREATE TABLE IF NOT EXISTS probe_metrics (
 	load1          real NOT NULL DEFAULT 0,
 	temp_max       real,
 	procs          integer NOT NULL DEFAULT 0,
-	PRIMARY KEY (bios_uuid, ts)
+	disk_parts     jsonb,
+	PRIMARY KEY (device_id, ts)
 );
 CREATE TABLE IF NOT EXISTS probe_events (
 	id        bigserial PRIMARY KEY,
-	bios_uuid text NOT NULL REFERENCES probe_systems(bios_uuid) ON DELETE CASCADE,
+	device_id text NOT NULL REFERENCES probe_systems(device_id) ON DELETE CASCADE ON UPDATE CASCADE,
 	ts        timestamptz NOT NULL DEFAULT now(),
-	kind      text NOT NULL,
-	detail    text NOT NULL DEFAULT ''
+	kind          text NOT NULL,
+	category      text NOT NULL DEFAULT 'lifecycle',
+	level         text NOT NULL DEFAULT 'info',
+	ip            text NOT NULL DEFAULT '',
+	agent_version text NOT NULL DEFAULT '',
+	actor         text NOT NULL DEFAULT '',
+	detail        text NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS probe_events_bios_ts ON probe_events (bios_uuid, ts DESC);
-ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS disk_parts jsonb;
+CREATE INDEX IF NOT EXISTS probe_events_device_ts ON probe_events (device_id, ts DESC);
 `
 
-// Store persists systems, samples and online/offline events in PostgreSQL.
+// Store persists systems, samples and events in PostgreSQL.
 type Store struct {
 	db *pgxpool.Pool
 }
@@ -75,7 +82,11 @@ func OpenStore(ctx context.Context, dsn string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec(ctx, `UPDATE probe_systems SET online = false WHERE online`); err != nil {
+	if _, err := db.Exec(ctx, `
+		WITH was AS (UPDATE probe_systems SET online = false WHERE online
+		             RETURNING device_id, last_seen, remote_addr, agent_version)
+		INSERT INTO probe_events (device_id, ts, kind, category, level, ip, agent_version, detail)
+		SELECT device_id, last_seen, 'offline', 'lifecycle', 'info', remote_addr, agent_version, 'hub 重启，会话中断' FROM was`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -86,8 +97,8 @@ func (s *Store) Close() { s.db.Close() }
 
 func (s *Store) LoadSystems(ctx context.Context) ([]*System, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT bios_uuid, name, hostname, agent_version, remote_addr, tags, info, latest,
-		       first_seen, last_seen, connected_at
+		SELECT device_id, bios_uuid, name, hostname, agent_version, remote_addr, tags, info, latest,
+		       device, first_seen, last_seen, connected_at
 		FROM probe_systems`)
 	if err != nil {
 		return nil, err
@@ -96,13 +107,19 @@ func (s *Store) LoadSystems(ctx context.Context) ([]*System, error) {
 	var out []*System
 	for rows.Next() {
 		var sys System
-		var info, latest []byte
+		var info, latest, device []byte
 		var connected *time.Time
-		if err := rows.Scan(&sys.BiosUUID, &sys.Name, &sys.HostName, &sys.Version, &sys.RemoteAddr,
-			&sys.Tags, &info, &latest, &sys.FirstSeen, &sys.LastSeen, &connected); err != nil {
+		if err := rows.Scan(&sys.ID, &sys.BiosUUID, &sys.Name, &sys.HostName, &sys.Version, &sys.RemoteAddr,
+			&sys.Tags, &info, &latest, &device, &sys.FirstSeen, &sys.LastSeen, &connected); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(info, &sys.Info)
+		if len(device) > 0 {
+			var d guest.DeviceFacts
+			if json.Unmarshal(device, &d) == nil {
+				sys.Device = &d
+			}
+		}
 		if len(latest) > 0 {
 			var smp Sample
 			if json.Unmarshal(latest, &smp) == nil {
@@ -124,38 +141,44 @@ func (s *Store) LoadSystems(ctx context.Context) ([]*System, error) {
 }
 
 func (s *Store) Connect(ctx context.Context, sys System) error {
+	var device []byte
+	if sys.Device != nil {
+		device, _ = json.Marshal(sys.Device)
+	}
 	_, err := s.db.Exec(ctx, `
-		INSERT INTO probe_systems (bios_uuid, name, hostname, agent_version, remote_addr, online, first_seen, last_seen, connected_at)
-		VALUES ($1, $2, $3, $4, $5, true, $6, $6, $6)
-		ON CONFLICT (bios_uuid) DO UPDATE SET
-			hostname = EXCLUDED.hostname, agent_version = EXCLUDED.agent_version,
-			remote_addr = EXCLUDED.remote_addr, online = true,
+		INSERT INTO probe_systems (device_id, bios_uuid, name, hostname, agent_version, remote_addr, device, online, first_seen, last_seen, connected_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8, $8)
+		ON CONFLICT (device_id) DO UPDATE SET
+			bios_uuid = EXCLUDED.bios_uuid, hostname = EXCLUDED.hostname, agent_version = EXCLUDED.agent_version,
+			remote_addr = EXCLUDED.remote_addr, device = COALESCE(EXCLUDED.device, probe_systems.device), online = true,
 			last_seen = EXCLUDED.last_seen, connected_at = EXCLUDED.connected_at`,
-		sys.BiosUUID, sys.Name, sys.HostName, sys.Version, sys.RemoteAddr, sys.ConnectedAt)
-	if err != nil {
-		return err
-	}
-	return s.event(ctx, sys.BiosUUID, "online", "from "+sys.RemoteAddr+" agent "+sys.Version, sys.ConnectedAt)
-}
-
-func (s *Store) Disconnect(ctx context.Context, bios string, at time.Time) error {
-	if _, err := s.db.Exec(ctx, `UPDATE probe_systems SET online = false, last_seen = $2 WHERE bios_uuid = $1`, bios, at); err != nil {
-		return err
-	}
-	return s.event(ctx, bios, "offline", "", at)
-}
-
-func (s *Store) event(ctx context.Context, bios, kind, detail string, at time.Time) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO probe_events (bios_uuid, ts, kind, detail) VALUES ($1, $2, $3, $4)`, bios, at, kind, detail)
+		sys.ID, sys.BiosUUID, sys.Name, sys.HostName, sys.Version, sys.RemoteAddr, device, sys.ConnectedAt)
 	return err
 }
 
-func (s *Store) Record(ctx context.Context, bios string, info guest.SysInfo, smp Sample) error {
+// Rekey moves a system (and, by cascade, its metrics and events) to a new device id.
+func (s *Store) Rekey(ctx context.Context, from, to string) error {
+	_, err := s.db.Exec(ctx, `UPDATE probe_systems SET device_id = $2 WHERE device_id = $1`, from, to)
+	return err
+}
+
+func (s *Store) Disconnect(ctx context.Context, id string, at time.Time) error {
+	_, err := s.db.Exec(ctx, `UPDATE probe_systems SET online = false, last_seen = $2 WHERE device_id = $1`, id, at)
+	return err
+}
+
+func (s *Store) AddEvent(ctx context.Context, id string, e Event) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO probe_events (device_id, ts, kind, category, level, ip, agent_version, actor, detail)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, id, e.TS, e.Kind, e.Category, e.Level, e.IP, e.Version, e.Actor, e.Detail)
+	return err
+}
+
+func (s *Store) Record(ctx context.Context, id string, info guest.SysInfo, smp Sample) error {
 	infoJSON, _ := json.Marshal(info)
 	latestJSON, _ := json.Marshal(smp)
 	b := &pgx.Batch{}
-	b.Queue(`UPDATE probe_systems SET info = $2, latest = $3, last_seen = $4, hostname = COALESCE(NULLIF($5, ''), hostname) WHERE bios_uuid = $1`,
-		bios, infoJSON, latestJSON, smp.TS, info.HostName)
+	b.Queue(`UPDATE probe_systems SET info = $2, latest = $3, last_seen = $4, hostname = COALESCE(NULLIF($5, ''), hostname) WHERE device_id = $1`,
+		id, infoJSON, latestJSON, smp.TS, info.HostName)
 	var temp *float64
 	if smp.TempMax > 0 {
 		temp = &smp.TempMax
@@ -168,21 +191,21 @@ func (s *Store) Record(ctx context.Context, bios string, info guest.SysInfo, smp
 		}
 		parts, _ = json.Marshal(used)
 	}
-	b.Queue(`INSERT INTO probe_metrics (bios_uuid, ts, cpu_pct, mem_used, mem_total, swap_used, swap_total,
+	b.Queue(`INSERT INTO probe_metrics (device_id, ts, cpu_pct, mem_used, mem_total, swap_used, swap_total,
 			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, temp_max, procs, disk_parts)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT DO NOTHING`,
-		bios, smp.TS, smp.CPUPct, int64(smp.MemUsed), int64(smp.MemTotal), int64(smp.SwapUsed), int64(smp.SwapTotal),
+		id, smp.TS, smp.CPUPct, int64(smp.MemUsed), int64(smp.MemTotal), int64(smp.SwapUsed), int64(smp.SwapTotal),
 		int64(smp.DiskUsed), int64(smp.DiskTotal), smp.DiskReadBps, smp.DiskWriteBps, smp.NetRxBps, smp.NetTxBps,
 		smp.Load[0], temp, smp.Procs, parts)
 	return s.db.SendBatch(ctx, b).Close()
 }
 
-func (s *Store) UpdateMeta(ctx context.Context, bios string, name *string, tags []string) error {
+func (s *Store) UpdateMeta(ctx context.Context, id string, name *string, tags []string) error {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE probe_systems SET
 			name = COALESCE($2, name),
 			tags = COALESCE($3, tags)
-		WHERE bios_uuid = $1`, bios, name, tags)
+		WHERE device_id = $1`, id, name, tags)
 	if err != nil {
 		return err
 	}
@@ -192,13 +215,17 @@ func (s *Store) UpdateMeta(ctx context.Context, bios string, name *string, tags 
 	return nil
 }
 
-func (s *Store) Delete(ctx context.Context, bios string) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM probe_systems WHERE bios_uuid = $1`, bios)
+func (s *Store) Delete(ctx context.Context, id string) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM probe_systems WHERE device_id = $1`, id)
 	return err
 }
 
-func (s *Store) Events(ctx context.Context, bios string, limit int) ([]Event, error) {
-	rows, err := s.db.Query(ctx, `SELECT ts, kind, detail FROM probe_events WHERE bios_uuid = $1 ORDER BY ts DESC LIMIT $2`, bios, limit)
+// Events lists a system's newest events; category "" means all.
+func (s *Store) Events(ctx context.Context, id, category string, limit int) ([]Event, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT ts, kind, category, level, ip, agent_version, actor, detail FROM probe_events
+		WHERE device_id = $1 AND ($2 = '' OR category = $2)
+		ORDER BY ts DESC, id DESC LIMIT $3`, id, category, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +233,7 @@ func (s *Store) Events(ctx context.Context, bios string, limit int) ([]Event, er
 	out := []Event{}
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.TS, &e.Kind, &e.Detail); err != nil {
+		if err := rows.Scan(&e.TS, &e.Kind, &e.Category, &e.Level, &e.IP, &e.Version, &e.Actor, &e.Detail); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -215,7 +242,7 @@ func (s *Store) Events(ctx context.Context, bios string, limit int) ([]Event, er
 }
 
 // Series buckets samples with date_bin so each range returns a few hundred points.
-func (s *Store) Series(ctx context.Context, bios string, from time.Time, step time.Duration) (*Series, error) {
+func (s *Store) Series(ctx context.Context, id string, from time.Time, step time.Duration) (*Series, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b,
 			avg(cpu_pct), max(cpu_pct),
@@ -225,8 +252,8 @@ func (s *Store) Series(ctx context.Context, bios string, from time.Time, step ti
 			avg(net_rx_bps), avg(net_tx_bps),
 			avg(load1), max(temp_max), avg(procs)::float8
 		FROM probe_metrics
-		WHERE bios_uuid = $1 AND ts >= $2
-		GROUP BY b ORDER BY b`, bios, from, step.Seconds())
+		WHERE device_id = $1 AND ts >= $2
+		GROUP BY b ORDER BY b`, id, from, step.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -244,16 +271,16 @@ func (s *Store) Series(ctx context.Context, bios string, from time.Time, step ti
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return out, s.diskParts(ctx, out, bios, from, step)
+	return out, s.diskParts(ctx, out, id, from, step)
 }
 
 // diskParts fills Series.DiskParts with per-mount used bytes, aligned to out.T.
-func (s *Store) diskParts(ctx context.Context, out *Series, bios string, from time.Time, step time.Duration) error {
+func (s *Store) diskParts(ctx context.Context, out *Series, id string, from time.Time, step time.Duration) error {
 	rows, err := s.db.Query(ctx, `
 		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b, p.key, avg(p.value::float8)
 		FROM probe_metrics, jsonb_each_text(disk_parts) p
-		WHERE bios_uuid = $1 AND ts >= $2 AND disk_parts IS NOT NULL
-		GROUP BY b, p.key`, bios, from, step.Seconds())
+		WHERE device_id = $1 AND ts >= $2 AND disk_parts IS NOT NULL
+		GROUP BY b, p.key`, id, from, step.Seconds())
 	if err != nil {
 		return err
 	}

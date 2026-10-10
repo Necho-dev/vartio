@@ -134,7 +134,7 @@ export async function openTerm(s) {
     t.term.onTitleChange((x) => { t.title = x || ""; label(t); });
 
     try {
-      const tk = await api(`/sessions/${encodeURIComponent(s.biosUuid)}/term`, { method: "POST" });
+      const tk = await api(`/sessions/${encodeURIComponent(s.id)}/term`, { method: "POST" });
       if (closed || !tabs.includes(t)) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(`${proto}//${location.host}${tk.ws}&cols=${t.term.cols}&rows=${t.term.rows}`);

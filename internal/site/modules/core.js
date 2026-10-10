@@ -15,7 +15,7 @@ export const app = $("#app");
 /**
  * @type {{
  *   token: string, config: HubConfig | null, systems: SystemView[], q: string, chip: string,
- *   sort: { key: string, dir: number }, range: string, timers: number[],
+ *   sort: { key: string, dir: number }, range: string, evCat: string, timers: number[],
  * }}
  */
 export const state = {
@@ -26,6 +26,7 @@ export const state = {
   chip: "all",
   sort: { key: "name", dir: 1 },
   range: localStorage.getItem("probeHubRange") || "1h",
+  evCat: "",
   timers: [],
 };
 

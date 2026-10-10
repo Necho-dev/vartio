@@ -86,12 +86,46 @@ func (e *FrameError) Error() string {
 	return e.Code + ": " + e.Message
 }
 
+// Hello opens an agent session. DeviceID is the hardware fingerprint the hub keys
+// systems by; agents before 1.8 omit it and are keyed by BiosUUID instead.
 type Hello struct {
-	BiosUUID string   `json:"biosUuid"`
-	HostName string   `json:"hostname,omitempty"`
-	Version  string   `json:"version,omitempty"`
-	MACs     []string `json:"macs,omitempty"`
-	Caps     []string `json:"caps,omitempty"`
+	BiosUUID string       `json:"biosUuid"`
+	DeviceID string       `json:"deviceId,omitempty"`
+	Device   *DeviceFacts `json:"device,omitempty"`
+	HostName string       `json:"hostname,omitempty"`
+	Version  string       `json:"version,omitempty"`
+	MACs     []string     `json:"macs,omitempty"`
+	Caps     []string     `json:"caps,omitempty"`
+}
+
+// DeviceFacts are short digests of the fingerprint inputs, so the hub can match a
+// changed fingerprint to its old record without ever seeing the raw machine id.
+type DeviceFacts struct {
+	MID string `json:"mid,omitempty"` // OS install id (machine-id / MachineGuid / IOPlatformUUID)
+	HW  string `json:"hw,omitempty"`  // SMBIOS / platform hardware UUID
+	MAC string `json:"mac,omitempty"` // primary NIC
+}
+
+// Matches counts inputs that are present on both sides and equal.
+func (d *DeviceFacts) Matches(o *DeviceFacts) int {
+	if d == nil || o == nil {
+		return 0
+	}
+	n := 0
+	for _, p := range [][2]string{{d.MID, o.MID}, {d.HW, o.HW}, {d.MAC, o.MAC}} {
+		if p[0] != "" && p[0] == p[1] {
+			n++
+		}
+	}
+	return n
+}
+
+// Key is the session / system key: the fingerprint, or the BIOS UUID for old agents.
+func (h Hello) Key() string {
+	if h.DeviceID != "" {
+		return h.DeviceID
+	}
+	return h.BiosUUID
 }
 
 func (h Hello) Has(c string) bool {
@@ -104,7 +138,9 @@ func (h Hello) Has(c string) bool {
 }
 
 type HelloOK struct {
-	OK bool `json:"ok"`
+	OK      bool   `json:"ok"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type Health struct {
@@ -269,14 +305,16 @@ type TermOpenResult struct {
 }
 
 type SessionInfo struct {
-	Online      bool     `json:"online"`
-	LastSeenUTC string   `json:"lastSeenUtc,omitempty"`
-	Version     string   `json:"version,omitempty"`
-	BiosUUID    string   `json:"biosUuid,omitempty"`
-	HostName    string   `json:"hostname,omitempty"`
-	MACs        []string `json:"macs,omitempty"`
-	RemoteAddr  string   `json:"remoteAddr,omitempty"`
-	ConnectedAt string   `json:"connectedAt,omitempty"`
+	Online      bool         `json:"online"`
+	LastSeenUTC string       `json:"lastSeenUtc,omitempty"`
+	Version     string       `json:"version,omitempty"`
+	DeviceID    string       `json:"deviceId,omitempty"`
+	Device      *DeviceFacts `json:"device,omitempty"`
+	BiosUUID    string       `json:"biosUuid,omitempty"`
+	HostName    string       `json:"hostname,omitempty"`
+	MACs        []string     `json:"macs,omitempty"`
+	RemoteAddr  string       `json:"remoteAddr,omitempty"`
+	ConnectedAt string       `json:"connectedAt,omitempty"`
 }
 
 type DisplayOpenResult struct {

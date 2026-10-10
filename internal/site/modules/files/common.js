@@ -29,7 +29,7 @@ export const view = { cur: null };
 /**
  * What the preview, recycle bin and transfer modules need from the open file manager.
  * @typedef {{
- *   bios: string,
+ *   sid: string,
  *   st: FilesState,
  *   info: (msg: string) => void,
  *   join: (dir: string, name: string) => string,

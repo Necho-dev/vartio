@@ -14,7 +14,7 @@ const FILE_COLS = [["name", "名称"], ["mtime", "修改时间"], ["size", "大�
 // picker / drag & drop, downloads land in the browser's download folder.
 /** @param {SystemView} s */
 export function openFiles(s) {
-  const bios = encodeURIComponent(s.biosUuid);
+  const sid = encodeURIComponent(s.id);
   /** @type {import("./common.js").FilesState} */
   const st = {
     cwd: "", sep: "/", parent: "", home: "", roots: [], entries: [], sel: new Set(), anchor: null,
@@ -135,7 +135,7 @@ export function openFiles(s) {
     info("正在读取…");
     try {
       /** @type {FilesListResult} */
-      const r = await api(`/sessions/${bios}/files?path=${encodeURIComponent(path)}`);
+      const r = await api(`/sessions/${sid}/files?path=${encodeURIComponent(path)}`);
       if (st.closed) return;
       if (how === "push" && st.cwd && st.cwd !== r.path) { st.back.push(st.cwd); st.fwd = []; }
       st.cwd = r.path; st.sep = r.sep || (r.path.includes("\\") ? "\\" : "/");
@@ -163,7 +163,7 @@ export function openFiles(s) {
   let reloadTimer = 0;
   const reloadSoon = () => { clearTimeout(reloadTimer); reloadTimer = setTimeout(reload, 400); };
   /** @type {import("./common.js").FilesCtx} */
-  const fm = { bios, st, info, join, reloadSoon, download: (list) => download(list) };
+  const fm = { sid, st, info, join, reloadSoon, download: (list) => download(list) };
   const { download, upload } = createTransfers(fm);
 
   // ----- toolbar -----
@@ -229,7 +229,7 @@ export function openFiles(s) {
 
   // ----- file ops -----
   /** @param {FilesOpRequest} json @returns {Promise<FilesOpResult>} */
-  const op = (json) => api(`/sessions/${bios}/files/op`, { method: "POST", json });
+  const op = (json) => api(`/sessions/${sid}/files/op`, { method: "POST", json });
   $("#fmMkdir").addEventListener("click", async () => {
     const name = await ask({
       title: "新建文件夹", ok: "创建",

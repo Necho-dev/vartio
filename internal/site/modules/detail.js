@@ -38,21 +38,108 @@ export async function detail(id) {
     <section class="grid2">
       <div class="card panel"><h3>磁盘分区</h3><p class="desc">最新一次采样</p><div id="disks"></div></div>
       <div class="card panel"><h3>网络接口</h3><p class="desc">带 IPv4 的物理网卡</p><div id="nics"></div></div>
-      <div class="card panel"><h3>上下线事件</h3><p class="desc">探针 WSS 会话的建立与断开</p><ul class="events" id="events"></ul></div>
+      <div class="card panel"><div class="seg ev-seg" id="evSeg">${EV_CATS.map(([k, n]) => `<button data-c="${k}" class="${state.evCat === k ? "on" : ""}">${n}</button>`).join("")}</div>
+        <h3>事件记录</h3><p class="desc">上下线、重启、配置变化与运维操作</p><ul class="events" id="events"></ul></div>
       <div class="card panel"><h3>主机信息</h3><p class="desc">探针上报的静态信息</p><div id="info"></div></div>
     </section>`;
   renderHero(sys);
   renderInfo(sys);
+  renderEvents(sys.events || []);
+  $("#events").addEventListener("click", copyEvent);
+  $("#evSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    state.evCat = b.dataset.c;
+    $("#evSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    loadEvents(sys);
+  }));
   await loadSeries(sys);
   every(Math.max(5, state.config.intervalSec) * 1000, async () => {
     try {
       sys = await api("/monitor/systems/" + encodeURIComponent(id));
       renderHero(sys);
       renderInfo(sys);
+      if (state.evCat) loadEvents(sys); else renderEvents(sys.events || []);
       if (state.range === "1h" || state.range === "6h") await loadSeries(sys);
     } catch (e) { /* keep last view */ }
   });
   every(60000, () => { if (!(state.range === "1h" || state.range === "6h")) loadSeries(sys); });
+}
+
+const EV_CATS = [["", "全部"], ["lifecycle", "生命周期"], ["change", "配置变化"], ["audit", "运维操作"]];
+/** @type {Record<string, string>} */
+const EV_NAMES = {
+  online: "机器上线", offline: "机器离线", upgrade: "探针升级", reboot: "系统重启", rekey: "标识迁移", conflict: "指纹冲突",
+  remote: "来源 IP 变化", hostname: "主机名变更", os: "系统版本变更", kernel: "内核变更", cpu: "CPU 变更", memory: "内存变更", disk: "磁盘变更", nic: "网卡变更",
+  "term.open": "打开终端", "term.close": "关闭终端", "display.open": "查看画面", "display.close": "关闭画面", exec: "执行命令",
+  "power.reboot": "重启主机", "power.shutdown": "关闭主机", "proc.kill": "结束进程", "proc.start": "启动进程", "proc.stop": "停止进程",
+  "service.start": "启动服务", "service.stop": "停止服务", "service.restart": "重启服务",
+  "file.upload": "上传文件", "file.download": "下载文件", "file.mkdir": "新建目录", "file.rename": "重命名", "file.delete": "永久删除", "file.trash": "移入回收站",
+  "trash.restore": "还原文件", "trash.purge": "彻底删除", "trash.empty": "清空回收站", meta: "编辑信息",
+};
+
+/** @param {SystemView} s */
+async function loadEvents(s) {
+  const cat = state.evCat;
+  try {
+    const list = /** @type {SystemEvent[]} */ (await api(`/monitor/systems/${encodeURIComponent(s.id)}/events?limit=100${cat ? "&category=" + cat : ""}`));
+    if (cat === state.evCat) renderEvents(list);
+  } catch (e) { /* keep last view */ }
+}
+
+/** @type {SystemEvent[]} */
+let shownEvents = [];
+
+/** @param {SystemEvent} e */
+function eventText(e) {
+  return [new Date(e.ts).toLocaleString([], { hour12: false }), EV_NAMES[e.kind] || e.kind, e.detail,
+    e.ip && "探针 IP " + e.ip, e.version && "版本 " + e.version, e.actor && "操作者 " + e.actor].filter(Boolean).join(" · ");
+}
+
+/** @param {MouseEvent} ev */
+async function copyEvent(ev) {
+  const btn = /** @type {HTMLElement | null} */ (/** @type {HTMLElement} */ (ev.target).closest(".ev-copy"));
+  const e = btn && shownEvents[Number(btn.dataset.i)];
+  if (!btn || !e) return;
+  if (await copyText(eventText(e))) {
+    btn.innerHTML = icon("check");
+    btn.classList.add("done");
+    setTimeout(() => { btn.innerHTML = icon("copy"); btn.classList.remove("done"); }, 1200);
+  }
+}
+
+/** @param {string} text */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Plain-http LAN access has no async clipboard API.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;opacity:0";
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  }
+}
+
+/** @param {SystemEvent[]} ev */
+function renderEvents(ev) {
+  const box = $("#events");
+  if (!box) return;
+  shownEvents = ev;
+  if (!ev.length) { box.innerHTML = `<li class="faint">暂无事件</li>`; return; }
+  /** @param {"network" | "package" | "user"} ic @param {string} cls @param {string | undefined} v @param {string} tip */
+  const chip = (ic, cls, v, tip) => (v ? `<span class="ev-chip ${cls}" title="${tip}">${icon(ic)}${esc(v)}</span>` : "");
+  box.innerHTML = ev.map((e, i) => {
+    const cls = e.kind === "online" ? "up" : e.kind === "offline" ? "down" : e.level === "warn" ? "warn" : e.category;
+    const t = new Date(e.ts);
+    return `<li class="ev ev-${cls}"><time class="ev-time" datetime="${e.ts}"><b>${t.toLocaleTimeString([], { hour12: false })}</b>${t.toLocaleDateString()}</time><i class="ev-dot"></i>
+      <div class="ev-main"><span class="ev-kind">${esc(EV_NAMES[e.kind] || e.kind)}</span>${e.detail ? `<span class="ev-detail" title="${esc(e.detail)}">${esc(e.detail)}</span>` : ""}</div>
+      <button class="ev-copy" data-i="${i}" title="复制事件">${icon("copy")}</button>
+      <div class="ev-meta">${chip("network", "ip", e.ip, "探针来源 IP")}${chip("package", "ver", e.version, "探针版本")}${chip("user", "actor", e.actor, "操作者 IP")}</div></li>`;
+  }).join("");
 }
 
 /** @param {string} id @param {string} title @param {string} desc @param {boolean} [hidden] */
@@ -101,7 +188,7 @@ function renderHero(s) {
   const del = $("#delBtn");
   if (del) del.addEventListener("click", async () => {
     if (!confirm(`删除 ${s.name} 及其全部历史数据？`)) return;
-    try { await api("/monitor/systems/" + encodeURIComponent(s.biosUuid), { method: "DELETE" }); location.hash = "#/"; }
+    try { await api("/monitor/systems/" + encodeURIComponent(s.id), { method: "DELETE" }); location.hash = "#/"; }
     catch (e) { alert(e.message); }
   });
 }
@@ -115,9 +202,7 @@ function renderInfo(s) {
   const nics = l.nics || [];
   $("#nics").innerHTML = nics.length ? `<table class="kv-table"><tr><th>名称</th><th>IPv4</th><th>MAC</th><th>状态</th></tr>
     ${nics.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.ipv4 || "—")}</td><td>${esc(n.mac || "—")}</td><td>${n.up ? '<span style="color:var(--green)">up</span>' : '<span class="faint">down</span>'}</td></tr>`).join("")}</table>` : `<div class="faint">暂无</div>`;
-  const ev = s.events || [];
-  $("#events").innerHTML = ev.length ? ev.map((e) => `<li><span class="ts">${new Date(e.ts).toLocaleString()}</span><span class="ev-${e.kind}">${e.kind === "online" ? "● 上线" : "○ 离线"}</span><span class="muted">${esc(e.detail || "")}</span></li>`).join("") : `<li class="faint">暂无事件</li>`;
-  const kv = [["BIOS UUID", s.biosUuid], ["操作系统", [i.os, i.platform, i.platformVersion].filter(Boolean).join(" / ")], ["内核", i.kernel], ["架构", i.arch],
+  const kv = [["设备 ID", s.id], ["BIOS UUID", s.biosUuid], ["操作系统", [i.os, i.platform, i.platformVersion].filter(Boolean).join(" / ")], ["内核", i.kernel], ["架构", i.arch],
     ["CPU", i.cpuModel], ["核心/线程", i.cores ? `${i.cores} / ${i.threads}` : ""], ["进程数", l.procs], ["首次接入", s.firstSeen && new Date(s.firstSeen).toLocaleString()],
     ["本次连接", s.online && s.connectedAt ? new Date(s.connectedAt).toLocaleString() : ""], ["最近采样", l.ts && new Date(l.ts).toLocaleString()]];
   $("#info").innerHTML = `<table class="kv-table">${kv.filter(([, v]) => v !== "" && v != null).map(([k, v]) => `<tr><th style="width:110px">${k}</th><td>${esc(v)}</td></tr>`).join("")}</table>`;
@@ -132,7 +217,7 @@ async function loadSeries(s) {
   /** @type {Series} */
   let d;
   try {
-    d = await api(`/monitor/systems/${encodeURIComponent(s.biosUuid)}/series?range=${state.range}`);
+    d = await api(`/monitor/systems/${encodeURIComponent(s.id)}/series?range=${state.range}`);
   } catch (e) { return; }
   const to = Date.now(), from = to - SPAN[state.range];
   const base = { t: d.t, stepSec: d.stepSec, from, to };
@@ -247,7 +332,7 @@ function editSystem(s) {
     e.preventDefault();
     const f = e.target;
     try {
-      await api("/monitor/systems/" + encodeURIComponent(s.biosUuid), { method: "PATCH", json: {
+      await api("/monitor/systems/" + encodeURIComponent(s.id), { method: "PATCH", json: {
         name: f.name.value, tags: f.tags.value.split(/[,，]/).map((x) => x.trim()).filter(Boolean) } });
       closeModal();
       route();

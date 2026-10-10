@@ -23,3 +23,23 @@ func readBIOSUUID() (string, error) {
 	}
 	return "", errNoSMBIOS
 }
+
+func readHardwareUUID() string {
+	id, _ := readBIOSUUID()
+	return id
+}
+
+// readMachineID is the OS install id (systemd machine-id; on macOS the platform UUID,
+// as there is no separate install id).
+func readMachineID() string {
+	if runtime.GOOS == "darwin" {
+		id, _ := runIORegUUID()
+		return id
+	}
+	for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+		if b, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(b)) != "" {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
+}
