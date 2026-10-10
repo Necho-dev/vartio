@@ -109,6 +109,33 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		return filesOp(fr.Params)
 	case guest.MethodTrash:
 		return trashOp(fr.Params)
+	case guest.MethodTunnelOpen:
+		return a.tunnelOpen(fr.Params)
+	case guest.MethodFsWhich:
+		var req guest.WhichRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil {
+			return nil, bad("invalid params")
+		}
+		return which(req), nil
+	case guest.MethodFsRead:
+		var req guest.ReadRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil {
+			return nil, bad("invalid params")
+		}
+		return readFiles(req), nil
+	case guest.MethodProcSpawn:
+		var req guest.SpawnRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil {
+			return nil, bad("invalid params")
+		}
+		return spawnProc(req)
+	case guest.MethodNetListeners:
+		var req guest.ListenersRequest
+		_ = json.Unmarshal(fr.Params, &req)
+		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodNetListeners, 0))
+		defer cancel()
+		list, err := listeners(ctx, req)
+		return list, asRPC(err)
 	default:
 		return nil, &guest.FrameError{Code: "not_implemented", Message: fr.Method}
 	}

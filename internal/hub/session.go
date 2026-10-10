@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ type session struct {
 	mu         sync.Mutex
 	pending    map[string]chan Frame
 	terms      map[string]*termSink
+	tunnels    map[string]*tunnelSink
 	displayOut chan []byte
 	displayID  string
 	onUpgrade  func(UpgradeStep)
@@ -35,6 +37,7 @@ func newSession(conn *websocket.Conn, hello Hello, remote string) *session {
 		conn:       conn,
 		pending:    map[string]chan Frame{},
 		terms:      map[string]*termSink{},
+		tunnels:    map[string]*tunnelSink{},
 		displayOut: make(chan []byte, 2),
 		seen:       now,
 		remote:     remote,
@@ -123,6 +126,7 @@ func (s *session) info() SessionInfo {
 		RemoteAddr:  s.remote,
 		ConnectedAt: s.since.UTC().Format(time.RFC3339),
 		Caps:        append([]string(nil), s.hello.Caps...),
+		Primitives:  maps.Clone(s.hello.Primitives),
 		OS:          s.hello.OS,
 		Arch:        s.hello.Arch,
 		Runner:      s.hello.Runner,
@@ -217,7 +221,12 @@ func (s *session) close() {
 			close(ch)
 			delete(s.pending, id)
 		}
+		tunnels := s.tunnels
+		s.tunnels = map[string]*tunnelSink{}
 		s.mu.Unlock()
+		for _, t := range tunnels {
+			t.stop()
+		}
 	})
 }
 
@@ -270,6 +279,15 @@ func (s *session) deliver(fr Frame) {
 	s.touch()
 	if fr.Stream != "" {
 		switch fr.Stream {
+		case StreamTunnel:
+			if t := s.tunnelFor(fr.ID); t != nil && len(fr.Data) > 0 {
+				t.push(fr.Data)
+			}
+		case StreamTunnelClose:
+			if t := s.tunnelFor(fr.ID); t != nil {
+				t.peerClosed.Store(true)
+				t.stop()
+			}
 		case StreamTermExit:
 			if t := s.termFor(fr.ID); t != nil {
 				s.mu.Lock()

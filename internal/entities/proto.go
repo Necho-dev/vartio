@@ -32,6 +32,11 @@ const (
 	MethodFilesOp        = "files.op"
 	MethodTrash          = "files.trash"
 	MethodUpgrade        = "agent.upgrade"
+	MethodTunnelOpen     = "tunnel.open"
+	MethodFsWhich        = CapFsWhich
+	MethodProcSpawn      = CapProcSpawn
+	MethodNetListeners   = CapNetListeners
+	MethodFsRead         = CapFsRead
 )
 
 const (
@@ -58,6 +63,11 @@ const (
 	DisplayMaxSide = 2560
 	// MaxTerms caps concurrent terminal sessions (browser tabs) per guest.
 	MaxTerms = 8
+	// MaxTunnels caps concurrent TCP tunnels per guest; TunnelIdle closes one
+	// with no traffic (plugin tunnels; port forwards stay open).
+	MaxTunnels  = 64
+	TunnelIdle  = 15 * time.Minute
+	TunnelChunk = 32 << 10
 )
 
 // CapMultiTerm in Hello.Caps means the agent keys PTYs by stream id, so several
@@ -66,6 +76,113 @@ const CapMultiTerm = "term.multi"
 
 // CapUpgrade means the agent can download, verify and swap in a signed build.
 const CapUpgrade = "upgrade"
+
+// CapTunnelTCP means the agent dials TCP targets its local policy allows
+// (loopback by default) and relays bytes for tunnel.open.
+const CapTunnelTCP = "tunnel.tcp"
+
+// Tunnel byte frames carry the tunnel id in Frame.ID, both directions. Either
+// side sends StreamTunnelClose (Data empty) when its end is gone.
+const (
+	StreamTunnel      = "tun"
+	StreamTunnelClose = "tun.close"
+)
+
+// Discovery and launch primitives; each is also the RPC method name.
+const (
+	// CapFsWhich resolves candidate program paths (~, %VAR% and $VAR expanded) and PATH names.
+	CapFsWhich = "fs.which"
+	// CapProcSpawn starts a detached process in the agent's session and returns its pid.
+	CapProcSpawn = "proc.spawn"
+	// CapNetListeners lists listening TCP sockets with their owning process.
+	CapNetListeners = "net.listeners"
+	// CapFsRead reads small files (state and port files), expanded like fs.which.
+	CapFsRead = "fs.read"
+)
+
+// PrimitiveVersions are the general-purpose primitives this protocol defines,
+// keyed by cap name. A field change in a primitive bumps its version.
+var PrimitiveVersions = map[string]int{CapTunnelTCP: 1, CapFsWhich: 1, CapProcSpawn: 1, CapNetListeners: 1, CapFsRead: 1}
+
+// PrimitiveMethods maps the RPC-backed primitives to their method.
+var PrimitiveMethods = map[string]string{CapFsWhich: MethodFsWhich, CapProcSpawn: MethodProcSpawn, CapNetListeners: MethodNetListeners, CapFsRead: MethodFsRead}
+
+// ReadMax caps fs.read per file; larger files come back truncated.
+const ReadMax = 1 << 20
+
+type ReadRequest struct {
+	Paths []string `json:"paths"`
+	// Limit is bytes per file; 0 means 64KB, at most ReadMax.
+	Limit int `json:"limit,omitempty"`
+}
+
+type ReadFile struct {
+	Query     string `json:"query"`
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	MtimeUTC  string `json:"mtimeUtc,omitempty"`
+	Data      []byte `json:"data"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+// ReadResult lists the files that exist; missing ones are left out.
+type ReadResult struct {
+	Files []ReadFile `json:"files"`
+}
+
+type WhichRequest struct {
+	// Paths are tried as given after expansion; Names are looked up on PATH.
+	Paths []string `json:"paths,omitempty"`
+	Names []string `json:"names,omitempty"`
+}
+
+type WhichHit struct {
+	Query    string `json:"query"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size,omitempty"`
+	MtimeUTC string `json:"mtimeUtc,omitempty"`
+}
+
+type WhichResult struct {
+	Hits []WhichHit `json:"hits"`
+}
+
+type SpawnRequest struct {
+	Path string            `json:"path"`
+	Args []string          `json:"args,omitempty"`
+	Cwd  string            `json:"cwd,omitempty"`
+	Env  map[string]string `json:"env,omitempty"`
+}
+
+// SpawnResult echoes the expanded command line.
+type SpawnResult struct {
+	PID  int      `json:"pid"`
+	Path string   `json:"path"`
+	Args []string `json:"args,omitempty"`
+}
+
+type ListenersRequest struct {
+	// Names keeps only processes whose name contains one of these (case-insensitive).
+	Names []string `json:"names,omitempty"`
+}
+
+type Listener struct {
+	IP   string `json:"ip"`
+	Port int    `json:"port"`
+	PID  int32  `json:"pid,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+type TunnelOpenRequest struct {
+	ID     string `json:"id"`
+	Mode   string `json:"mode"` // tcp
+	Target string `json:"target"`
+}
+
+type TunnelOpenResult struct {
+	OK     bool   `json:"ok"`
+	Remote string `json:"remote,omitempty"`
+}
 
 // Stream "exit" (agent → hub, Data empty) reports that the shell behind a
 // terminal stream id has ended.
@@ -107,8 +224,10 @@ type Hello struct {
 	Version  string       `json:"version,omitempty"`
 	MACs     []string     `json:"macs,omitempty"`
 	Caps     []string     `json:"caps,omitempty"`
-	OS       string       `json:"os,omitempty"`
-	Arch     string       `json:"arch,omitempty"`
+	// Primitives maps each general-purpose primitive the agent serves to its version.
+	Primitives map[string]int `json:"primitives,omitempty"`
+	OS         string         `json:"os,omitempty"`
+	Arch       string         `json:"arch,omitempty"`
 	// Runner is how the agent is supervised: service, systemd, launchd or console.
 	Runner string `json:"runner,omitempty"`
 	// Upgrade reports the outcome of the last upgrade attempt, once, on the next connect.
@@ -414,20 +533,21 @@ type TermOpenResult struct {
 }
 
 type SessionInfo struct {
-	Online      bool         `json:"online"`
-	LastSeenUTC string       `json:"lastSeenUtc,omitempty"`
-	Version     string       `json:"version,omitempty"`
-	DeviceID    string       `json:"deviceId,omitempty"`
-	Device      *DeviceFacts `json:"device,omitempty"`
-	BiosUUID    string       `json:"biosUuid,omitempty"`
-	HostName    string       `json:"hostname,omitempty"`
-	MACs        []string     `json:"macs,omitempty"`
-	RemoteAddr  string       `json:"remoteAddr,omitempty"`
-	ConnectedAt string       `json:"connectedAt,omitempty"`
-	Caps        []string     `json:"caps,omitempty"`
-	OS          string       `json:"os,omitempty"`
-	Arch        string       `json:"arch,omitempty"`
-	Runner      string       `json:"runner,omitempty"`
+	Online      bool           `json:"online"`
+	LastSeenUTC string         `json:"lastSeenUtc,omitempty"`
+	Version     string         `json:"version,omitempty"`
+	DeviceID    string         `json:"deviceId,omitempty"`
+	Device      *DeviceFacts   `json:"device,omitempty"`
+	BiosUUID    string         `json:"biosUuid,omitempty"`
+	HostName    string         `json:"hostname,omitempty"`
+	MACs        []string       `json:"macs,omitempty"`
+	RemoteAddr  string         `json:"remoteAddr,omitempty"`
+	ConnectedAt string         `json:"connectedAt,omitempty"`
+	Caps        []string       `json:"caps,omitempty"`
+	Primitives  map[string]int `json:"primitives,omitempty"`
+	OS          string         `json:"os,omitempty"`
+	Arch        string         `json:"arch,omitempty"`
+	Runner      string         `json:"runner,omitempty"`
 	// Upgrade is the agent's report of its last upgrade attempt, sent once after it.
 	Upgrade *UpgradeReport `json:"upgrade,omitempty"`
 }
@@ -611,13 +731,13 @@ type AgentFlag struct {
 
 func TimeoutFor(method string, execSec int) time.Duration {
 	switch method {
-	case MethodHealth, MethodMetrics, MethodProcsList, MethodServicesList:
+	case MethodHealth, MethodMetrics, MethodProcsList, MethodServicesList, MethodFsWhich, MethodFsRead:
 		return ListTimeout
-	case MethodProcsAction, MethodServicesAction:
+	case MethodProcsAction, MethodServicesAction, MethodProcSpawn, MethodNetListeners:
 		return ActionTimeout
 	case MethodPower:
 		return PowerTimeout
-	case MethodTermOpen, MethodTermClose, MethodTermResize, MethodDisplayOpen, MethodDisplayClose, MethodDisplaySelect, MethodDisplayQuality:
+	case MethodTunnelOpen, MethodTermOpen, MethodTermClose, MethodTermResize, MethodDisplayOpen, MethodDisplayClose, MethodDisplaySelect, MethodDisplayQuality:
 		return TermOpenTimeout
 	case MethodFilesList:
 		return ListTimeout

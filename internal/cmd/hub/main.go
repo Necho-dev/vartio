@@ -19,6 +19,9 @@ import (
 
 	"govmomi-wmks/internal/guest"
 	"govmomi-wmks/internal/monitor"
+	"govmomi-wmks/internal/plugin"
+	"govmomi-wmks/internal/plugin/bitbrowser"
+	"govmomi-wmks/internal/plugin/cdp"
 )
 
 // Listed explicitly so web/types and web/tsconfig.json (type-check only) stay out of the binary.
@@ -59,15 +62,29 @@ func main() {
 
 	hub := guest.NewHub(token)
 	hub.Releases = &guest.Releases{Dir: agentDir()}
+	if err := hub.LoadForwards(stateFile("PROBE_HUB_FORWARDS_FILE", "probe-hub.forwards.json")); err != nil {
+		log.Fatalf("forwards: %v", err)
+	}
 	mon := monitor.New(hub, store, interval, retention)
 	if err := mon.Load(ctx); err != nil {
 		log.Fatalf("load systems: %v", err)
 	}
 	go mon.Run(ctx)
 
+	plugins := plugin.NewRegistry(hub)
+	for _, p := range []plugin.Plugin{bitbrowser.New(), cdp.New()} {
+		if err := plugins.Add(ctx, p); err != nil {
+			log.Fatalf("plugins: %v", err)
+		}
+	}
+	if err := plugins.Load(stateFile("PROBE_HUB_PLUGINS_FILE", "probe-hub.plugins.json"), splitList(os.Getenv("PROBE_HUB_PLUGINS"))); err != nil {
+		log.Fatalf("plugins: %v", err)
+	}
+
 	mux := http.NewServeMux()
 	hub.RegisterDev(mux)
 	mon.Register(mux, admin != "")
+	plugins.Mount(mux)
 	sub, _ := fs.Sub(webFS, "web")
 	static := http.FileServerFS(sub)
 	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +124,26 @@ func agentDir() string {
 		}
 	}
 	return ""
+}
+
+// stateFile is where the hub remembers installed plugins and port forwards;
+// relative to the working directory unless env overrides it.
+// PROBE_HUB_PLUGINS (comma-separated names) only seeds plugins the first time.
+func stateFile(env, def string) string {
+	if p := strings.TrimSpace(os.Getenv(env)); p != "" {
+		return p
+	}
+	return def
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func exeDir() string {

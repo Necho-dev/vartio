@@ -45,8 +45,10 @@ func APIError(err error) error {
 			status = http.StatusGatewayTimeout
 		case "bad_request":
 			status = http.StatusBadRequest
-		case "not_supported", "no_user_session", "conflict", "too_many_terms":
+		case "not_supported", "no_user_session", "conflict", "too_many_terms", "too_many_tunnels":
 			status = http.StatusConflict
+		case "agent_policy":
+			status = http.StatusForbidden
 		case "not_found":
 			status = http.StatusNotFound
 		case "too_large":

@@ -19,13 +19,15 @@ ICONS = [
     # chrome
     "activity", "search", "moon", "log-out", "maximize", "minimize", "x", "arrow-left", "pencil",
     # host actions
-    "square-terminal", "monitor", "list", "folder-open", "trash-2",
+    "square-terminal", "monitor", "list", "folder-open", "trash-2", "arrow-right-left",
     # file manager
     "chevron-left", "chevron-right", "arrow-up", "arrow-down", "arrow-up-down", "house", "refresh-cw",
     "folder-plus", "upload", "folder-up", "download", "pencil-line", "trash", "plus", "rotate-ccw",
     "triangle-alert", "folder", "file", "file-text", "file-image", "file-archive",
     # events
     "network", "package", "user", "copy", "check", "circle-arrow-up",
+    # plugins
+    "grid-2x2-plus", "globe", "play", "send", "external-link", "camera",
 ]
 
 TEMPLATE = """// @ts-check

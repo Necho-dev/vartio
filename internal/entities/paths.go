@@ -6,6 +6,7 @@ const (
 	PathPrefix    = "/v1/probe"
 	PathConnect   = "/v1/probe/connect"
 	PathSessions  = "/v1/probe/sessions"
+	PathForwards  = "/v1/probe/forwards"
 	PathVMs       = "/v1/probe/vms"
 	PathTermWS    = "/v1/probe/ws/term"
 	PathDisplayWS = "/v1/probe/ws/display"

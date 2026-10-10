@@ -143,6 +143,7 @@ func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PathSessions+"/{id}/files/op", h.wrap(h.handleFilesOp))
 	mux.HandleFunc("GET "+PathSessions+"/{id}/trash", h.wrap(h.handleTrashList))
 	mux.HandleFunc("POST "+PathSessions+"/{id}/trash", h.wrap(h.handleTrashOp))
+	h.RegisterTunnels(mux, PathSessions)
 }
 
 func (h *Hub) wrap(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {

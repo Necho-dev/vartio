@@ -36,6 +36,7 @@ type Hub struct {
 	sessions map[string]*session
 	tickets  map[string]streamTicket
 	upgrades map[string]*UpgradeProgress
+	fw       forwards
 }
 
 // Audit is one operator action on a guest. Err is set when the agent refused or failed it.

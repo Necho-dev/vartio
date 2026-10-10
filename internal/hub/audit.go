@@ -12,6 +12,11 @@ import (
 // record audits an operator action from the probe API. Requests turned away before
 // they reach the agent (validation, missing confirm, offline) are not actions.
 func (h *Hub) record(r *http.Request, kind, detail string, err error) {
+	h.Record(r, r.PathValue("id"), kind, detail, err)
+}
+
+// Record audits an action on guest key; plugins use it for their own routes.
+func (h *Hub) Record(r *http.Request, key, kind, detail string, err error) {
 	if h.OnAudit == nil {
 		return
 	}
@@ -22,7 +27,7 @@ func (h *Hub) record(r *http.Request, kind, detail string, err error) {
 			return
 		}
 	}
-	h.audit(r.PathValue("id"), kind, detail, clientIP(r), err)
+	h.audit(key, kind, detail, clientIP(r), err)
 }
 
 func execLine(req ExecRequest) string {

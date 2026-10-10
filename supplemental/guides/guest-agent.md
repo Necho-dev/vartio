@@ -233,3 +233,85 @@ agent 用 `X-Guest-Token`：
 - `POST /v1/probe/sessions/{id}/upgrade` — `{version?, confirm: true}`，`version` 不传时用 latest。agent 太旧返回 `409 upgrade_unsupported`，版本相同返回 `409 already_current`
 - `POST /v1/probe/upgrade` — `{version?, ids?, confirm: true}`；不传 `ids` 时选所有在线、可升级、且落后于目标版本的探针，并发 4 台，返回 `[{id, ok, from, to, message?}]`
 - `GET /v1/probe/upgrade` — 最近 30 分钟的升级进度 `[{id, from, to, stage, done?, total?, message?, started, updated}]`，新的在前
+
+## 通用原语与插件
+
+agent ≥ 1.16.0 在 Hello 里声明 `caps` 和 `primitives`（原语 → 版本）。插件只通过这些原语操作探针所在的机器，hub 和 agent 都不额外监听端口：
+
+| 原语 | 作用 | 说明 |
+| --- | --- | --- |
+| `tunnel.tcp` | 经探针的出站 WebSocket 连到那台机器上的 TCP 服务 | 只能由 hub 发起 |
+| `fs.which` | 按路径或 PATH 查找程序 | 路径可写 `~`、`%VAR%`、`$VAR` |
+| `fs.read` | 读小文件 | 默认 64KB，最多 1MB；不存在的文件和目录直接跳过 |
+| `proc.spawn` | 脱离探针启动进程 | 参数只展开开头的 `~` 和 `%VAR%`；`GUEST_SPAWN=off` 时不声明 |
+| `net.listeners` | 列出 TCP 监听端口和进程名 | macOS 用 `lsof`，其他系统用 gopsutil |
+
+没声明的原语返回 `409 cap_missing`。
+
+### TCP 隧道
+
+- 帧：`tunnel.open` RPC（`{id, mode: "tcp", target}`）成功后，双向用 `stream: "tun"` 传字节（每帧最多 32KB），任一侧发 `tun.close` 关闭。每台最多 64 条隧道（`409 too_many_tunnels`；1.16.0 探针为 16）。插件开的隧道 15 分钟无流量自动关闭，端口转发的不关
+- 目标白名单 `GUEST_TUNNEL_ALLOW`（在 agent 上配）：空 = 只允许回环；`off` = 关闭隧道并不再声明能力；否则逗号分隔的 `loopback`、CIDR、`ip:port`、`ip:*`。主机名先解析，按解析出的 IP 校验并拨号。被拒 `403 agent_policy`，连不上 `502 dial_failed`
+- `GET /v1/probe/sessions/{id}/tunnels`（Bearer）— `{tunnels}`：活动隧道的目标、发起方（`plugin:<name>`、`forward:<id>`）、收发字节
+
+### 端口转发
+
+把远端机器上的 TCP 服务映射成 Hub 所在机器的本地端口。每个进来的连接新开一条隧道，HTTP、WebSocket、SSH、数据库等基于 TCP 的协议原样透传。规则保存在 Hub 上，关掉页面不受影响，多台机器可以同时转发。
+
+- 入口：顶栏的「隧道转发」按钮管理全部机器；主机详情页的「隧道转发」按钮只管这台
+- 本地端口全局唯一：与已有规则重复，或已被本机其他程序占用，都返回 `409 port_taken`。不填端口时自动分配
+- 监听地址只能选 `127.0.0.1`（仅本机，默认）或 `0.0.0.0`（局域网）。选局域网时同网段的人不用登录 Hub 就能访问这个服务
+- 添加时先经探针试连一次目标，探针离线、目标不在白名单或连不上都直接报错。之后探针掉线时规则保留，连接会被接受后立即断开，并记下最近一次失败原因
+- 规则存在 `probe-hub.forwards.json`（工作目录下，`PROBE_HUB_FORWARDS_FILE` 可改），Hub 重启后恢复；端口被占用的规则会保留并标记监听失败。vm-server 的规则只在内存里
+
+管理端（Bearer）：
+
+- `GET /v1/probe/forwards[?agent=]` — `{forwards: [{id, agent, name, bind, port, target, note, online, listening, error?, lastError?, conns, total, rxBytes, txBytes}], binds}`
+- `POST /v1/probe/forwards` — `{agent, target, port?, bind?, note?}`，返回 `201` 和规则。审计 `tunnel.forward`
+- `DELETE /v1/probe/forwards/{id}` — 停止监听并断开正在用的连接，`204`。审计 `tunnel.unforward`
+
+### 插件
+
+插件用 Go 写，编译进 hub（`internal/plugin`），通过 `Host` 接口使用上面的原语，并在清单里声明用到的原语和目标地址，越界 `403 plugin_forbidden`。
+
+- 安装状态存在 `probe-hub.plugins.json`（工作目录下，`PROBE_HUB_PLUGINS_FILE` 可改）。文件不存在时按 `PROBE_HUB_PLUGINS`（逗号分隔）安装，默认都不装。vm-server 内置的插件全部安装且不落盘
+- 未安装的插件，接口返回 `404 plugin_not_installed`，页面返回 404。卸载时立即关闭它开的隧道（包括正在用的 WebSocket）
+
+管理端（Bearer）：
+
+- `GET /v1/probe/plugins` — 所有插件的清单、是否已装、页面模块地址，以及每台在线探针是否满足所需原语
+- `GET /v1/probe/plugins/{name}` — 单个插件
+- `POST /v1/probe/plugins/{name}` / `DELETE /v1/probe/plugins/{name}` — 安装 / 卸载
+- `* /v1/probe/plugins/{name}/...` — 插件自己的接口
+
+页面：插件中心 `#/plugins` 里安装、卸载、打开；插件页 `#/plugins/{name}?agent=`；主机详情页的「插件」按钮在抽屉里打开。带页面的插件提供一个 ES 模块 `/plugins/{name}/index.js`，导出 `mount(el, ctx)`，可返回清理函数。`ctx` 有 `name`、`agent`、`embedded`（是否在抽屉里）、`params`、`api(path, opts)`（带上管理令牌，请求插件自己的接口）、`open(name, params)`（跳到另一个插件）。
+
+### bitbrowser
+
+调用探针所在机器上的比特浏览器本地 API，用到 `tunnel.tcp`。hub 上配 `BITBROWSER_ADDR`（默认 `127.0.0.1:54345`）和可选的 `BITBROWSER_API_KEY`（请求不带 `X-Api-Key` 时用它）。
+
+- `GET .../bitbrowser/openapi.json` — OpenAPI 3.1，33 个接口；`x-confirm` 标记删除、全关、清 Cookie 等破坏性操作，`x-audit` 标记会记审计的操作
+- `GET .../bitbrowser/operations` — 精简后的接口列表（必填字段、示例请求体）
+- `GET .../bitbrowser/agents/{id}/status` — 本地 API 是否可达和延迟
+- `POST .../bitbrowser/agents/{id}/call/{operationId}` — 按 operationId 调用，先校验必填字段（`400`）
+- `* .../bitbrowser/agents/{id}/api/{path}` — 原样透传，状态码和响应体不改
+
+破坏性操作要带 `X-Confirm: true` 或 `?confirm=true`，否则 `403`。审计 kind 为 `plugin.bitbrowser.<operationId>`，比特浏览器返回 `success: false` 时记为失败。打开窗口返回调试端口时，页面上可以直接转到 cdp 插件调试。
+
+### cdp
+
+发现、启动并调试探针所在机器上的 Chromium 系浏览器（Chrome、Edge、Chromium、Brave、Canary，以及比特浏览器等开了调试端口的窗口），用到 `tunnel.tcp`、`fs.which`、`fs.read`、`proc.spawn`、`net.listeners`，只允许连回环地址。
+
+- `GET .../cdp/catalog` — 内置的浏览器目录（各系统的安装路径、默认用户目录）
+- `GET .../cdp/agents/{id}/browsers[?all=1]` — `{installed, running, probed}`。按进程名挑出浏览器的监听端口（`all=1` 时探测全部回环端口），逐个请求 `/json/version`
+- `POST .../cdp/agents/{id}/launch` — `{browser | path, port?, headless?, userDataDir?, url?, args?}`。默认用户目录 `~/.probe-cdp/<browser>`，端口不传时在 19222–19921 里随机选，等 `/json/version` 最多 20 秒；找不到浏览器 `404 browser_not_found`，超时 `504 launch_timeout`
+- `GET|PUT|POST .../cdp/agents/{id}/ports/{port}/json[/...]` — 转发 CDP 的 HTTP 接口（`list`、`new?url`、`activate/{id}`、`close/{id}`），响应里的 `ws://127.0.0.1:port/devtools/...` 改写为经 hub 的地址
+- `GET .../cdp/agents/{id}/ports/{port}/devtools/...` — WebSocket 转发，需 Bearer，Puppeteer / Playwright 等可以直接连。审计 `plugin.cdp.connect`
+- `POST .../cdp/agents/{id}/ports/{port}/close` — 在浏览器级会话上发 `Browser.close`，浏览器正常退出（全部窗口关闭）。没有 `/json/version` 的端点（见下文 `wsOnly`）返回 `400`。审计 `plugin.cdp.close`
+- `POST .../cdp/agents/{id}/ports/{port}/ticket` — `{path: "/devtools/..."}`，返回一次性地址 `/v1/probe/ws/plugins/cdp/{ticket}`，2 分钟内有效，给浏览器里不能带请求头的 WebSocket 用。这个前缀不校验管理令牌，用过或过期返回 `410`
+
+转发时 `Host` 改成 `127.0.0.1:port`，并去掉 `Origin`、`Authorization`、`Cookie`，浏览器不需要加 `--remote-allow-origins`。
+
+Chrome 144 起，在 `chrome://inspect` 里给默认用户目录开启的远程调试没有 `/json/*` 接口，只在用户目录下写 `DevToolsActivePort`（端口和 `/devtools/browser/<id>`）。插件会读这个文件，把端点标成 `wsOnly`，只能开浏览器会话；每次连接 Chrome 都会弹窗让用户允许。
+
+页面提供端点列表、启动浏览器、页面与目标管理，以及在线调试台（常用命令、方法补全、事件流、截图预览）。

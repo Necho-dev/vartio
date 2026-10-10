@@ -82,17 +82,18 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 	defer conn.Close()
 
 	hello := guest.Hello{
-		BiosUUID: cfg.BiosUUID,
-		DeviceID: cfg.DeviceID,
-		Device:   cfg.Device,
-		HostName: hostname(),
-		Version:  agentVersion,
-		MACs:     listMACs(),
-		Caps:     caps(),
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		Runner:   runnerName(),
-		Upgrade:  pendingReport(),
+		BiosUUID:   cfg.BiosUUID,
+		DeviceID:   cfg.DeviceID,
+		Device:     cfg.Device,
+		HostName:   hostname(),
+		Version:    agentVersion,
+		MACs:       listMACs(),
+		Caps:       caps(),
+		Primitives: primitives(),
+		OS:         runtime.GOOS,
+		Arch:       runtime.GOARCH,
+		Runner:     runnerName(),
+		Upgrade:    pendingReport(),
 	}
 	if err := conn.WriteJSON(hello); err != nil {
 		return false, err
@@ -116,9 +117,10 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 	// the hub sees the disconnect now rather than at the next poll.
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
-	a := &agent{cfg: cfg, conn: conn, term: newTermHub(), display: newDisplayHub()}
+	a := &agent{cfg: cfg, conn: conn, term: newTermHub(), display: newDisplayHub(), tun: newTunnelHub()}
 	defer a.term.close("")
 	defer a.display.close()
+	defer a.tun.close("")
 	return true, a.loop(ctx)
 }
 
@@ -129,7 +131,24 @@ func caps() []string {
 	if upgradeEnabled() {
 		c = append(c, guest.CapUpgrade)
 	}
+	if !loadTunnelPolicy().off {
+		c = append(c, guest.CapTunnelTCP)
+	}
+	c = append(c, guest.CapFsWhich, guest.CapFsRead, guest.CapNetListeners)
+	if spawnEnabled() {
+		c = append(c, guest.CapProcSpawn)
+	}
 	return c
+}
+
+func primitives() map[string]int {
+	out := map[string]int{}
+	for _, c := range caps() {
+		if v, ok := guest.PrimitiveVersions[c]; ok {
+			out[c] = v
+		}
+	}
+	return out
 }
 
 type agent struct {
@@ -137,7 +156,14 @@ type agent struct {
 	conn    *websocket.Conn
 	term    *termHub
 	display *displayHub
+	tun     *tunnelHub
 	writeMu sync.Mutex
+}
+
+func (a *agent) send(fr guest.Frame) {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	_ = a.conn.WriteJSON(fr)
 }
 
 func (a *agent) loop(ctx context.Context) error {
@@ -151,8 +177,15 @@ func (a *agent) loop(ctx context.Context) error {
 		if err := a.conn.ReadJSON(&fr); err != nil {
 			return err
 		}
-		if fr.Stream == "in" {
+		switch fr.Stream {
+		case "in":
 			a.term.write(fr.ID, fr.Data)
+			continue
+		case guest.StreamTunnel:
+			a.tun.write(fr.ID, fr.Data)
+			continue
+		case guest.StreamTunnelClose:
+			a.tun.close(fr.ID)
 			continue
 		}
 		if fr.Method == "" {

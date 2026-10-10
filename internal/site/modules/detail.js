@@ -8,6 +8,8 @@ import { openTerm } from "./term.js";
 import { openScreen } from "./screen.js";
 import { openProcs } from "./procs.js";
 import { openFiles } from "./files/index.js";
+import { openPluginDrawer } from "./plugins.js";
+import { openForwardDrawer } from "./forwards.js";
 import { latestAgent, outdated, canUpgrade, upgradeOne, RUNNERS } from "./upgrade.js";
 
 let latest = "";
@@ -184,6 +186,8 @@ function renderHero(s) {
       <button class="btn" id="screenBtn" ${s.online ? "" : "disabled"}>${icon("monitor")}实时画面</button>
       <button class="btn" id="procBtn" ${s.online ? "" : "disabled"}>${icon("list")}进程</button>
       <button class="btn" id="filesBtn" ${s.online ? "" : "disabled"}>${icon("folder-open")}文件</button>
+      <button class="btn" id="pluginBtn" ${s.online ? "" : "disabled"}>${icon("grid-2x2-plus")}插件</button>
+      <button class="btn" id="fwBtn">${icon("arrow-right-left")}隧道转发</button>
       ${canUpgrade(s) && outdated(s, latest) ? `<button class="btn primary" id="upBtn">${icon("circle-arrow-up")}升级到 ${esc(latest)}</button>` : ""}
       ${s.online ? "" : `<button class="btn danger" id="delBtn">${icon("trash-2")}删除</button>`}
     </div>`;
@@ -198,6 +202,8 @@ function renderHero(s) {
   $("#screenBtn").addEventListener("click", () => openScreen(s));
   $("#procBtn").addEventListener("click", () => openProcs(s));
   $("#filesBtn").addEventListener("click", () => openFiles(s));
+  $("#pluginBtn").addEventListener("click", () => openPluginDrawer(s));
+  $("#fwBtn").addEventListener("click", () => openForwardDrawer(s));
   const upBtn = /** @type {HTMLButtonElement | null} */ ($("#upBtn"));
   if (upBtn) upBtn.addEventListener("click", () => upgradeOne(s, latest));
   const del = $("#delBtn");
