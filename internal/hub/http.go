@@ -115,6 +115,11 @@ func (h *Hub) DevHandler() http.Handler {
 // RegisterDev mounts the standalone probe API (connect, sessions, streams) on mux.
 func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathConnect, h.HandleConnect)
+	mux.HandleFunc("GET "+PathAgentLatest, h.handleAgentLatest)
+	mux.HandleFunc("GET "+PathAgentDownload+"/{version}/{os}/{arch}", h.handleAgentDownload)
+	mux.HandleFunc("GET "+PathReleases, h.wrap(h.handleReleases))
+	mux.HandleFunc("POST "+PathUpgrade, h.wrap(h.handleUpgradeBatch))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/upgrade", h.wrap(h.handleUpgrade))
 	mux.HandleFunc("GET "+PathSessions, h.wrap(h.handleSessions))
 	mux.HandleFunc("GET "+PathSessions+"/{id}", h.wrap(h.handleSessionInfo))
 	mux.HandleFunc("GET "+PathSessions+"/{id}/health", h.wrap(h.handleHealth))

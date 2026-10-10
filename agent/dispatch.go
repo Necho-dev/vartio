@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 
@@ -14,6 +15,12 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		return h, asRPC(err)
 	case guest.MethodMetrics:
 		return collectMetrics(), nil
+	case guest.MethodUpgrade:
+		var req guest.UpgradeRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil {
+			return nil, bad("invalid params")
+		}
+		return upgrade(context.Background(), a.cfg, req), nil
 	case guest.MethodProcsList:
 		list, err := listProcs()
 		return list, asRPC(err)

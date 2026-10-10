@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -14,17 +16,53 @@ import (
 	"govmomi-wmks/internal/guest"
 )
 
-const agentVersion = "1.8.0"
+// agentVersion is a var so test builds can override it with -ldflags -X.
+var agentVersion = "1.10.0"
 
 func main() {
-	loadEnv()
-	if len(os.Args) > 1 && os.Args[1] == "service" {
-		os.Exit(runServiceCommand(os.Args[2:]))
+	if len(os.Args) > 1 && os.Args[1] != "upgrade-watch" && !(len(os.Args) > 2 && os.Args[1] == "service" && os.Args[2] == "run") {
+		attachConsole()
 	}
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Printf("probe-agent %s %s/%s\n", agentVersion, runtime.GOOS, runtime.GOARCH)
+			return
+		case "upgrade-watch":
+			if len(os.Args) != 3 {
+				fmt.Fprintln(os.Stderr, "usage: probe-agent upgrade-watch <state file>")
+				os.Exit(2)
+			}
+			os.Exit(runWatch(os.Args[2]))
+		}
+	}
+	loadEnv()
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "service":
+			os.Exit(runServiceCommand(os.Args[2:]))
+		case "install":
+			os.Exit(runInstall())
+		case "uninstall":
+			os.Exit(runUninstall())
+		}
+	}
+	trayMode = trayWanted()
+	if trayMode {
+		if err := singleInstance(); err != nil {
+			notifyUser(err.Error())
+			return
+		}
+	}
+	logFile := setupLog()
 	cfg := loadConfig()
-	log.Printf("probe-agent %s control=%s device=%s bios=%s", agentVersion, cfg.URL, cfg.DeviceID, cfg.BiosUUID)
+	log.Printf("probe-agent %s control=%s device=%s bios=%s runner=%s", agentVersion, cfg.URL, cfg.DeviceID, cfg.BiosUUID, runnerName())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if trayMode {
+		runTray(ctx, cfg, logFile)
+		return
+	}
 	if err := serve(ctx, cfg); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}

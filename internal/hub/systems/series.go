@@ -9,22 +9,25 @@ import (
 
 // Series is columnar so a week of buckets stays a small JSON payload.
 type Series struct {
-	StepSec   int        `json:"stepSec"`
-	T         []int64    `json:"t"`
-	CPU       []float64  `json:"cpu"`
-	CPUMax    []float64  `json:"cpuMax"`
-	Mem       []float64  `json:"mem"`
-	MemTotal  []float64  `json:"memTotal"`
-	Swap      []float64  `json:"swap"`
-	Disk      []float64  `json:"disk"`
-	DiskTotal []float64  `json:"diskTotal"`
-	DiskRead  []float64  `json:"diskRead"`
-	DiskWrite []float64  `json:"diskWrite"`
-	NetRx     []float64  `json:"netRx"`
-	NetTx     []float64  `json:"netTx"`
-	Load1     []float64  `json:"load1"`
-	Temp      []*float64 `json:"temp"`
-	Procs     []float64  `json:"procs"`
+	StepSec   int       `json:"stepSec"`
+	T         []int64   `json:"t"`
+	CPU       []float64 `json:"cpu"`
+	CPUMax    []float64 `json:"cpuMax"`
+	Mem       []float64 `json:"mem"`
+	MemTotal  []float64 `json:"memTotal"`
+	Swap      []float64 `json:"swap"`
+	Disk      []float64 `json:"disk"`
+	DiskTotal []float64 `json:"diskTotal"`
+	DiskRead  []float64 `json:"diskRead"`
+	DiskWrite []float64 `json:"diskWrite"`
+	NetRx     []float64 `json:"netRx"`
+	NetTx     []float64 `json:"netTx"`
+	Load1     []float64 `json:"load1"`
+	// Load5/Load15 are nil for buckets recorded before they were stored.
+	Load5  []*float64 `json:"load5"`
+	Load15 []*float64 `json:"load15"`
+	Temp   []*float64 `json:"temp"`
+	Procs  []float64  `json:"procs"`
 	// DiskParts maps mount point -> used bytes per bucket (nil = no sample).
 	DiskParts map[string][]*float64 `json:"diskParts"`
 }
@@ -34,12 +37,12 @@ func newSeries(step time.Duration) *Series {
 		StepSec: int(step / time.Second),
 		T:       []int64{}, CPU: []float64{}, CPUMax: []float64{}, Mem: []float64{}, MemTotal: []float64{},
 		Swap: []float64{}, Disk: []float64{}, DiskTotal: []float64{}, DiskRead: []float64{}, DiskWrite: []float64{},
-		NetRx: []float64{}, NetTx: []float64{}, Load1: []float64{}, Temp: []*float64{}, Procs: []float64{},
+		NetRx: []float64{}, NetTx: []float64{}, Load1: []float64{}, Load5: []*float64{}, Load15: []*float64{}, Temp: []*float64{}, Procs: []float64{},
 		DiskParts: map[string][]*float64{},
 	}
 }
 
-func (s *Series) add(t time.Time, cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1 float64, temp *float64, procs float64) {
+func (s *Series) add(t time.Time, cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1 float64, l5, l15, temp *float64, procs float64) {
 	s.T = append(s.T, t.UnixMilli())
 	s.CPU = append(s.CPU, cpu)
 	s.CPUMax = append(s.CPUMax, cpuMax)
@@ -53,6 +56,8 @@ func (s *Series) add(t time.Time, cpu, cpuMax, mem, memT, swap, disk, diskT, dr,
 	s.NetRx = append(s.NetRx, rx)
 	s.NetTx = append(s.NetTx, tx)
 	s.Load1 = append(s.Load1, l1)
+	s.Load5 = append(s.Load5, l5)
+	s.Load15 = append(s.Load15, l15)
 	s.Temp = append(s.Temp, temp)
 	s.Procs = append(s.Procs, procs)
 }

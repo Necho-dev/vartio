@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS probe_metrics (
 	net_rx_bps     double precision NOT NULL,
 	net_tx_bps     double precision NOT NULL,
 	load1          real NOT NULL DEFAULT 0,
+	load5          real,
+	load15         real,
 	temp_max       real,
 	procs          integer NOT NULL DEFAULT 0,
 	disk_parts     jsonb,
@@ -61,6 +63,8 @@ CREATE TABLE IF NOT EXISTS probe_events (
 	actor         text NOT NULL DEFAULT '',
 	detail        text NOT NULL DEFAULT ''
 );
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS load5 real;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS load15 real;
 CREATE INDEX IF NOT EXISTS probe_events_device_ts ON probe_events (device_id, ts DESC);
 `
 
@@ -192,11 +196,11 @@ func (s *Store) Record(ctx context.Context, id string, info guest.SysInfo, smp S
 		parts, _ = json.Marshal(used)
 	}
 	b.Queue(`INSERT INTO probe_metrics (device_id, ts, cpu_pct, mem_used, mem_total, swap_used, swap_total,
-			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, temp_max, procs, disk_parts)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT DO NOTHING`,
+			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, load5, load15, temp_max, procs, disk_parts)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT DO NOTHING`,
 		id, smp.TS, smp.CPUPct, int64(smp.MemUsed), int64(smp.MemTotal), int64(smp.SwapUsed), int64(smp.SwapTotal),
 		int64(smp.DiskUsed), int64(smp.DiskTotal), smp.DiskReadBps, smp.DiskWriteBps, smp.NetRxBps, smp.NetTxBps,
-		smp.Load[0], temp, smp.Procs, parts)
+		smp.Load[0], smp.Load[1], smp.Load[2], temp, smp.Procs, parts)
 	return s.db.SendBatch(ctx, b).Close()
 }
 
@@ -250,7 +254,7 @@ func (s *Store) Series(ctx context.Context, id string, from time.Time, step time
 			avg(disk_used)::float8, max(disk_total)::float8,
 			avg(disk_read_bps), avg(disk_write_bps),
 			avg(net_rx_bps), avg(net_tx_bps),
-			avg(load1), max(temp_max), avg(procs)::float8
+			avg(load1), avg(load5)::float8, avg(load15)::float8, max(temp_max), avg(procs)::float8
 		FROM probe_metrics
 		WHERE device_id = $1 AND ts >= $2
 		GROUP BY b ORDER BY b`, id, from, step.Seconds())
@@ -262,11 +266,11 @@ func (s *Store) Series(ctx context.Context, id string, from time.Time, step time
 	for rows.Next() {
 		var t time.Time
 		var cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1, procs float64
-		var temp *float64
-		if err := rows.Scan(&t, &cpu, &cpuMax, &mem, &memT, &swap, &disk, &diskT, &dr, &dw, &rx, &tx, &l1, &temp, &procs); err != nil {
+		var l5, l15, temp *float64
+		if err := rows.Scan(&t, &cpu, &cpuMax, &mem, &memT, &swap, &disk, &diskT, &dr, &dw, &rx, &tx, &l1, &l5, &l15, &temp, &procs); err != nil {
 			return nil, err
 		}
-		out.add(t, cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1, temp, procs)
+		out.add(t, cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1, l5, l15, temp, procs)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -9,8 +9,14 @@ const (
 	PathVMs       = "/v1/probe/vms"
 	PathTermWS    = "/v1/probe/ws/term"
 	PathDisplayWS = "/v1/probe/ws/display"
+	// Agent-facing release endpoints authenticate with the guest token, not the admin token.
+	PathAgent         = "/v1/probe/agent"
+	PathAgentLatest   = PathAgent + "/latest"
+	PathAgentDownload = PathAgent + "/download"
+	PathReleases      = "/v1/probe/releases"
+	PathUpgrade       = "/v1/probe/upgrade"
 )
 
 func IsPublicProbePath(path string) bool {
-	return path == PathConnect || strings.HasPrefix(path, PathPrefix+"/ws/")
+	return path == PathConnect || strings.HasPrefix(path, PathPrefix+"/ws/") || strings.HasPrefix(path, PathAgent+"/")
 }

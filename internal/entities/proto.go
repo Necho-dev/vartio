@@ -3,6 +3,8 @@ package guest
 import (
 	"encoding/json"
 	"time"
+
+	"govmomi-wmks/internal/release"
 )
 
 const (
@@ -26,13 +28,16 @@ const (
 	MethodFilesPut       = "files.put"
 	MethodFilesOp        = "files.op"
 	MethodTrash          = "files.trash"
+	MethodUpgrade        = "agent.upgrade"
 )
 
 const (
-	HealthTimeout   = 5 * time.Second
-	ListTimeout     = 5 * time.Second
-	ActionTimeout   = 15 * time.Second
-	PowerTimeout    = 10 * time.Second
+	HealthTimeout = 5 * time.Second
+	ListTimeout   = 5 * time.Second
+	ActionTimeout = 15 * time.Second
+	PowerTimeout  = 10 * time.Second
+	// UpgradeTimeout covers download, verification and the self-test run.
+	UpgradeTimeout  = 3 * time.Minute
 	TermOpenTimeout = 10 * time.Second
 	ExecDefault     = 30 * time.Second
 	ExecMax         = 120 * time.Second
@@ -55,6 +60,9 @@ const (
 // CapMultiTerm in Hello.Caps means the agent keys PTYs by stream id, so several
 // terminals can run at once. Agents without it keep a single PTY.
 const CapMultiTerm = "term.multi"
+
+// CapUpgrade means the agent can download, verify and swap in a signed build.
+const CapUpgrade = "upgrade"
 
 // Stream "exit" (agent → hub, Data empty) reports that the shell behind a
 // terminal stream id has ended.
@@ -96,6 +104,45 @@ type Hello struct {
 	Version  string       `json:"version,omitempty"`
 	MACs     []string     `json:"macs,omitempty"`
 	Caps     []string     `json:"caps,omitempty"`
+	OS       string       `json:"os,omitempty"`
+	Arch     string       `json:"arch,omitempty"`
+	// Runner is how the agent is supervised: service, systemd, launchd or console.
+	Runner string `json:"runner,omitempty"`
+	// Upgrade reports the outcome of the last upgrade attempt, once, on the next connect.
+	Upgrade *UpgradeReport `json:"upgrade,omitempty"`
+}
+
+// UpgradeRequest asks the agent to install Version. URL is a hub path; the agent
+// resolves it against its control URL and authenticates with its guest token.
+type UpgradeRequest struct {
+	Version  string           `json:"version"`
+	Artifact release.Artifact `json:"artifact"`
+	URL      string           `json:"url"`
+	Mode     string           `json:"mode"` // push (operator) or auto (agent pull)
+}
+
+// UpgradeResult is sent once the build is downloaded, verified and self-tested;
+// the agent restarts into it right after replying.
+type UpgradeResult struct {
+	OK      bool   `json:"ok"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Message string `json:"message,omitempty"`
+}
+
+type UpgradeReport struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Mode  string `json:"mode,omitempty"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// AgentLatest is the hub's answer to an agent polling for a newer build.
+type AgentLatest struct {
+	Version  string           `json:"version"`
+	Artifact release.Artifact `json:"artifact"`
+	URL      string           `json:"url"`
 }
 
 // DeviceFacts are short digests of the fingerprint inputs, so the hub can match a
@@ -315,6 +362,12 @@ type SessionInfo struct {
 	MACs        []string     `json:"macs,omitempty"`
 	RemoteAddr  string       `json:"remoteAddr,omitempty"`
 	ConnectedAt string       `json:"connectedAt,omitempty"`
+	Caps        []string     `json:"caps,omitempty"`
+	OS          string       `json:"os,omitempty"`
+	Arch        string       `json:"arch,omitempty"`
+	Runner      string       `json:"runner,omitempty"`
+	// Upgrade is the agent's report of its last upgrade attempt, sent once after it.
+	Upgrade *UpgradeReport `json:"upgrade,omitempty"`
 }
 
 type DisplayOpenResult struct {
@@ -478,6 +531,8 @@ func TimeoutFor(method string, execSec int) time.Duration {
 		return FileChunkWait
 	case MethodFilesOp, MethodTrash:
 		return FileOpTimeout
+	case MethodUpgrade:
+		return UpgradeTimeout
 	case MethodExec:
 		d := ExecDefault
 		if execSec > 0 {

@@ -1,18 +1,26 @@
 // @ts-check
 import { $, API, app, state, esc, rate, dur, ago, meter, osLabel, osKey, OS_NAMES, ip, api, every } from "./core.js";
+import { icon } from "./icons.js";
+import { latestAgent, outdated, canUpgrade, upgradeAll, upgradeOne } from "./upgrade.js";
+
+let latest = "";
 
 export async function dashboard() {
   app.innerHTML = `
     <section class="stats" id="stats"></section>
     <div class="chips" id="chips"></div>
+    <div id="upBanner"></div>
     <section class="card">
       <div class="card-head"><div><h2>全部主机</h2><p>每 ${state.config.intervalSec}s 采集一次，点击行查看详情与历史曲线</p></div>
-        <span class="muted" id="updated"></span></div>
+        <div class="head-side"><select class="m-sort" id="mSort" title="排序">${SORT_NAMES.map(([k, n]) => `<option value="${k}">${n}</option>`).join("")}</select>
+        <span class="muted" id="updated"></span></div></div>
       <div class="table-wrap" id="tableWrap"></div>
     </section>`;
   const load = async () => {
     try {
       state.systems = await api("/monitor/systems");
+      latest = await latestAgent();
+      renderBanner();
       renderStats();
       renderChips();
       renderTable();
@@ -21,9 +29,43 @@ export async function dashboard() {
       if (e.message !== "unauthorized") $("#updated").textContent = "加载失败：" + e.message;
     }
   };
+  const ms = /** @type {HTMLSelectElement} */ ($("#mSort"));
+  ms.value = state.sort.key;
+  ms.addEventListener("change", () => {
+    state.sort = { key: ms.value, dir: ms.value === "name" ? 1 : -1 };
+    renderTable();
+  });
   await load();
   every(5000, load);
 }
+
+function renderBanner() {
+  const box = $("#upBanner");
+  const behind = state.systems.filter((s) => s.online && outdated(s, latest));
+  const auto = behind.filter(canUpgrade);
+  if (!behind.length) { box.innerHTML = ""; return; }
+  const manual = behind.length - auto.length;
+  box.innerHTML = `<div class="up-banner">${icon("circle-arrow-up")}
+    <span><b>${behind.length}</b> 台在线探针落后于 ${esc(latest)}${manual ? `<span class="faint">（其中 ${manual} 台版本过旧，需手动更新一次）</span>` : ""}</span>
+    ${auto.length ? `<button class="btn" id="upAll">全部升级（${auto.length}）</button>` : ""}</div>`;
+  const btn = /** @type {HTMLButtonElement | null} */ ($("#upAll"));
+  if (btn) btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "升级中…";
+    try {
+      const res = await upgradeAll(auto.length, latest);
+      if (res) {
+        const bad = res.filter((r) => !r.ok);
+        alert(`已下发 ${res.length} 台：${res.length - bad.length} 台校验通过并重启中` +
+          (bad.length ? `\n\n失败：\n${bad.map((r) => `${nameOf(r.id)}：${r.message}`).join("\n")}` : ""));
+      }
+    } catch (e) { alert(/** @type {Error} */ (e).message); }
+    btn.disabled = false;
+  });
+}
+
+/** @param {string} id */
+const nameOf = (id) => { const s = state.systems.find((x) => x.id === id); return s ? s.name || s.hostname : id; };
 
 function renderStats() {
   const s = state.systems, on = s.filter((x) => x.online);
@@ -65,6 +107,9 @@ function renderChips() {
   }));
 }
 
+// The phone layout has no table header to click, so sorting moves into a select.
+const SORT_NAMES = [["name", "按名称"], ["cpu", "按 CPU"], ["mem", "按内存"], ["disk", "按磁盘"], ["net", "按网络"], ["agent", "按在线"]];
+
 const SORTS = {
   name: (s) => (s.name || s.hostname || "").toLowerCase(),
   cpu: (s) => (s.online && s.latest ? s.latest.cpuPct : -1),
@@ -102,28 +147,56 @@ export function renderTable() {
   const rows = filtered();
   const th = (k, l) => `<th class="sort" data-k="${k}">${l}<span class="ar">${state.sort.key === k ? (state.sort.dir > 0 ? "▲" : "▼") : "↕"}</span></th>`;
   wrap.innerHTML = `<table class="sys"><thead><tr>
-      ${th("name", "主机")}${th("cpu", "CPU")}${th("mem", "内存")}${th("disk", "磁盘")}${th("net", "网络")}<th>运行时长</th>${th("agent", "探针")}<th>标签</th>
+      ${th("name", "主机")}${th("cpu", "CPU")}${th("mem", "内存")}${th("disk", "磁盘")}${th("net", "网络")}<th class="c-up">运行时长</th>${th("agent", "探针")}<th class="c-tags">标签</th>
     </tr></thead><tbody>${rows.map(row).join("") || `<tr><td colspan="8" class="empty">没有匹配的主机</td></tr>`}</tbody></table>`;
   wrap.querySelectorAll("th.sort").forEach((h) => h.addEventListener("click", () => {
     const k = h.dataset.k;
     state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : k === "name" ? 1 : -1 };
+    const ms = /** @type {HTMLSelectElement | null} */ ($("#mSort"));
+    if (ms) ms.value = k;
     renderTable();
   }));
   wrap.querySelectorAll("tbody tr[data-id]").forEach((tr) => tr.addEventListener("click", () => (location.hash = "#/system/" + tr.dataset.id)));
+  wrap.querySelectorAll("button.ver-up").forEach((b) => b.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const s = state.systems.find((x) => x.id === b.dataset.up);
+    if (s) upgradeRow(s, /** @type {HTMLButtonElement} */ (b));
+  }));
+}
+
+/** @param {SystemView} s @param {HTMLButtonElement} b */
+async function upgradeRow(s, b) {
+  if (!canUpgrade(s)) {
+    alert(`${s.name || s.hostname} 的探针 ${s.version} ${s.online ? "不支持远程升级" : "不在线"}。\n\n` +
+      (s.online ? `请手动替换为 ${latest} 一次，之后即可在这里一键升级。` : "上线后再试。"));
+    return;
+  }
+  b.disabled = true;
+  b.classList.add("busy");
+  try {
+    const r = await upgradeOne(s, latest);
+    if (r) b.title = "已校验，正在重启…";
+    else { b.disabled = false; b.classList.remove("busy"); }
+  } catch (e) {
+    alert("升级失败：" + /** @type {Error} */ (e).message);
+    b.disabled = false;
+    b.classList.remove("busy");
+  }
 }
 
 /** @param {SystemView} s */
 function row(s) {
   const l = s.latest, on = s.online && l;
   const up = s.online && s.info && s.info.bootTime ? Date.now() / 1000 - s.info.bootTime : 0;
+  const tags = (s.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
   return `<tr data-id="${esc(s.id)}" class="${s.online ? "" : "offline"}">
-    <td><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div>${esc(s.name || s.hostname || s.id)}<div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div></div></div></td>
-    <td>${on ? meter(l.cpuPct) : `<span class="faint">—</span>`}</td>
-    <td>${on ? meter(l.memPct) : `<span class="faint">—</span>`}</td>
-    <td>${l ? meter(l.diskPct) : `<span class="faint">—</span>`}</td>
-    <td>${on ? `<div class="net"><span class="rx">↓ ${rate(l.netRxBps)}</span><br><span class="tx">↑ ${rate(l.netTxBps)}</span></div>` : `<span class="faint">—</span>`}</td>
-    <td style="font-size:12.5px">${s.online ? dur(up) : `<span class="faint">离线 ${ago(s.lastSeen)}</span>`}</td>
-    <td><span class="agent"><span class="dot ${s.online ? "up" : ""}"></span>${esc(s.version || "—")}</span></td>
-    <td>${(s.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</td>
+    <td class="c-name"><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div>${esc(s.name || s.hostname || s.id)}<div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div>${tags ? `<div class="name-tags">${tags}</div>` : ""}</div></div></td>
+    <td class="c-cpu" data-l="CPU">${on ? meter(l.cpuPct) : `<span class="faint">—</span>`}</td>
+    <td class="c-mem" data-l="内存">${on ? meter(l.memPct) : `<span class="faint">—</span>`}</td>
+    <td class="c-disk" data-l="磁盘">${l ? meter(l.diskPct) : `<span class="faint">—</span>`}</td>
+    <td class="c-net" data-l="网络">${on ? `<div class="net"><span class="rx">↓ ${rate(l.netRxBps)}</span><br><span class="tx">↑ ${rate(l.netTxBps)}</span></div>` : `<span class="faint">—</span>`}</td>
+    <td class="c-up" data-l="运行" style="font-size:12.5px">${s.online ? dur(up) : `<span class="faint">离线 ${ago(s.lastSeen)}</span>`}</td>
+    <td class="c-agent"><span class="agent"><span class="dot ${s.online ? "up" : ""}"></span>${esc(s.version || "—")}${outdated(s, latest) ? `<button type="button" class="ver-up" data-up="${esc(s.id)}" title="${canUpgrade(s) ? `升级到 ${esc(latest)}` : `可升级到 ${esc(latest)}（当前版本不支持远程升级）`}">${icon("circle-arrow-up")}</button>` : ""}</span></td>
+    <td class="c-tags">${tags}</td>
   </tr>`;
 }

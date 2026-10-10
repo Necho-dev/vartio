@@ -52,6 +52,9 @@ func installService() error {
 	if err != nil {
 		return err
 	}
+	if autostartRegistered() {
+		return fmt.Errorf("已设置为登录自启的托盘模式。托盘模式与服务二选一，请先执行：probe-agent.exe uninstall")
+	}
 	m, err := mgr.Connect()
 	if err != nil {
 		return err

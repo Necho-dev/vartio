@@ -8,14 +8,18 @@ let onModalClose = null;
  * @param {string} title
  * @param {string} html
  * @param {(() => void) | null} [onClose]
- * @param {{ wide?: boolean, fullscreen?: boolean }} [opts]
+ * @param {{ wide?: boolean, small?: boolean, fullscreen?: boolean }} [opts]
  */
 export function openModal(title, html, onClose, opts = {}) {
   document.querySelectorAll(".tip").forEach((t) => { /** @type {HTMLElement} */ (t).hidden = true; });
   $("#modalTitle").textContent = title;
   $("#modalBody").innerHTML = html;
   $("#modal").classList.toggle("wide", !!opts.wide);
-  $("#modalFull").hidden = !opts.fullscreen;
+  $("#modal").classList.toggle("small", !!opts.small);
+  // On phones the big tools (terminal, screen, files) always take the whole page.
+  const phone = !!opts.fullscreen && matchMedia("(max-width: 640px)").matches;
+  $("#modalFull").hidden = !opts.fullscreen || phone;
+  setFull(phone);
   $("#modal").hidden = false;
   onModalClose = onClose || null;
 }
@@ -23,14 +27,14 @@ export function closeModal() {
   if ($("#modal").hidden) return;
   setFull(false);
   $("#modal").hidden = true;
-  $("#modal").classList.remove("wide");
+  $("#modal").classList.remove("wide", "small");
   $("#modalBody").innerHTML = "";
   if (onModalClose) onModalClose();
   onModalClose = null;
 }
 // "Full" means filling the page, not the physical screen.
 /** @param {boolean} on */
-export function setFull(on) { $(".modal-box").classList.toggle("is-full", on); }
+export function setFull(on) { $(".modal-box").classList.toggle("is-full", !!on); }
 export function toggleFullscreen() { setFull(!$(".modal-box").classList.contains("is-full")); }
 $("#modalClose").addEventListener("click", closeModal);
 $("#modalFull").addEventListener("click", toggleFullscreen);

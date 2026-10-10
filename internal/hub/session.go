@@ -119,6 +119,11 @@ func (s *session) info() SessionInfo {
 		MACs:        append([]string(nil), s.hello.MACs...),
 		RemoteAddr:  s.remote,
 		ConnectedAt: s.since.UTC().Format(time.RFC3339),
+		Caps:        append([]string(nil), s.hello.Caps...),
+		OS:          s.hello.OS,
+		Arch:        s.hello.Arch,
+		Runner:      s.hello.Runner,
+		Upgrade:     s.hello.Upgrade,
 	}
 }
 

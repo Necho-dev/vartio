@@ -25,7 +25,7 @@ ICONS = [
     "folder-plus", "upload", "folder-up", "download", "pencil-line", "trash", "plus", "rotate-ccw",
     "triangle-alert", "folder", "file", "file-text", "file-image", "file-archive",
     # events
-    "network", "package", "user", "copy", "check",
+    "network", "package", "user", "copy", "check", "circle-arrow-up",
 ]
 
 TEMPLATE = """// @ts-check

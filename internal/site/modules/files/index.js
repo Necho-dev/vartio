@@ -35,15 +35,15 @@ export function openFiles(s) {
           <input id="fmFilter" class="fm-filter" placeholder="筛选当前目录">
         </div>
         <div class="fm-tools">
-          <button class="btn sm" id="fmMkdir">${icon("folder-plus")}新建文件夹</button>
-          <button class="btn sm" id="fmUpFiles">${icon("upload")}上传文件</button>
-          <button class="btn sm" id="fmUpDir">${icon("folder-up")}上传文件夹</button>
+          <button class="btn sm" id="fmMkdir" title="新建文件夹">${icon("folder-plus")}<span>新建文件夹</span></button>
+          <button class="btn sm" id="fmUpFiles" title="上传文件">${icon("upload")}<span>上传文件</span></button>
+          <button class="btn sm" id="fmUpDir" title="上传文件夹">${icon("folder-up")}<span>上传文件夹</span></button>
           <span class="fm-sep"></span>
-          <button class="btn sm" id="fmDown" disabled>${icon("download")}下载</button>
-          <button class="btn sm" id="fmRename" disabled>${icon("pencil-line")}重命名</button>
-          <button class="btn sm danger" id="fmDel" disabled>${icon("trash-2")}删除</button>
+          <button class="btn sm" id="fmDown" title="下载" disabled>${icon("download")}<span>下载</span></button>
+          <button class="btn sm" id="fmRename" title="重命名" disabled>${icon("pencil-line")}<span>重命名</span></button>
+          <button class="btn sm danger" id="fmDel" title="删除" disabled>${icon("trash-2")}<span>删除</span></button>
           <span class="fm-sep"></span>
-          <button class="btn sm" id="fmTrash" title="查看、恢复或清空远端回收站">${icon("trash")}回收站</button>
+          <button class="btn sm" id="fmTrash" title="查看、恢复或清空远端回收站">${icon("trash")}<span>回收站</span></button>
           <label class="fm-check"><input type="checkbox" id="fmHidden"> 显示隐藏文件</label>
           <input type="file" id="fmPickFiles" multiple hidden>
           <input type="file" id="fmPickDir" webkitdirectory multiple hidden>
@@ -68,6 +68,7 @@ export function openFiles(s) {
     document.removeEventListener("keydown", onKey, true);
   }, { wide: true, fullscreen: true });
 
+  const coarse = () => matchMedia("(pointer: coarse)").matches;
   /** @param {string} dir @param {string} name */
   const join = (dir, name) => (dir.endsWith(st.sep) ? dir + name : dir + st.sep + name);
   /** @param {string} p */
@@ -126,7 +127,7 @@ export function openFiles(s) {
     const hiddenN = st.entries.filter((e) => e.hidden).length;
     info(`${rows.length} 项${!st.hidden && hiddenN ? `（另有 ${hiddenN} 个隐藏）` : ""}` +
       (sel.length ? ` · 已选 ${sel.length} 项${size ? "，" + bytes(size) : ""}` : "") +
-      " · 双击文件夹进入、双击文本/图片预览 · Delete 删除 · F2 重命名");
+      (coarse() ? " · 点文件夹进入，勾选后用工具栏操作" : " · 双击文件夹进入、双击文本/图片预览 · Delete 删除 · F2 重命名"));
   }
 
   /** @param {string} path @param {"push" | "keep"} [how] */
@@ -208,6 +209,9 @@ export function openFiles(s) {
       st.anchor = p;
     } else {
       st.sel.clear(); st.sel.add(p); st.anchor = p;
+      // Touch has no double click: a tap on a folder opens it, a tap on a file selects it.
+      const it = coarse() && byPath(p);
+      if (it && it.isDir) return go(it.path);
     }
     paintSel();
   });

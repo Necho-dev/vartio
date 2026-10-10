@@ -132,7 +132,15 @@ function draw(box) {
   const dots = plotted.map((s) => el("circle", { r: 3, fill: s.color, visibility: "hidden" }, svg));
   const hit = el("rect", { x: PAD.l, y: PAD.t, width: iw, height: ih, fill: "transparent" }, svg);
   const tp = tip();
-  hit.addEventListener("mousemove", (ev) => {
+  const hide = () => {
+    tp.hidden = true;
+    cursor.setAttribute("visibility", "hidden");
+    dots.forEach((d) => d.setAttribute("visibility", "hidden"));
+  };
+  let hideTimer = 0;
+  /** @param {PointerEvent} ev */
+  const move = (ev) => {
+    clearTimeout(hideTimer);
     const r = svg.getBoundingClientRect();
     const mx = ((ev.clientX - r.left) / r.width) * W;
     const ms = from + ((mx - PAD.l) / iw) * span;
@@ -157,13 +165,16 @@ function draw(box) {
     const tw = tp.offsetWidth;
     let left = ev.clientX + 14;
     if (left + tw > window.innerWidth - 8) left = ev.clientX - tw - 14;
-    tp.style.left = left + "px";
+    tp.style.left = Math.max(8, left) + "px";
     tp.style.top = ev.clientY - 10 + "px";
-  });
-  hit.addEventListener("mouseleave", () => {
-    tp.hidden = true;
-    cursor.setAttribute("visibility", "hidden");
-    dots.forEach((d) => d.setAttribute("visibility", "hidden"));
+  };
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerdown", move);
+  // A tap ends with pointerleave right away; keep the reading up long enough to read it.
+  hit.addEventListener("pointerleave", (ev) => {
+    clearTimeout(hideTimer);
+    if (ev.pointerType === "touch") hideTimer = setTimeout(hide, 2500);
+    else hide();
   });
 }
 

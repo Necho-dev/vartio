@@ -29,7 +29,7 @@ export async function openScreen(s) {
       }
       img.onload = () => {
         const info = $("#screenInfo");
-        if (info) info.textContent = `${img.naturalWidth}×${img.naturalHeight} · ${frames} 帧 · ${(frames / ((Date.now() - t0) / 1000)).toFixed(1)} fps · 平均 ${bytes(bytesIn / frames)}/帧 · 双击画面铺满页面`;
+        if (info) info.textContent = `${img.naturalWidth}×${img.naturalHeight} · ${frames} 帧 · ${(frames / ((Date.now() - t0) / 1000)).toFixed(1)} fps · 平均 ${bytes(bytesIn / frames)}/帧${matchMedia("(pointer: coarse)").matches ? " · 横屏查看更清晰" : " · 双击画面铺满页面"}`;
       };
       img.src = next;
       if (url) URL.revokeObjectURL(url);

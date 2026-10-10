@@ -87,9 +87,9 @@ hub 侧：
 
 | 分类 | kind |
 |------|------|
-| `lifecycle` | `online` `offline`（含在线时长；hub 重启补记）`upgrade` `reboot`（启动时间前移 > 2 分钟）`rekey` `conflict` |
+| `lifecycle` | `online` `offline`（含在线时长；hub 重启补记）`upgrade`（注明远程升级 / 自动更新）`upgrade.failed`（已回滚，warn）`reboot`（启动时间前移 > 2 分钟）`rekey` `conflict` |
 | `change` | `remote`（来源 IP）`hostname` `os` `kernel` `cpu` `memory`（> 2%）`disk`（挂载点增删、容量 > 2%）`nic`（带 IPv4 的非容器网卡增删、IP/MAC 变化） |
-| `audit` | `term.open/close`（含时长）`display.open/close` `exec`（命令行 + 退出码）`power.*` `proc.*` `service.*` `file.upload/download/mkdir/rename/delete/trash` `trash.restore/purge/empty` `meta`（改名称/标签） |
+| `audit` | `term.open/close`（含时长）`display.open/close` `exec`（命令行 + 退出码）`power.*` `proc.*` `service.*` `file.upload/download/mkdir/rename/delete/trash` `trash.restore/purge/empty` `meta`（改名称/标签）`agent.upgrade`（下发升级，`from → to`） |
 
 每条事件都带 `ip`（当时探针的来源 IP）和 `version`（当时的 agent 版本）两个基础属性；审计事件另有 `actor`，是操作者 IP（有 `X-Forwarded-For` 取第一个）。只读操作（列目录、进程列表、文件预览 `preview=1`）和在到达 agent 前就被拒的请求（参数错误、缺 confirm、离线）不记；agent 侧失败记为 `level: warn`。
 
@@ -123,25 +123,87 @@ make probe-agent-windows   # 只打 Windows
 # 或：scripts/probe-agent-dist.sh linux/amd64 windows/amd64
 ```
 
-产物按版本、平台隔离（版本取 `cmd/probe-agent/main.go` 的 `agentVersion`），升级时整目录替换、旧版本可并存回滚：
+产物按版本、平台隔离（版本取 `cmd/probe-agent/main.go` 的 `agentVersion`），旧版本可并存回滚。打包后自动签名生成 `manifest.json`，`latest` 指向的版本就是 hub 对外提供的升级目标：
 
 ```
 dist/probe-agent/
 ├── probe-agent.env                         # 模板（GUEST_CONTROL_URL、GUEST_TOKEN），自行维护，勿提交
-├── latest -> 1.3.2
-└── 1.3.2/
-    ├── probe-agent-1.3.2-windows-amd64/    # probe-agent.exe + probe-agent.env（CRLF）
-    ├── probe-agent-1.3.2-windows-amd64.zip # 解压即得上面的同名目录
-    ├── probe-agent-1.3.2-darwin-arm64/     # probe-agent + probe-agent.env
+├── latest -> 1.9.0                         # hub 提供的升级目标；改指向即可发布 / 撤回
+└── 1.9.0/
+    ├── manifest.json                       # 每个平台的 size、sha256、Ed25519 签名
+    ├── probe-agent-1.9.0-windows-amd64/    # probe-agent.exe + probe-agent.env（CRLF）
+    ├── probe-agent-1.9.0-windows-amd64.zip # 解压即得上面的同名目录
+    ├── probe-agent-1.9.0-darwin-arm64/     # probe-agent + probe-agent.env
     └── …
 ```
 
-模板路径可用 `AGENT_ENV=path/to/env` 覆盖；不存在时包里不带 env。可执行文件旁的 `probe-agent.env` 会被自动加载。Windows 上替换版本前先停掉旧进程/服务，否则 exe 被占用会复制失败。安装：
+模板路径可用 `AGENT_ENV=path/to/env` 覆盖；不存在时包里不带 env。可执行文件旁的 `probe-agent.env` 会被自动加载。Windows 上手动替换版本前先停掉旧进程/服务，否则 exe 被占用会复制失败（≥ 1.9.0 可以远程升级，见下文）。Windows 包是 GUI 子系统（`-H windowsgui`），双击不弹控制台；macOS 包带 cgo（菜单栏图标），只能在 Mac 上打。
 
-```
-probe-agent.exe service install
-```
+## 运行方式
+
+| 方式 | 安装 | 适用 | `runner` |
+|------|------|------|----------|
+| Windows 托盘（推荐） | `probe-agent.exe install` | 有人登录的桌面；实时画面可用 | `tray` |
+| Windows 服务 | 管理员 `probe-agent.exe service install` | 无人登录的服务器；Session 0 看不到桌面，没有实时画面 | `service` |
+| macOS 菜单栏（推荐） | `./probe-agent install`（不要 sudo） | 登录用户的 LaunchAgent | `launchd` |
+| Linux | systemd unit | 服务器 | `systemd` |
+| 终端前台 | 直接运行 | 调试 | `console` |
+
+- **Windows 托盘**：`install` 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `ProbeAgent`，并立即在后台启动；`uninstall` 删除该项并结束本机的托盘探针。托盘与服务二选一，装了一种再装另一种会被拒绝。直接双击 exe 也会进入托盘模式，但不会开机自启
+- **macOS 菜单栏**：`install` 写 `~/Library/LaunchAgents/probe-agent.plist`（`RunAtLoad`、`KeepAlive`、仅 Aqua 会话）并 `launchctl bootstrap`。进程被结束会被 launchd 拉起，只有 `uninstall`（`bootout`）能停掉。不出现在程序坞。在终端里直接运行也会显示菜单栏图标，日志照常打到终端；root 或纯 SSH 登录时不显示
+- `install` 时如果 exe 旁还没有 `probe-agent.env`，会把当前环境里的 `GUEST_*` 写进去（0600），因为登录自启拿不到终端里的环境变量
+- 同一用户只允许一个实例：Windows 用命名互斥量 `Local\probe-agent`，并检查服务是否在跑；macOS 用 exe 旁的 `probe-agent.lock`（launchd 拉起的实例会等锁，而不是反复退出重启）。重复启动会提示"已在后台运行"后退出
+- 菜单内容：连接状态（已连接时长 / 未连接原因 / 升级中）、Hub 地址、版本与设备 ID、打开监控页、查看日志、立即重连。**没有退出**，防止误关监控
+- 日志：没有终端可写时（托盘、服务、launchd）写到 exe 旁的 `probe-agent.log`，超过 10MB 轮转为 `.log.1`；exe 目录不可写时落到用户缓存目录。`GUEST_LOG=stderr` 强制写 stderr，其他值视为日志路径
+- `GUEST_TRAY=off` 关掉托盘 / 菜单栏图标，Windows 上这时仍然没有控制台，日志写文件
 
 打进 `RV0000_BASE`。控制面 `LISTEN` 必须是 Guest **能出站到达** 的地址（常见 `PG-IKUAI-LAN` 上的内网 IP），不要用 `127.0.0.1`。
 
 身份：Guest SMBIOS UUID = ESXi `config.uuid` / `biosUuid`，vm-server 用它把 VM 对到探针；本机可用 `GUEST_BIOS_UUID` 覆盖。probe-hub 内部按设备 ID（见上文）区分主机。
+
+## 远程升级
+
+agent ≥ 1.9.0 在 Hello 里声明 `caps: ["upgrade"]` 和 `runner`（见上文「运行方式」）。更旧的版本需要手动更新一次。
+
+两种触发方式，都通过 HTTP 下载同一份签名产物：
+
+- **hub 推送**：监控页详情页「升级到 X」、首页横幅「全部升级」，或下面的 API。hub 发 `agent.upgrade` RPC，agent 下载、校验、自检通过后先回复，1 秒后再替换并重启
+- **agent 拉取**：`GUEST_AUTO_UPDATE=on` 时每 `GUEST_UPDATE_INTERVAL`（默认 `6h`，首次在 `min(间隔, 5m)` 的 0.5–1 倍之间随机）查一次 `GET /v1/probe/agent/latest`，有更新就走同一流程
+
+流程：
+
+1. 下载到 `probe-agent.new`，校验大小、SHA-256 和 Ed25519 签名。签名的消息是 `probe-agent|版本|os|arch|size|sha256`，公钥编译进 agent（`internal/release/release.pub`，可放多把用于轮换）。任何一步失败都不动原文件，hub 收到 `502 upgrade_failed`
+2. 自检：执行 `probe-agent.new version`，输出的版本和平台必须对得上
+3. 替换：`probe-agent` → `probe-agent.old`，`.new` → `probe-agent`，写 `probe-agent.upgrade.json`，再拉起看门狗（旧二进制 `upgrade-watch`）
+   - Unix：`exec` 原地换成新版本，PID 不变
+   - Windows 服务：看门狗停止并重新启动服务
+   - Windows 托盘 / 前台进程：旧进程先移除托盘图标再退出，看门狗等它退出后启动新版本（前台进程用新控制台，托盘不带控制台）
+4. 确认：新版本连上 hub、收到 HelloOK 后删掉状态文件。看门狗在试用期（`GUEST_UPGRADE_PROBATION`，默认 `2m`）内看到文件被删就退出
+5. 回滚：试用期过了还没确认，看门狗停掉新进程，`probe-agent` → `.bad`，`.old` → `probe-agent`，再按原方式启动旧版本。旧版本下次连上时上报结果，hub 记 `upgrade.failed`
+
+看门狗日志在 `probe-agent.upgrade.log`。Unix 前台运行时，回滚后由看门狗重新启动的进程日志写到 `probe-agent.log`。`GUEST_UPGRADE=off` 拒绝一切远程升级。
+
+终端前台运行也能升级，但重启或注销后不会自动启动，详情页会提示改用 `install`。
+
+### 发布
+
+```bash
+go run ./cmd/probe-release keygen   # 只需一次：私钥写到 ~/.config/probe-agent/release.key，公钥追加到 internal/release/release.pub
+make probe-agent-dist               # 构建并签名（私钥不存在时只告警，产物没有签名，agent 会拒绝）
+go run ./cmd/probe-release sign dist/probe-agent/1.9.0   # 单独重签
+```
+
+私钥不进仓库，请离线备份；丢失只能生成新密钥对，并让所有 agent 手动更新一次以信任新公钥。hub 从 `PROBE_HUB_AGENT_DIR`（默认 `./dist/probe-agent`，其次二进制旁的 `probe-agent/`）读取发布目录，不需要私钥。
+
+### API
+
+agent 用 `X-Guest-Token`：
+
+- `GET /v1/probe/agent/latest?os=&arch=&current=` — `{version, artifact, url}`；已是最新时返回 204
+- `GET /v1/probe/agent/download/{version}/{os}/{arch}` — 二进制
+
+管理端（Bearer）：
+
+- `GET /v1/probe/releases` — `{latest, versions: [{version, created, platforms}]}`
+- `POST /v1/probe/sessions/{id}/upgrade` — `{version?, confirm: true}`，`version` 不传时用 latest。agent 太旧返回 `409 upgrade_unsupported`，版本相同返回 `409 already_current`
+- `POST /v1/probe/upgrade` — `{version?, ids?, confirm: true}`；不传 `ids` 时选所有在线、可升级、且落后于目标版本的探针，并发 4 台，返回 `[{id, ok, from, to, message?}]`

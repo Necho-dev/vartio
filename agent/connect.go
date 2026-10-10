@@ -8,7 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,22 +19,47 @@ import (
 )
 
 func serve(ctx context.Context, cfg config) error {
+	go autoUpdate(ctx, cfg)
 	backoff := time.Second
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		connected, err := dialOnce(ctx, cfg)
+		setLink(func(s *linkState) { s.Dialing = true })
+		sctx, cancel := context.WithCancel(ctx)
+		var manual atomic.Bool
+		go func() {
+			select {
+			case <-reconnectReq:
+				manual.Store(true)
+				cancel()
+			case <-sctx.Done():
+			}
+		}()
+		connected, err := dialOnce(sctx, cfg)
+		cancel()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if connected {
+		if connected || manual.Load() {
 			backoff = time.Second
 		}
+		if manual.Load() {
+			err = errors.New("reconnect requested")
+		}
+		setLink(func(s *linkState) {
+			s.Connected, s.Dialing, s.Since, s.Err = false, false, time.Now(), err.Error()
+		})
 		log.Printf("disconnected: %v; retry in %s", err, backoff)
+		if manual.Load() {
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-reconnectReq:
+			backoff = time.Second
+			continue
 		case <-time.After(backoff):
 		}
 		if backoff < 15*time.Second {
@@ -61,7 +88,11 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 		HostName: hostname(),
 		Version:  agentVersion,
 		MACs:     listMACs(),
-		Caps:     []string{guest.CapMultiTerm},
+		Caps:     caps(),
+		OS:       runtime.GOOS,
+		Arch:     runtime.GOARCH,
+		Runner:   runnerName(),
+		Upgrade:  pendingReport(),
 	}
 	if err := conn.WriteJSON(hello); err != nil {
 		return false, err
@@ -77,6 +108,10 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 		return false, errHello
 	}
 	log.Printf("connected as %s", cfg.DeviceID)
+	confirmUpgrade()
+	setLink(func(s *linkState) {
+		s.Connected, s.Dialing, s.Since, s.Err, s.Probation = true, false, time.Now(), "", ""
+	})
 	// ReadJSON does not watch ctx; close the socket so shutdown is immediate and
 	// the hub sees the disconnect now rather than at the next poll.
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
@@ -88,6 +123,14 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 }
 
 var errHello = errors.New("hello rejected")
+
+func caps() []string {
+	c := []string{guest.CapMultiTerm}
+	if upgradeEnabled() {
+		c = append(c, guest.CapUpgrade)
+	}
+	return c
+}
 
 type agent struct {
 	cfg     config

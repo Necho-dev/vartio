@@ -112,6 +112,31 @@ interface SystemView {
   info: HostInfo;
   latest?: Sample;
   events?: SystemEvent[];
+  /** live session only */
+  caps?: string[];
+  /** service | console | systemd | launchd */
+  runner?: string;
+}
+
+/** GET /releases */
+interface Releases {
+  latest?: string;
+  versions: { version: string; created: string; platforms: string[] }[];
+}
+
+interface UpgradeResult {
+  ok: boolean;
+  from: string;
+  to: string;
+  message?: string;
+}
+
+interface BatchResult {
+  id: string;
+  ok: boolean;
+  from?: string;
+  to?: string;
+  message?: string;
 }
 
 /** monitor.Series; every array is aligned to t (unix ms). */
@@ -130,6 +155,8 @@ interface Series {
   netRx: number[];
   netTx: number[];
   load1: number[];
+  load5: (number | null)[];
+  load15: (number | null)[];
   temp: (number | null)[];
   procs: number[];
   /** mount -> used bytes */

@@ -13,7 +13,6 @@ import (
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
-	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
@@ -62,10 +61,8 @@ func collectMetrics() guest.Metrics {
 	if pct, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pct) > 0 {
 		out.CPUPct = pct[0]
 	}
-	if runtime.GOOS != "windows" {
-		if l, err := load.AvgWithContext(ctx); err == nil {
-			out.Load = [3]float64{l.Load1, l.Load5, l.Load15}
-		}
+	if l, ok := loadAvg(ctx); ok {
+		out.Load = l
 	}
 	if vm, err := mem.VirtualMemoryWithContext(ctx); err == nil {
 		out.MemTotal = vm.Total

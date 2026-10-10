@@ -29,6 +29,8 @@ type Hub struct {
 	OnReject func(hello Hello, remote, reason string)
 	// OnAudit receives operator actions performed through the probe API.
 	OnAudit func(Audit)
+	// Releases is where signed agent builds are offered from; nil disables upgrades.
+	Releases *Releases
 
 	mu       sync.Mutex
 	sessions map[string]*session

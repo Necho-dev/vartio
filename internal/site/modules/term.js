@@ -30,6 +30,11 @@ function loadXterm() {
 const TERM_FONT = '"JetBrains Mono", "Cascadia Mono", "SF Mono", SFMono-Regular, Menlo, Consolas, "Symbols Nerd Font Mono", "PingFang SC", "Microsoft YaHei", monospace';
 
 const TERM_MAX = 8;
+// Keys a phone keyboard lacks; "ctrl" arms Ctrl for the next typed key.
+const TERM_KEYS = [["Esc", "\x1b"], ["Tab", "\t"], ["Ctrl", "ctrl"], ["↑", "\x1b[A"], ["↓", "\x1b[B"], ["←", "\x1b[D"], ["→", "\x1b[C"],
+  ["Home", "\x1b[H"], ["End", "\x1b[F"], ["|", "|"], ["/", "/"], ["-", "-"], ["~", "~"]];
+/** @param {string} d */
+const ctrlKey = (d) => /^[a-z@[\\\]^_]$/i.test(d) ? String.fromCharCode(d.toUpperCase().charCodeAt(0) & 31) : d;
 const TERM_THEMES = {
   dark: {
     background: "#0b0b0e", foreground: "#e4e4e7", cursor: "#22c55e", cursorAccent: "#0b0b0e",
@@ -51,10 +56,16 @@ const termTheme = () => TERM_THEMES[document.documentElement.dataset.theme === "
 /** @param {SystemView} s */
 export async function openTerm(s) {
   const tabs = [];
-  let active = null, seq = 0, ro = null, closed = false;
+  let active = null, seq = 0, ro = null, closed = false, ctrl = false;
+  const enc = new TextEncoder();
+  const send = (t, d) => { if (t && t.ws && t.ws.readyState === 1) t.ws.send(enc.encode(d)); };
+  /** @param {boolean} on */
+  const armCtrl = (on) => { ctrl = on; const b = document.querySelector(`#termKeys [data-i="${TERM_KEYS.findIndex((x) => x[1] === "ctrl")}"]`); if (b) b.classList.toggle("on", on); };
   const base = `终端 · ${s.name}`;
   openModal(base, `<div class="term-tabs" id="termTabs"><button class="term-add" id="termAdd" title="新建标签页">${icon("plus")}</button></div>
-    <div class="term" id="term"></div><p class="modal-foot" id="termInfo">正在连接…</p>`, () => {
+    <div class="term" id="term"></div>
+    <div class="term-keys" id="termKeys">${TERM_KEYS.map(([l], i) => `<button data-i="${i}">${l}</button>`).join("")}</div>
+    <p class="modal-foot" id="termInfo">正在连接…</p>`, () => {
     closed = true;
     if (ro) ro.disconnect();
     tabs.splice(0).forEach(dispose);
@@ -65,7 +76,7 @@ export async function openTerm(s) {
     const el = $("#termInfo");
     if (!el) return;
     el.textContent = t.dead ? "会话已结束 · 点击 + 新建标签页"
-      : t.ws && t.ws.readyState === 1 ? `已连接 · ${t.term.cols}×${t.term.rows} · ${tabs.length}/${TERM_MAX} 个会话 · 空闲 15 分钟自动断开 · 双击标题或右上角按钮铺满页面`
+      : t.ws && t.ws.readyState === 1 ? `已连接 · ${t.term.cols}×${t.term.rows} · ${tabs.length}/${TERM_MAX} 个会话 · 空闲 15 分钟自动断开${matchMedia("(pointer: coarse)").matches ? "" : " · 双击标题或右上角按钮铺满页面"}`
       : "正在连接…";
   };
   const label = (t) => {
@@ -140,7 +151,6 @@ export async function openTerm(s) {
       const ws = new WebSocket(`${proto}//${location.host}${tk.ws}&cols=${t.term.cols}&rows=${t.term.rows}`);
       t.ws = ws;
       ws.binaryType = "arraybuffer";
-      const enc = new TextEncoder();
       ws.onopen = () => info(t);
       ws.onmessage = (ev) => t.term.write(typeof ev.data === "string" ? ev.data : new Uint8Array(ev.data));
       ws.onclose = () => {
@@ -149,7 +159,10 @@ export async function openTerm(s) {
         label(t);
         info(t);
       };
-      t.term.onData((d) => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
+      t.term.onData((d) => {
+        if (ctrl && d.length === 1) { d = ctrlKey(d); armCtrl(false); }
+        send(t, d);
+      });
       t.term.onResize(({ cols, rows }) => {
         if (ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols, rows }));
         info(t);
@@ -166,6 +179,16 @@ export async function openTerm(s) {
     await loadXterm();
     if (closed) return;
     $("#termAdd").addEventListener("click", addTab);
+    // pointerdown + preventDefault keeps focus (and the soft keyboard) on the terminal.
+    $("#termKeys").addEventListener("pointerdown", (e) => {
+      const b = /** @type {HTMLElement} */ (e.target).closest("button");
+      if (!b) return;
+      e.preventDefault();
+      const k = TERM_KEYS[+b.dataset.i][1];
+      if (k === "ctrl") return armCtrl(!ctrl);
+      send(active, ctrl && k.length === 1 ? ctrlKey(k) : k);
+      armCtrl(false);
+    });
     let pending = 0;
     ro = new ResizeObserver(() => {
       cancelAnimationFrame(pending);

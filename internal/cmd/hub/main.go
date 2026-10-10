@@ -58,6 +58,7 @@ func main() {
 	}
 
 	hub := guest.NewHub(token)
+	hub.Releases = &guest.Releases{Dir: agentDir()}
 	mon := monitor.New(hub, store, interval, retention)
 	if err := mon.Load(ctx); err != nil {
 		log.Fatalf("load systems: %v", err)
@@ -81,8 +82,8 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(c)
 	}()
-	log.Printf("probe-hub http://%s  ui=/  agents=%s  interval=%s retention=%s history=%v auth=%v",
-		listen, guest.PathConnect, interval, retention, store != nil, admin != "")
+	log.Printf("probe-hub http://%s  ui=/  agents=%s  interval=%s retention=%s history=%v auth=%v releases=%s",
+		listen, guest.PathConnect, interval, retention, store != nil, admin != "", hub.Releases.Dir)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -93,6 +94,27 @@ func loadEnv() {
 	if exe, err := os.Executable(); err == nil {
 		_ = godotenv.Load(filepath.Join(filepath.Dir(exe), "probe-hub.env"))
 	}
+}
+
+// agentDir holds the signed agent builds the hub offers (scripts/probe-agent-dist.sh output).
+func agentDir() string {
+	if d := strings.TrimSpace(os.Getenv("PROBE_HUB_AGENT_DIR")); d != "" {
+		return d
+	}
+	for _, d := range []string{filepath.Join("dist", "probe-agent"), filepath.Join(exeDir(), "probe-agent")} {
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			return d
+		}
+	}
+	return ""
+}
+
+func exeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	return filepath.Dir(exe)
 }
 
 func firstEnv(keys ...string) string {

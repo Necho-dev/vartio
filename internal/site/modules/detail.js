@@ -8,6 +8,9 @@ import { openTerm } from "./term.js";
 import { openScreen } from "./screen.js";
 import { openProcs } from "./procs.js";
 import { openFiles } from "./files/index.js";
+import { latestAgent, outdated, canUpgrade, upgradeOne, RUNNERS } from "./upgrade.js";
+
+let latest = "";
 
 const C = { blue: "#3b82f6", green: "#22c55e", cyan: "#06b6d4", violet: "#8b5cf6", orange: "#f97316", pink: "#ec4899", yellow: "#eab308", faint: "#71717a" };
 const RANGES = [["1h", "1 小时"], ["6h", "6 小时"], ["24h", "24 小时"], ["7d", "7 天"], ["30d", "30 天"]];
@@ -20,6 +23,7 @@ export async function detail(id) {
   let sys;
   try {
     sys = await api("/monitor/systems/" + encodeURIComponent(id));
+    latest = await latestAgent();
   } catch (e) {
     if (e.message !== "unauthorized") $("#d").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
@@ -38,8 +42,8 @@ export async function detail(id) {
     <section class="grid2">
       <div class="card panel"><h3>磁盘分区</h3><p class="desc">最新一次采样</p><div id="disks"></div></div>
       <div class="card panel"><h3>网络接口</h3><p class="desc">带 IPv4 的物理网卡</p><div id="nics"></div></div>
-      <div class="card panel"><div class="seg ev-seg" id="evSeg">${EV_CATS.map(([k, n]) => `<button data-c="${k}" class="${state.evCat === k ? "on" : ""}">${n}</button>`).join("")}</div>
-        <h3>事件记录</h3><p class="desc">上下线、重启、配置变化与运维操作</p><ul class="events" id="events"></ul></div>
+      <div class="card panel ev-panel"><div class="seg ev-seg" id="evSeg">${EV_CATS.map(([k, n]) => `<button data-c="${k}" class="${state.evCat === k ? "on" : ""}">${n}</button>`).join("")}</div>
+        <h3>事件记录</h3><p class="desc">上下线、重启、配置变化与运维操作</p><div class="ev-box"><ul class="events" id="events"></ul></div></div>
       <div class="card panel"><h3>主机信息</h3><p class="desc">探针上报的静态信息</p><div id="info"></div></div>
     </section>`;
   renderHero(sys);
@@ -55,6 +59,7 @@ export async function detail(id) {
   every(Math.max(5, state.config.intervalSec) * 1000, async () => {
     try {
       sys = await api("/monitor/systems/" + encodeURIComponent(id));
+      latest = await latestAgent();
       renderHero(sys);
       renderInfo(sys);
       if (state.evCat) loadEvents(sys); else renderEvents(sys.events || []);
@@ -74,6 +79,7 @@ const EV_NAMES = {
   "service.start": "启动服务", "service.stop": "停止服务", "service.restart": "重启服务",
   "file.upload": "上传文件", "file.download": "下载文件", "file.mkdir": "新建目录", "file.rename": "重命名", "file.delete": "永久删除", "file.trash": "移入回收站",
   "trash.restore": "还原文件", "trash.purge": "彻底删除", "trash.empty": "清空回收站", meta: "编辑信息",
+  "agent.upgrade": "下发升级", "upgrade.failed": "升级失败",
 };
 
 /** @param {SystemView} s */
@@ -163,7 +169,8 @@ function renderHero(s) {
         ${fact("CPU", i.cpuModel ? `${i.cpuModel} (${i.cores || "?"}C/${i.threads || "?"}T)` : "")}
         ${fact("内存", l ? bytes(l.memTotal) : "")}
         ${s.online ? fact("运行", dur(up)) : fact("最后在线", ago(s.lastSeen))}
-        ${fact("探针", s.version)}${l && s.online ? fact("延迟", l.latencyMs + " ms") : ""}
+        ${fact("探针", s.version)}${outdated(s, latest) && !canUpgrade(s) && s.online ? `<span class="faint">可更新至 ${esc(latest)}，当前版本需手动更新一次</span>` : ""}
+        ${l && s.online ? fact("延迟", l.latencyMs + " ms") : ""}
       </div>
     </div>
     <div class="hero-actions">
@@ -172,6 +179,7 @@ function renderHero(s) {
       <button class="btn" id="screenBtn" ${s.online ? "" : "disabled"}>${icon("monitor")}实时画面</button>
       <button class="btn" id="procBtn" ${s.online ? "" : "disabled"}>${icon("list")}进程</button>
       <button class="btn" id="filesBtn" ${s.online ? "" : "disabled"}>${icon("folder-open")}文件</button>
+      ${canUpgrade(s) && outdated(s, latest) ? `<button class="btn primary" id="upBtn">${icon("circle-arrow-up")}升级到 ${esc(latest)}</button>` : ""}
       ${s.online ? "" : `<button class="btn danger" id="delBtn">${icon("trash-2")}删除</button>`}
     </div>`;
   $("#rangeSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
@@ -185,6 +193,20 @@ function renderHero(s) {
   $("#screenBtn").addEventListener("click", () => openScreen(s));
   $("#procBtn").addEventListener("click", () => openProcs(s));
   $("#filesBtn").addEventListener("click", () => openFiles(s));
+  const upBtn = /** @type {HTMLButtonElement | null} */ ($("#upBtn"));
+  if (upBtn) upBtn.addEventListener("click", async () => {
+    upBtn.disabled = true;
+    upBtn.textContent = "下载校验中…";
+    try {
+      const r = await upgradeOne(s, latest);
+      upBtn.textContent = r ? "已校验，正在重启…" : `升级到 ${latest}`;
+      if (!r) upBtn.disabled = false;
+    } catch (e) {
+      alert("升级失败：" + /** @type {Error} */ (e).message);
+      upBtn.textContent = `升级到 ${latest}`;
+      upBtn.disabled = false;
+    }
+  });
   const del = $("#delBtn");
   if (del) del.addEventListener("click", async () => {
     if (!confirm(`删除 ${s.name} 及其全部历史数据？`)) return;
@@ -197,15 +219,19 @@ function renderHero(s) {
 function renderInfo(s) {
   const l = s.latest || /** @type {Partial<Sample>} */ ({}), i = s.info || {};
   const { disks } = poolDisks(l);
-  $("#disks").innerHTML = disks.length ? `<table class="kv-table"><tr><th>挂载点</th><th>文件系统</th><th>已用 / 总量</th><th style="width:38%">使用率</th></tr>
+  $("#disks").innerHTML = disks.length ? `<table class="kv-table disk-table"><tr><th>挂载点</th><th>文件系统</th><th>已用 / 总量</th><th style="width:38%">使用率</th></tr>
     ${disks.map((d) => { const p = d.total ? (d.used / d.total) * 100 : 0; return `<tr><td>${esc(d.mount)}${d.mount === l.rootMount ? ' <span class="tag">系统</span>' : ""}${d.merged.length ? `<div class="faint" title="同一存储池中的卷共享容量，只计一次">同一存储池：${d.merged.map(esc).join("、")}</div>` : ""}</td><td>${esc(d.fs || "—")}</td><td>${bytes(d.used)} / ${bytes(d.total)}</td><td>${meter(p)}</td></tr>`; }).join("")}</table>` : `<div class="faint">暂无</div>`;
   const nics = l.nics || [];
-  $("#nics").innerHTML = nics.length ? `<table class="kv-table"><tr><th>名称</th><th>IPv4</th><th>MAC</th><th>状态</th></tr>
+  $("#nics").innerHTML = nics.length ? `<table class="kv-table nic-table"><tr><th>名称</th><th>IPv4</th><th>MAC</th><th>状态</th></tr>
     ${nics.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.ipv4 || "—")}</td><td>${esc(n.mac || "—")}</td><td>${n.up ? '<span style="color:var(--green)">up</span>' : '<span class="faint">down</span>'}</td></tr>`).join("")}</table>` : `<div class="faint">暂无</div>`;
   const kv = [["设备 ID", s.id], ["BIOS UUID", s.biosUuid], ["操作系统", [i.os, i.platform, i.platformVersion].filter(Boolean).join(" / ")], ["内核", i.kernel], ["架构", i.arch],
-    ["CPU", i.cpuModel], ["核心/线程", i.cores ? `${i.cores} / ${i.threads}` : ""], ["进程数", l.procs], ["首次接入", s.firstSeen && new Date(s.firstSeen).toLocaleString()],
+    ["CPU", i.cpuModel], ["核心/线程", i.cores ? `${i.cores} / ${i.threads}` : ""], ["进程数", l.procs],
+    ["运行方式", s.online && s.runner ? RUNNERS[s.runner] || s.runner : ""], ["首次接入", s.firstSeen && new Date(s.firstSeen).toLocaleString()],
     ["本次连接", s.online && s.connectedAt ? new Date(s.connectedAt).toLocaleString() : ""], ["最近采样", l.ts && new Date(l.ts).toLocaleString()]];
-  $("#info").innerHTML = `<table class="kv-table">${kv.filter(([, v]) => v !== "" && v != null).map(([k, v]) => `<tr><th style="width:110px">${k}</th><td>${esc(v)}</td></tr>`).join("")}</table>`;
+  const hint = !s.online || s.runner !== "console" ? ""
+    : i.os === "windows" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>以前台进程运行，重启或注销后不会自动启动。建议执行 <code>probe-agent.exe install</code> 设为登录自启的托盘模式；无人登录的服务器以管理员执行 <code>probe-agent.exe service install</code>。</span></p>`
+    : i.os === "darwin" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>在终端里前台运行，重启或注销后不会自动启动。建议执行 <code>./probe-agent install</code> 设为登录自启，在菜单栏后台运行。</span></p>` : "";
+  $("#info").innerHTML = `<table class="kv-table info-table">${kv.filter(([, v]) => v !== "" && v != null).map(([k, v]) => `<tr><th style="width:110px">${k}</th><td>${esc(v)}</td></tr>`).join("")}</table>${hint}`;
 }
 
 /** @param {SystemView} s */
@@ -250,8 +276,13 @@ async function loadSeries(s) {
 
   const hasLoad = d.load1.some((v) => v > 0);
   $("#p-load").querySelector("h3").textContent = hasLoad ? "系统负载" : "进程数";
-  $("#desc-load").textContent = hasLoad ? "1 分钟平均负载" : "运行中的进程总数（Windows 无 load average）";
-  if (hasLoad) chart("load", { ...base, fmt: (v) => (v == null ? "—" : v.toFixed(2)), series: [{ label: "load1", color: C.pink, data: d.load1 }] },
+  const winLoad = s.info?.os === "windows";
+  $("#desc-load").textContent = !hasLoad ? "运行中的进程总数（agent ≥ 1.8.1 提供 Windows 近似负载）"
+    : winLoad ? "近似负载：CPU 折算 + 处理器队列长度（1 / 5 / 15 分钟）" : "1 / 5 / 15 分钟平均负载";
+  if (hasLoad) chart("load", { ...base, fmt: (v) => (v == null ? "—" : v.toFixed(2)), series: [
+    { label: "load1", color: C.pink, data: d.load1 },
+    { label: "load5", color: C.violet, data: d.load5, area: false, width: 1.3 },
+    { label: "load15", color: C.cyan, data: d.load15, area: false, width: 1.3 }] },
     s.online && l.load ? l.load.map((x) => x.toFixed(2)).join(" / ") : "");
   else chart("load", { ...base, fmt: (v) => (v == null ? "—" : Math.round(v) + ""), series: [{ label: "进程", color: C.pink, data: d.procs }] },
     s.online && l.procs ? l.procs + " 个" : "");
@@ -322,11 +353,11 @@ function chart(id, opts, now) {
 /** @param {SystemView} s */
 function editSystem(s) {
   openModal("编辑主机", `
-    <form id="editForm" style="max-width:460px">
+    <form id="editForm">
       <div class="form-row"><label>显示名称（留空则使用主机名 ${esc(s.hostname)}）</label><input class="input" name="name" value="${esc(s.name)}"></div>
       <div class="form-row"><label>标签（逗号分隔）</label><input class="input" name="tags" value="${esc((s.tags || []).join(", "))}" placeholder="例如：办公室, 测试机"></div>
       <div class="form-actions"><button type="button" class="btn" id="cancelEdit">取消</button><button class="btn primary" type="submit">保存</button></div>
-    </form>`);
+    </form>`, null, { small: true });
   $("#cancelEdit").addEventListener("click", closeModal);
   $("#editForm").addEventListener("submit", async (e) => {
     e.preventDefault();

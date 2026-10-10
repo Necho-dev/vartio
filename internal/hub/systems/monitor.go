@@ -32,6 +32,9 @@ type System struct {
 	ConnectedAt time.Time          `json:"connectedAt"`
 	Info        guest.SysInfo      `json:"info"`
 	Latest      *Sample            `json:"latest,omitempty"`
+	// Caps and Runner come from the live session only.
+	Caps   []string `json:"caps,omitempty"`
+	Runner string   `json:"runner,omitempty"`
 }
 
 type Sample struct {
@@ -211,7 +214,15 @@ func (m *Monitor) onConnect(info guest.SessionInfo) {
 	}
 	events = append(events, Event{Kind: "online", Category: CatLifecycle, Level: LevelInfo})
 	if sys.Version != "" && info.Version != "" && sys.Version != info.Version {
-		events = append(events, Event{Kind: "upgrade", Category: CatLifecycle, Level: LevelInfo, Detail: sys.Version + " → " + info.Version})
+		detail := sys.Version + " → " + info.Version
+		if u := info.Upgrade; u != nil && u.OK && u.To == info.Version {
+			detail += upgradeMode(u.Mode)
+		}
+		events = append(events, Event{Kind: "upgrade", Category: CatLifecycle, Level: LevelInfo, Detail: detail})
+	}
+	if u := info.Upgrade; u != nil && !u.OK {
+		events = append(events, Event{Kind: "upgrade.failed", Category: CatLifecycle, Level: LevelWarn,
+			Detail: u.From + " → " + u.To + upgradeMode(u.Mode) + " 未成功，已回滚：" + u.Error})
 	}
 	if sys.RemoteAddr != "" && info.RemoteAddr != "" && sys.RemoteAddr != info.RemoteAddr {
 		events = append(events, Event{Kind: "remote", Category: CatChange, Level: LevelInfo, Detail: sys.RemoteAddr + " → " + info.RemoteAddr})
@@ -223,6 +234,7 @@ func (m *Monitor) onConnect(info guest.SessionInfo) {
 	sys.HostName = info.HostName
 	sys.Version = info.Version
 	sys.RemoteAddr = info.RemoteAddr
+	sys.Caps, sys.Runner = info.Caps, info.Runner
 	sys.Online = true
 	sys.ConnectedAt = at
 	sys.LastSeen = at
@@ -638,4 +650,14 @@ func parseTime(s string) time.Time {
 		return time.Now()
 	}
 	return t
+}
+
+func upgradeMode(mode string) string {
+	switch mode {
+	case "auto":
+		return "（自动更新）"
+	case "push":
+		return "（远程升级）"
+	}
+	return ""
 }
