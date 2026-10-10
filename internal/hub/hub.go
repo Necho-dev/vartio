@@ -124,6 +124,15 @@ func (h *Hub) Alive(key string) bool {
 	return s != nil && s.alive(3*time.Second)
 }
 
+// RTT measures the WebSocket round trip to the agent (ping/pong, no agent work).
+func (h *Hub) RTT(key string) (time.Duration, bool) {
+	s, _ := h.lookup(key)
+	if s == nil {
+		return 0, false
+	}
+	return s.rtt(3 * time.Second)
+}
+
 // Kick closes the session under exactly this device id; OnDisconnect follows.
 func (h *Hub) Kick(key string) {
 	h.mu.Lock()

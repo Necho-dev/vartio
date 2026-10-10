@@ -63,6 +63,14 @@ interface Sample {
   diskWriteBps: number;
   netRxBps: number;
   netTxBps: number;
+  netRxPps?: number;
+  netTxPps?: number;
+  /** counts since the previous sample */
+  netErrs?: number;
+  netDrops?: number;
+  /** total/udp/other: socket counts by protocol (agent >= 1.15.0) */
+  tcp?: { established: number; timeWait: number; listen: number; total?: number; udp?: number; other?: number; outSegs: number; retrans: number };
+  retransPct?: number;
   load: [number, number, number];
   tempMax?: number;
   procs: number;
@@ -167,6 +175,30 @@ interface Series {
   diskWrite: number[];
   netRx: number[];
   netTx: number[];
+  netRxMax: number[];
+  netTxMax: number[];
+  /** bytes moved within each bucket */
+  netRxBytes: number[];
+  netTxBytes: number[];
+  /** the rest are null before agent 1.14.0 */
+  netRxPps: (number | null)[];
+  netTxPps: (number | null)[];
+  /** counts within each bucket */
+  netErrs: (number | null)[];
+  netDrops: (number | null)[];
+  tcpEstab: (number | null)[];
+  tcpTimeWait: (number | null)[];
+  tcpListen: (number | null)[];
+  /** percent */
+  retrans: (number | null)[];
+  latency: (number | null)[];
+  /** sums within each bucket; bytes on macOS */
+  tcpOutSegs: (number | null)[];
+  tcpRetransSegs: (number | null)[];
+  /** socket counts by protocol (agent >= 1.15.0) */
+  connTcp: (number | null)[];
+  connUdp: (number | null)[];
+  connOther: (number | null)[];
   load1: number[];
   load5: (number | null)[];
   load15: (number | null)[];

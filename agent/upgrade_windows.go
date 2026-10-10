@@ -104,7 +104,7 @@ func controlService(start bool) error {
 		}
 		return err
 	}
-	for i := 0; i < 60; i++ {
+	for range 60 {
 		q, err := s.Query()
 		if err != nil {
 			return err

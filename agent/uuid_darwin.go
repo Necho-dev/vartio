@@ -12,7 +12,7 @@ func runIORegUUID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		if !strings.Contains(line, "IOPlatformUUID") {
 			continue
 		}

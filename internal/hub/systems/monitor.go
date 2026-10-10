@@ -5,7 +5,9 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -38,28 +40,43 @@ type System struct {
 }
 
 type Sample struct {
-	TS           time.Time          `json:"ts"`
-	CPUPct       float64            `json:"cpuPct"`
-	MemUsed      uint64             `json:"memUsed"`
-	MemTotal     uint64             `json:"memTotal"`
-	MemPct       float64            `json:"memPct"`
-	SwapUsed     uint64             `json:"swapUsed"`
-	SwapTotal    uint64             `json:"swapTotal"`
-	DiskUsed     uint64             `json:"diskUsed"`
-	DiskTotal    uint64             `json:"diskTotal"`
-	DiskPct      float64            `json:"diskPct"`
-	RootMount    string             `json:"rootMount,omitempty"`
-	DiskReadBps  float64            `json:"diskReadBps"`
-	DiskWriteBps float64            `json:"diskWriteBps"`
-	NetRxBps     float64            `json:"netRxBps"`
-	NetTxBps     float64            `json:"netTxBps"`
-	Load         [3]float64         `json:"load"`
-	TempMax      float64            `json:"tempMax,omitempty"`
-	Procs        int                `json:"procs"`
-	LatencyMs    int64              `json:"latencyMs"`
-	Disks        []guest.DiskUsage  `json:"disks,omitempty"`
-	Temps        []guest.TempSensor `json:"temps,omitempty"`
-	NICs         []guest.NICInfo    `json:"nics,omitempty"`
+	TS           time.Time `json:"ts"`
+	CPUPct       float64   `json:"cpuPct"`
+	MemUsed      uint64    `json:"memUsed"`
+	MemTotal     uint64    `json:"memTotal"`
+	MemPct       float64   `json:"memPct"`
+	SwapUsed     uint64    `json:"swapUsed"`
+	SwapTotal    uint64    `json:"swapTotal"`
+	DiskUsed     uint64    `json:"diskUsed"`
+	DiskTotal    uint64    `json:"diskTotal"`
+	DiskPct      float64   `json:"diskPct"`
+	RootMount    string    `json:"rootMount,omitempty"`
+	DiskReadBps  float64   `json:"diskReadBps"`
+	DiskWriteBps float64   `json:"diskWriteBps"`
+	NetRxBps     float64   `json:"netRxBps"`
+	NetTxBps     float64   `json:"netTxBps"`
+	// Bytes moved since the previous sample, for exact traffic totals.
+	NetRxBytes uint64 `json:"netRxBytes,omitempty"`
+	NetTxBytes uint64 `json:"netTxBytes,omitempty"`
+	// The rest need agent >= 1.14.0; nil when unknown. NetErrs/NetDrops are
+	// counts since the previous sample.
+	NetRxPps   *float64        `json:"netRxPps,omitempty"`
+	NetTxPps   *float64        `json:"netTxPps,omitempty"`
+	NetErrs    *uint64         `json:"netErrs,omitempty"`
+	NetDrops   *uint64         `json:"netDrops,omitempty"`
+	TCP        *guest.TCPStats `json:"tcp,omitempty"`
+	RetransPct *float64        `json:"retransPct,omitempty"`
+	// Segments (bytes on macOS) sent / retransmitted since the previous sample,
+	// so history can weight the ratio over longer windows.
+	TCPOutSegs     *uint64            `json:"tcpOutSegs,omitempty"`
+	TCPRetransSegs *uint64            `json:"tcpRetransSegs,omitempty"`
+	Load           [3]float64         `json:"load"`
+	TempMax        float64            `json:"tempMax,omitempty"`
+	Procs          int                `json:"procs"`
+	LatencyMs      float64            `json:"latencyMs"`
+	Disks          []guest.DiskUsage  `json:"disks,omitempty"`
+	Temps          []guest.TempSensor `json:"temps,omitempty"`
+	NICs           []guest.NICInfo    `json:"nics,omitempty"`
 }
 
 // Event categories and levels.
@@ -88,7 +105,16 @@ type Event struct {
 type counters struct {
 	at                  time.Time
 	read, write, rx, tx uint64
+	pk                  *guest.NetPackets
+	tcp                 *guest.TCPStats
 }
+
+// netErrEvery throttles "net.errors" events per system.
+const netErrEvery = time.Hour
+
+// minRetransBase is the fewest segments (bytes on macOS) sent in one interval
+// for which a retransmission ratio is reported.
+const minRetransBase = 200
 
 type Monitor struct {
 	Hub       *guest.Hub
@@ -101,6 +127,7 @@ type Monitor struct {
 	prev     map[string]counters
 	polling  map[string]bool
 	rejected map[string]time.Time
+	netErrAt map[string]time.Time
 }
 
 func New(hub *guest.Hub, store *Store, interval, retention time.Duration) *Monitor {
@@ -116,6 +143,7 @@ func New(hub *guest.Hub, store *Store, interval, retention time.Duration) *Monit
 		prev:     map[string]counters{},
 		polling:  map[string]bool{},
 		rejected: map[string]time.Time{},
+		netErrAt: map[string]time.Time{},
 	}
 	hub.OnConnect = m.onConnect
 	hub.OnDisconnect = m.onDisconnect
@@ -402,7 +430,11 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 		log.Printf("monitor poll %s: %v", id, err)
 		return
 	}
-	smp := m.derive(id, met, time.Since(start))
+	latency := time.Since(start)
+	if rtt, ok := m.Hub.RTT(id); ok {
+		latency = rtt
+	}
+	smp := m.derive(id, met, latency)
 
 	m.mu.Lock()
 	sys := m.systems[id]
@@ -411,6 +443,11 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 		return
 	}
 	events := diff(sys.Info, sys.Latest, met.Info, &smp)
+	if smp.NetErrs != nil && *smp.NetErrs > 0 && time.Since(m.netErrAt[id]) > netErrEvery {
+		m.netErrAt[id] = time.Now()
+		events = append(events, Event{Kind: "net.errors", Category: CatLifecycle, Level: LevelWarn,
+			Detail: fmt.Sprintf("网卡收发错误 +%d（%s 内）；1 小时内不再重复提醒", *smp.NetErrs, m.Interval)})
+	}
 	sys.Latest = &smp
 	sys.Info = met.Info
 	if met.Info.HostName != "" {
@@ -433,7 +470,7 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 		MemUsed: met.MemUsed, MemTotal: met.MemTotal,
 		SwapUsed: met.SwapUsed, SwapTotal: met.SwapTotal,
 		RootMount: met.RootMount, Load: met.Load, Procs: met.Procs,
-		LatencyMs: latency.Milliseconds(),
+		LatencyMs: math.Round(float64(latency.Microseconds())/10) / 100,
 		Disks:     dedupePools(met.Disks, met.RootMount), Temps: met.Temps, NICs: met.NICs,
 	}
 	if met.MemTotal > 0 {
@@ -458,21 +495,49 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 			smp.TempMax = t.C
 		}
 	}
-	cur := counters{at: now, read: met.DiskRead, write: met.DiskWrite, rx: met.NetRx, tx: met.NetTx}
+	smp.TCP = met.TCP
+	cur := counters{at: now, read: met.DiskRead, write: met.DiskWrite, rx: met.NetRx, tx: met.NetTx, pk: met.NetPkts, tcp: met.TCP}
 	m.mu.Lock()
 	prev, ok := m.prev[id]
 	m.prev[id] = cur
 	m.mu.Unlock()
-	if ok {
-		dt := cur.at.Sub(prev.at).Seconds()
-		if dt > 0.5 {
-			smp.DiskReadBps = rate(prev.read, cur.read, dt)
-			smp.DiskWriteBps = rate(prev.write, cur.write, dt)
-			smp.NetRxBps = rate(prev.rx, cur.rx, dt)
-			smp.NetTxBps = rate(prev.tx, cur.tx, dt)
+	if !ok {
+		return smp
+	}
+	dt := cur.at.Sub(prev.at).Seconds()
+	if dt <= 0.5 {
+		return smp
+	}
+	smp.DiskReadBps = rate(prev.read, cur.read, dt)
+	smp.DiskWriteBps = rate(prev.write, cur.write, dt)
+	smp.NetRxBps = rate(prev.rx, cur.rx, dt)
+	smp.NetTxBps = rate(prev.tx, cur.tx, dt)
+	smp.NetRxBytes, smp.NetTxBytes = delta(prev.rx, cur.rx), delta(prev.tx, cur.tx)
+	if p, c := prev.pk, cur.pk; p != nil && c != nil {
+		rx, tx := rate(p.Rx, c.Rx, dt), rate(p.Tx, c.Tx, dt)
+		errs := delta(p.ErrIn, c.ErrIn) + delta(p.ErrOut, c.ErrOut)
+		drops := delta(p.DropIn, c.DropIn) + delta(p.DropOut, c.DropOut)
+		smp.NetRxPps, smp.NetTxPps, smp.NetErrs, smp.NetDrops = &rx, &tx, &errs, &drops
+	}
+	// Counters that went backwards (wrap, or nettop losing exited processes on
+	// macOS) say nothing about this interval.
+	if p, c := prev.tcp, cur.tcp; p != nil && c != nil && c.OutSegs >= p.OutSegs && c.Retrans >= p.Retrans {
+		out, re := c.OutSegs-p.OutSegs, c.Retrans-p.Retrans
+		smp.TCPOutSegs, smp.TCPRetransSegs = &out, &re
+		// Below minRetransBase sent units a single retransmit swings the ratio to tens of percent.
+		if out >= minRetransBase {
+			r := math.Min(100, float64(re)/float64(out)*100)
+			smp.RetransPct = &r
 		}
 	}
 	return smp
+}
+
+func delta(a, b uint64) uint64 {
+	if b < a {
+		return 0
+	}
+	return b - a
 }
 
 // legacy maps a pre-1.2 agent's health reply onto Metrics so old agents still show up.

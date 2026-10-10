@@ -15,12 +15,18 @@ interface ChartSeries {
   area?: boolean;
   dash?: boolean;
   width?: number;
+  /** area top opacity (default 0.38) */
+  fill?: number;
+  /** plot against the right axis (ChartOpts.fmt2) */
+  right?: boolean;
 }
 
 interface ChartOpts {
   t: number[];
   series: ChartSeries[];
   fmt: (v: number | null, axis?: boolean) => string;
+  /** right-axis formatter; enables the axis when a series has right */
+  fmt2?: (v: number | null, axis?: boolean) => string;
   stepSec?: number;
   from?: number;
   to?: number;

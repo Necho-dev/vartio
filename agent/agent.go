@@ -17,7 +17,7 @@ import (
 )
 
 // agentVersion is a var so test builds can override it with -ldflags -X.
-var agentVersion = "1.13.1"
+var agentVersion = "1.15.0"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] != "upgrade-watch" && !(len(os.Args) > 2 && os.Args[1] == "service" && os.Args[2] == "run") {
@@ -124,7 +124,7 @@ func loadConfig() config {
 
 func splitCSV(s string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		p = strings.TrimSpace(p)
 		if p != "" {
 			out = append(out, p)

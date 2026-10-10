@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -379,10 +380,5 @@ func upgradeNote(from, to, asked string) string {
 }
 
 func hasCap(caps []string, c string) bool {
-	for _, x := range caps {
-		if x == c {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(caps, c)
 }

@@ -16,7 +16,7 @@ func TestRotLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := []byte(strings.Repeat("x", 1<<20) + "\n")
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		if _, err := l.Write(line); err != nil {
 			t.Fatal(err)
 		}

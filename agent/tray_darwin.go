@@ -187,7 +187,7 @@ func runUninstall() int {
 
 // lockFree waits briefly for a stopping agent to release the instance lock.
 func lockFree() bool {
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		f, err := os.OpenFile(lockPath(), os.O_CREATE|os.O_RDWR, 0o644)
 		if err != nil {
 			return true

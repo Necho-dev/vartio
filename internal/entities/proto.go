@@ -2,6 +2,7 @@ package guest
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"govmomi-wmks/internal/release"
@@ -213,12 +214,7 @@ func (h Hello) Key() string {
 }
 
 func (h Hello) Has(c string) bool {
-	for _, x := range h.Caps {
-		if x == c {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.Caps, c)
 }
 
 type HelloOK struct {
@@ -304,23 +300,52 @@ type TempSensor struct {
 
 // Metrics is one monitoring sample. Byte counters are cumulative; the hub derives rates.
 type Metrics struct {
-	TimeMs    int64        `json:"timeMs"`
-	Info      SysInfo      `json:"info"`
-	CPUPct    float64      `json:"cpuPct"`
-	Load      [3]float64   `json:"load"`
-	MemTotal  uint64       `json:"memTotal"`
-	MemUsed   uint64       `json:"memUsed"`
-	SwapTotal uint64       `json:"swapTotal"`
-	SwapUsed  uint64       `json:"swapUsed"`
-	RootMount string       `json:"rootMount,omitempty"`
-	Disks     []DiskUsage  `json:"disks"`
-	DiskRead  uint64       `json:"diskRead"`
-	DiskWrite uint64       `json:"diskWrite"`
-	NetRx     uint64       `json:"netRx"`
-	NetTx     uint64       `json:"netTx"`
-	NICs      []NICInfo    `json:"nics"`
-	Temps     []TempSensor `json:"temps,omitempty"`
-	Procs     int          `json:"procs"`
+	TimeMs    int64       `json:"timeMs"`
+	Info      SysInfo     `json:"info"`
+	CPUPct    float64     `json:"cpuPct"`
+	Load      [3]float64  `json:"load"`
+	MemTotal  uint64      `json:"memTotal"`
+	MemUsed   uint64      `json:"memUsed"`
+	SwapTotal uint64      `json:"swapTotal"`
+	SwapUsed  uint64      `json:"swapUsed"`
+	RootMount string      `json:"rootMount,omitempty"`
+	Disks     []DiskUsage `json:"disks"`
+	DiskRead  uint64      `json:"diskRead"`
+	DiskWrite uint64      `json:"diskWrite"`
+	NetRx     uint64      `json:"netRx"`
+	NetTx     uint64      `json:"netTx"`
+	// Packet, error and drop counters cover the same NICs as NetRx/NetTx (agent >= 1.14.0).
+	NetPkts *NetPackets  `json:"netPkts,omitempty"`
+	TCP     *TCPStats    `json:"tcp,omitempty"`
+	NICs    []NICInfo    `json:"nics"`
+	Temps   []TempSensor `json:"temps,omitempty"`
+	Procs   int          `json:"procs"`
+}
+
+// NetPackets are cumulative counters.
+type NetPackets struct {
+	Rx      uint64 `json:"rx"`
+	Tx      uint64 `json:"tx"`
+	ErrIn   uint64 `json:"errIn"`
+	ErrOut  uint64 `json:"errOut"`
+	DropIn  uint64 `json:"dropIn"`
+	DropOut uint64 `json:"dropOut"`
+}
+
+// TCPStats counts IPv4+IPv6 TCP sockets by state; segment counters are
+// cumulative (retransmission rate = d(Retrans) / d(OutSegs)). OutSegs includes
+// retransmissions; on macOS both counters are bytes.
+type TCPStats struct {
+	Established int `json:"established"`
+	TimeWait    int `json:"timeWait"`
+	Listen      int `json:"listen"`
+	// Socket counts by protocol (agent >= 1.15.0): every TCP state, UDP, and
+	// raw/ICMP sockets (Other is 0 on Windows, which has no cheap source).
+	Total   int    `json:"total,omitempty"`
+	UDP     int    `json:"udp,omitempty"`
+	Other   int    `json:"other,omitempty"`
+	OutSegs uint64 `json:"outSegs"`
+	Retrans uint64 `json:"retrans"`
 }
 
 type ProcInfo struct {

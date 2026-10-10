@@ -231,6 +231,27 @@ table.sys tr.offline td { opacity: .55; }
 .chart .cursor { stroke: var(--border2); stroke-width: 1; stroke-dasharray: 3 3; }
 .chart .nodata { position: absolute; inset: 0; display: grid; place-items: center; color: var(--faint); font-size: 12.5px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+.legend .lg-stat { color: var(--faint); }
+.legend .lg-stat b { color: var(--muted); font: 600 11.5px var(--mono); }
+.legend .bad, .legend .bad b { color: var(--red); }
+.legend .lg-num { margin: 0 10px 0 4px; font: 600 11.5px var(--mono); color: var(--text); }
+.legend .lg-num + .lg-stat ~ .lg-stat { margin-left: 8px; }
+.legend i.dash { width: 12px; height: 0; border-radius: 0; border-top: 1.5px dashed var(--muted); vertical-align: 3px; }
+#p-net .chart { height: 230px; }
+.net-sum { display: flex; flex-wrap: wrap; row-gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.net-sum .ns { display: flex; flex-direction: column; gap: 4px; padding: 0 20px; border-left: 1px solid var(--border); }
+.net-sum .ns:first-child { padding-left: 0; border-left: 0; }
+.net-sum .ns > span { font-size: 11px; color: var(--faint); }
+.net-sum .ns b { display: flex; gap: 10px; font: 600 12.5px var(--mono); color: var(--text); white-space: nowrap; }
+.net-sum em { font-style: normal; }
+.net-sum .rx { color: var(--cyan); }
+.net-sum .tx { color: var(--violet); }
+.net-sum .pk .rx { color: var(--green); }
+.net-sum .pk .tx { color: var(--orange); }
+.net-sum .bad b { color: var(--red); }
+@media (max-width: 900px) {
+  .net-sum .ns { padding: 0 14px; }
+}
 .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .tip { position: fixed; z-index: 50; pointer-events: none; padding: 8px 10px; border: 1px solid var(--border2); border-radius: 9px; background: color-mix(in srgb, var(--card) 94%, transparent); backdrop-filter: blur(6px); box-shadow: 0 6px 24px rgba(0,0,0,.35); font-size: 12px; min-width: 150px; }
 .tip .t { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
@@ -513,7 +534,9 @@ table.procs .mini i { display: block; height: 100%; background: var(--blue); }
 .ver-up:hover { background: color-mix(in srgb, var(--cyan) 16%, transparent); }
 .ver-up:disabled { cursor: progress; opacity: .5; }
 .ver-up .i { width: 13px; height: 13px; }
+.modal.small .modal-box:has(.upd) { width: min(560px, 100%); }
 .upd .form-actions { margin-top: 20px; }
+.upd-head { flex-wrap: wrap; }
 .upd-desc { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .upd-desc b { color: var(--text); }
 .upd-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; max-height: min(52vh, 420px); overflow: auto; }

@@ -145,7 +145,7 @@ func listScreens() []guest.Screen {
 	var ids [16]C.CGDirectDisplayID
 	n := int(C.screens(&ids[0], C.int(len(ids))))
 	out := make([]guest.Screen, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := ids[i]
 		b := C.CGDisplayBounds(id)
 		name := "外接显示器"

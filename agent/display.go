@@ -195,10 +195,7 @@ func (d *displayHub) loop(ctx context.Context, send func([]byte)) {
 		sent := time.Now()
 		send(b)
 		d.observe(sent.Sub(start), time.Since(sent))
-		wait := time.Second/time.Duration(p.FPS) - time.Since(start)
-		if wait < 10*time.Millisecond {
-			wait = 10 * time.Millisecond
-		}
+		wait := max(time.Second/time.Duration(p.FPS)-time.Since(start), 10*time.Millisecond)
 		select {
 		case <-ctx.Done():
 			return
@@ -250,7 +247,7 @@ func resizeBilinear(src *image.RGBA, nw, nh int) *image.RGBA {
 	w, h := src.Rect.Dx(), src.Rect.Dy()
 	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
 	x0s, x1s, wxs := make([]int, nw), make([]int, nw), make([]uint32, nw)
-	for x := 0; x < nw; x++ {
+	for x := range nw {
 		x0, x1, f := srcPos(x, nw, w)
 		x0s[x], x1s[x], wxs[x] = x0*4, x1*4, f
 	}
@@ -260,9 +257,9 @@ func resizeBilinear(src *image.RGBA, nw, nh int) *image.RGBA {
 			r0 := src.Pix[sy0*src.Stride:]
 			r1 := src.Pix[sy1*src.Stride:]
 			out := dst.Pix[y*dst.Stride:]
-			for x := 0; x < nw; x++ {
+			for x := range nw {
 				a, c, wx := x0s[x], x1s[x], wxs[x]
-				for k := 0; k < 3; k++ {
+				for k := range 3 {
 					top := uint32(r0[a+k])*(256-wx) + uint32(r0[c+k])*wx
 					bot := uint32(r1[a+k])*(256-wx) + uint32(r1[c+k])*wx
 					out[x*4+k] = uint8((top*(256-wy) + bot*wy + 1<<15) >> 16)
@@ -273,7 +270,7 @@ func resizeBilinear(src *image.RGBA, nw, nh int) *image.RGBA {
 	}
 	workers := min(runtime.NumCPU(), 8, nh)
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

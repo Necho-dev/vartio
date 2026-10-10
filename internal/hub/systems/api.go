@@ -118,7 +118,7 @@ func (m *Monitor) Register(mux *http.ServeMux, authRequired bool) {
 			writeErr(w, errNotFound)
 			return
 		}
-		out, err := m.Store.Series(r.Context(), sys.ID, time.Now().Add(-span), step)
+		out, err := m.Store.Series(r.Context(), sys.ID, time.Now().Add(-span), step, m.Interval)
 		if err != nil {
 			writeErr(w, err)
 			return

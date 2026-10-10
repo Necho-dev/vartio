@@ -22,12 +22,34 @@ type Series struct {
 	DiskWrite []float64 `json:"diskWrite"`
 	NetRx     []float64 `json:"netRx"`
 	NetTx     []float64 `json:"netTx"`
-	Load1     []float64 `json:"load1"`
-	// Load5/Load15 are nil for buckets recorded before they were stored.
-	Load5  []*float64 `json:"load5"`
-	Load15 []*float64 `json:"load15"`
-	Temp   []*float64 `json:"temp"`
-	Procs  []float64  `json:"procs"`
+	NetRxMax  []float64 `json:"netRxMax"`
+	NetTxMax  []float64 `json:"netTxMax"`
+	// NetRxBytes/NetTxBytes are bytes moved within each bucket.
+	NetRxBytes []float64 `json:"netRxBytes"`
+	NetTxBytes []float64 `json:"netTxBytes"`
+	Load1      []float64 `json:"load1"`
+	// Nullable columns are nil for buckets recorded before they were collected.
+	Load5    []*float64 `json:"load5"`
+	Load15   []*float64 `json:"load15"`
+	Temp     []*float64 `json:"temp"`
+	Procs    []float64  `json:"procs"`
+	NetRxPps []*float64 `json:"netRxPps"`
+	NetTxPps []*float64 `json:"netTxPps"`
+	// NetErrs/NetDrops are counts within each bucket.
+	NetErrs     []*float64 `json:"netErrs"`
+	NetDrops    []*float64 `json:"netDrops"`
+	TCPEstab    []*float64 `json:"tcpEstab"`
+	TCPTimeWait []*float64 `json:"tcpTimeWait"`
+	TCPListen   []*float64 `json:"tcpListen"`
+	Retrans     []*float64 `json:"retrans"`
+	Latency     []*float64 `json:"latency"`
+	// TCPOutSegs/TCPRetransSegs are sums within each bucket (bytes on macOS).
+	TCPOutSegs     []*float64 `json:"tcpOutSegs"`
+	TCPRetransSegs []*float64 `json:"tcpRetransSegs"`
+	// Socket counts by protocol (agent >= 1.15.0).
+	ConnTCP   []*float64 `json:"connTcp"`
+	ConnUDP   []*float64 `json:"connUdp"`
+	ConnOther []*float64 `json:"connOther"`
 	// DiskParts maps mount point -> used bytes per bucket (nil = no sample).
 	DiskParts map[string][]*float64 `json:"diskParts"`
 }
@@ -37,29 +59,61 @@ func newSeries(step time.Duration) *Series {
 		StepSec: int(step / time.Second),
 		T:       []int64{}, CPU: []float64{}, CPUMax: []float64{}, Mem: []float64{}, MemTotal: []float64{},
 		Swap: []float64{}, Disk: []float64{}, DiskTotal: []float64{}, DiskRead: []float64{}, DiskWrite: []float64{},
-		NetRx: []float64{}, NetTx: []float64{}, Load1: []float64{}, Load5: []*float64{}, Load15: []*float64{}, Temp: []*float64{}, Procs: []float64{},
+		NetRx: []float64{}, NetTx: []float64{}, NetRxMax: []float64{}, NetTxMax: []float64{}, NetRxBytes: []float64{}, NetTxBytes: []float64{},
+		Load1: []float64{}, Load5: []*float64{}, Load15: []*float64{}, Temp: []*float64{}, Procs: []float64{},
+		NetRxPps: []*float64{}, NetTxPps: []*float64{}, NetErrs: []*float64{}, NetDrops: []*float64{},
+		TCPEstab: []*float64{}, TCPTimeWait: []*float64{}, TCPListen: []*float64{}, Retrans: []*float64{}, Latency: []*float64{},
+		TCPOutSegs: []*float64{}, TCPRetransSegs: []*float64{},
+		ConnTCP: []*float64{}, ConnUDP: []*float64{}, ConnOther: []*float64{},
 		DiskParts: map[string][]*float64{},
 	}
 }
 
-func (s *Series) add(t time.Time, cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1 float64, l5, l15, temp *float64, procs float64) {
+// bucket is one row of the Series query.
+type bucket struct {
+	cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw float64
+	rx, tx, rxMax, txMax, rxBytes, txBytes, l1, procs float64
+	l5, l15, temp, rxPps, txPps, errs, drops          *float64
+	estab, tw, listen, retrans, latency               *float64
+	outSegs, retransSegs, connTCP, connUDP, connOther *float64
+}
+
+func (s *Series) add(t time.Time, b bucket) {
 	s.T = append(s.T, t.UnixMilli())
-	s.CPU = append(s.CPU, cpu)
-	s.CPUMax = append(s.CPUMax, cpuMax)
-	s.Mem = append(s.Mem, mem)
-	s.MemTotal = append(s.MemTotal, memT)
-	s.Swap = append(s.Swap, swap)
-	s.Disk = append(s.Disk, disk)
-	s.DiskTotal = append(s.DiskTotal, diskT)
-	s.DiskRead = append(s.DiskRead, dr)
-	s.DiskWrite = append(s.DiskWrite, dw)
-	s.NetRx = append(s.NetRx, rx)
-	s.NetTx = append(s.NetTx, tx)
-	s.Load1 = append(s.Load1, l1)
-	s.Load5 = append(s.Load5, l5)
-	s.Load15 = append(s.Load15, l15)
-	s.Temp = append(s.Temp, temp)
-	s.Procs = append(s.Procs, procs)
+	s.CPU = append(s.CPU, b.cpu)
+	s.CPUMax = append(s.CPUMax, b.cpuMax)
+	s.Mem = append(s.Mem, b.mem)
+	s.MemTotal = append(s.MemTotal, b.memT)
+	s.Swap = append(s.Swap, b.swap)
+	s.Disk = append(s.Disk, b.disk)
+	s.DiskTotal = append(s.DiskTotal, b.diskT)
+	s.DiskRead = append(s.DiskRead, b.dr)
+	s.DiskWrite = append(s.DiskWrite, b.dw)
+	s.NetRx = append(s.NetRx, b.rx)
+	s.NetTx = append(s.NetTx, b.tx)
+	s.NetRxMax = append(s.NetRxMax, b.rxMax)
+	s.NetTxMax = append(s.NetTxMax, b.txMax)
+	s.NetRxBytes = append(s.NetRxBytes, b.rxBytes)
+	s.NetTxBytes = append(s.NetTxBytes, b.txBytes)
+	s.Load1 = append(s.Load1, b.l1)
+	s.Load5 = append(s.Load5, b.l5)
+	s.Load15 = append(s.Load15, b.l15)
+	s.Temp = append(s.Temp, b.temp)
+	s.Procs = append(s.Procs, b.procs)
+	s.NetRxPps = append(s.NetRxPps, b.rxPps)
+	s.NetTxPps = append(s.NetTxPps, b.txPps)
+	s.NetErrs = append(s.NetErrs, b.errs)
+	s.NetDrops = append(s.NetDrops, b.drops)
+	s.TCPEstab = append(s.TCPEstab, b.estab)
+	s.TCPTimeWait = append(s.TCPTimeWait, b.tw)
+	s.TCPListen = append(s.TCPListen, b.listen)
+	s.Retrans = append(s.Retrans, b.retrans)
+	s.Latency = append(s.Latency, b.latency)
+	s.TCPOutSegs = append(s.TCPOutSegs, b.outSegs)
+	s.TCPRetransSegs = append(s.TCPRetransSegs, b.retransSegs)
+	s.ConnTCP = append(s.ConnTCP, b.connTCP)
+	s.ConnUDP = append(s.ConnUDP, b.connUDP)
+	s.ConnOther = append(s.ConnOther, b.connOther)
 }
 
 var ranges = map[string]time.Duration{
@@ -71,10 +125,7 @@ var ranges = map[string]time.Duration{
 }
 
 func stepFor(span, interval time.Duration) time.Duration {
-	step := span / 240
-	if step < interval {
-		step = interval
-	}
+	step := max(span/240, interval)
 	return step.Round(time.Second)
 }
 

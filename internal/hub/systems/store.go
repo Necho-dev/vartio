@@ -65,6 +65,22 @@ CREATE TABLE IF NOT EXISTS probe_events (
 );
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS load5 real;
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS load15 real;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS net_rx_bytes bigint;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS net_tx_bytes bigint;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS net_rx_pps double precision;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS net_tx_pps double precision;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS net_errs bigint;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS net_drops bigint;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS tcp_estab integer;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS tcp_time_wait integer;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS tcp_listen integer;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS retrans_pct real;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS latency_ms real;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS tcp_out_segs bigint;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS tcp_retrans_segs bigint;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS conn_tcp integer;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS conn_udp integer;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS conn_other integer;
 CREATE INDEX IF NOT EXISTS probe_events_device_ts ON probe_events (device_id, ts DESC);
 `
 
@@ -195,12 +211,22 @@ func (s *Store) Record(ctx context.Context, id string, info guest.SysInfo, smp S
 		}
 		parts, _ = json.Marshal(used)
 	}
+	var estab, tw, listen, cTCP, cUDP, cOther *int
+	if t := smp.TCP; t != nil {
+		estab, tw, listen = &t.Established, &t.TimeWait, &t.Listen
+		if t.Total > 0 {
+			cTCP, cUDP, cOther = &t.Total, &t.UDP, &t.Other
+		}
+	}
 	b.Queue(`INSERT INTO probe_metrics (device_id, ts, cpu_pct, mem_used, mem_total, swap_used, swap_total,
-			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, load5, load15, temp_max, procs, disk_parts)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) ON CONFLICT DO NOTHING`,
+			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, load5, load15, temp_max, procs, disk_parts,
+			net_rx_bytes, net_tx_bytes, net_rx_pps, net_tx_pps, net_errs, net_drops, tcp_estab, tcp_time_wait, tcp_listen, retrans_pct, latency_ms, tcp_out_segs, tcp_retrans_segs, conn_tcp, conn_udp, conn_other)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35) ON CONFLICT DO NOTHING`,
 		id, smp.TS, smp.CPUPct, int64(smp.MemUsed), int64(smp.MemTotal), int64(smp.SwapUsed), int64(smp.SwapTotal),
 		int64(smp.DiskUsed), int64(smp.DiskTotal), smp.DiskReadBps, smp.DiskWriteBps, smp.NetRxBps, smp.NetTxBps,
-		smp.Load[0], smp.Load[1], smp.Load[2], temp, smp.Procs, parts)
+		smp.Load[0], smp.Load[1], smp.Load[2], temp, smp.Procs, parts,
+		int64(smp.NetRxBytes), int64(smp.NetTxBytes), smp.NetRxPps, smp.NetTxPps, i64(smp.NetErrs), i64(smp.NetDrops),
+		estab, tw, listen, smp.RetransPct, smp.LatencyMs, i64(smp.TCPOutSegs), i64(smp.TCPRetransSegs), cTCP, cUDP, cOther)
 	return s.db.SendBatch(ctx, b).Close()
 }
 
@@ -245,19 +271,34 @@ func (s *Store) Events(ctx context.Context, id, category string, limit int) ([]E
 	return out, rows.Err()
 }
 
+func i64(p *uint64) *int64 {
+	if p == nil {
+		return nil
+	}
+	v := int64(*p)
+	return &v
+}
+
 // Series buckets samples with date_bin so each range returns a few hundred points.
-func (s *Store) Series(ctx context.Context, id string, from time.Time, step time.Duration) (*Series, error) {
+// interval estimates traffic for rows recorded before byte deltas were stored.
+func (s *Store) Series(ctx context.Context, id string, from time.Time, step, interval time.Duration) (*Series, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b,
 			avg(cpu_pct), max(cpu_pct),
 			avg(mem_used)::float8, max(mem_total)::float8, avg(swap_used)::float8,
 			avg(disk_used)::float8, max(disk_total)::float8,
 			avg(disk_read_bps), avg(disk_write_bps),
-			avg(net_rx_bps), avg(net_tx_bps),
-			avg(load1), avg(load5)::float8, avg(load15)::float8, max(temp_max), avg(procs)::float8
+			avg(net_rx_bps), avg(net_tx_bps), max(net_rx_bps), max(net_tx_bps),
+			sum(coalesce(net_rx_bytes, net_rx_bps * $4))::float8, sum(coalesce(net_tx_bytes, net_tx_bps * $4))::float8,
+			avg(load1), avg(load5)::float8, avg(load15)::float8, max(temp_max), avg(procs)::float8,
+			avg(net_rx_pps), avg(net_tx_pps), sum(net_errs)::float8, sum(net_drops)::float8,
+			avg(tcp_estab)::float8, avg(tcp_time_wait)::float8, avg(tcp_listen)::float8,
+			avg(retrans_pct)::float8, avg(latency_ms)::float8,
+			sum(tcp_out_segs)::float8, sum(tcp_retrans_segs)::float8,
+			avg(conn_tcp)::float8, avg(conn_udp)::float8, avg(conn_other)::float8
 		FROM probe_metrics
 		WHERE device_id = $1 AND ts >= $2
-		GROUP BY b ORDER BY b`, id, from, step.Seconds())
+		GROUP BY b ORDER BY b`, id, from, step.Seconds(), interval.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -265,12 +306,13 @@ func (s *Store) Series(ctx context.Context, id string, from time.Time, step time
 	out := newSeries(step)
 	for rows.Next() {
 		var t time.Time
-		var cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1, procs float64
-		var l5, l15, temp *float64
-		if err := rows.Scan(&t, &cpu, &cpuMax, &mem, &memT, &swap, &disk, &diskT, &dr, &dw, &rx, &tx, &l1, &l5, &l15, &temp, &procs); err != nil {
+		var b bucket
+		if err := rows.Scan(&t, &b.cpu, &b.cpuMax, &b.mem, &b.memT, &b.swap, &b.disk, &b.diskT, &b.dr, &b.dw,
+			&b.rx, &b.tx, &b.rxMax, &b.txMax, &b.rxBytes, &b.txBytes, &b.l1, &b.l5, &b.l15, &b.temp, &b.procs,
+			&b.rxPps, &b.txPps, &b.errs, &b.drops, &b.estab, &b.tw, &b.listen, &b.retrans, &b.latency, &b.outSegs, &b.retransSegs, &b.connTCP, &b.connUDP, &b.connOther); err != nil {
 			return nil, err
 		}
-		out.add(t, cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1, l5, l15, temp, procs)
+		out.add(t, b)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

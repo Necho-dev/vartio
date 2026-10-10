@@ -31,13 +31,17 @@ export async function detail(id) {
   $("#d").innerHTML = `
     <section class="card hero" id="hero"></section>
     <section class="grid2" id="charts">
-      ${panel("cpu", "CPU 使用率", "全部核心平均值；虚线为区间峰值")}
+      ${panel("cpu", "CPU 使用率", "全部核心平均值")}
       ${panel("mem", "内存使用", "已用物理内存（总量 - 可用）与交换区")}
       ${panel("disk", "磁盘使用", "系统盘已用空间")}
       ${panel("dio", "磁盘 I/O", "全部物理磁盘读写吞吐")}
-      ${panel("net", "网络带宽", "物理网卡收发速率（已排除回环/虚拟网卡）")}
-      ${panel("load", "系统负载", "")}
       ${panel("procs", "进程数", "运行中的进程总数")}
+      ${panel("load", "系统负载", "")}
+      <div class="card panel wide" id="p-net"><span class="now" id="now-net"></span><h3>网络带宽</h3><p class="desc" id="desc-net">物理网卡收发情况（已排除回环/虚拟网卡）</p>
+        <div class="chart" id="c-net"></div><div class="legend" id="lg-net"></div><div class="net-sum" id="net-sum"></div></div>
+      ${panel("conn", "网络连接数", "按协议统计的套接字数量（堆积）", true)}
+      ${panel("tcp", "TCP 连接状态", "各状态的 TCP 连接数", true)}
+      ${panel("nerr", "网卡错误与丢包", "区间内收发错误包与丢弃包数量", true)}
       ${panel("temp", "温度", "传感器最高温度", true)}
     </section>
     <section class="grid2">
@@ -80,7 +84,7 @@ const EV_NAMES = {
   "service.start": "启动服务", "service.stop": "停止服务", "service.restart": "重启服务",
   "file.upload": "上传文件", "file.download": "下载文件", "file.mkdir": "新建目录", "file.rename": "重命名", "file.delete": "永久删除", "file.trash": "移入回收站",
   "trash.restore": "还原文件", "trash.purge": "彻底删除", "trash.empty": "清空回收站", meta: "编辑信息",
-  "agent.upgrade": "下发升级", "upgrade.failed": "升级失败",
+  "agent.upgrade": "下发升级", "upgrade.failed": "升级失败", "net.errors": "网卡错误",
 };
 
 /** @param {SystemView} s */
@@ -226,7 +230,7 @@ function renderInfo(s) {
 /** @param {SystemView} s */
 async function loadSeries(s) {
   if (!state.config.history) {
-    ["cpu", "mem", "disk", "dio", "net", "load"].forEach((k) => chart(k, { t: [], series: [], fmt: (v) => String(v), empty: "未配置 PROBE_HUB_DSN，无历史数据" }));
+    ["cpu", "mem", "disk", "dio", "procs", "net", "load"].forEach((k) => chart(k, { t: [], series: [], fmt: (v) => String(v), empty: "未配置 PROBE_HUB_DSN，无历史数据" }));
     return;
   }
   /** @type {Series} */
@@ -245,7 +249,7 @@ async function loadSeries(s) {
     { label: "峰值", color: C.faint, data: d.cpuMax, area: false, dash: true, width: 1 }] }, s.online && l.cpuPct != null ? pct(l.cpuPct) : "");
   chart("mem", { ...base, max: memMax, fmt: bytes, series: [
     { label: "已用", color: C.green, data: d.mem },
-    ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: C.orange, data: d.swap, area: false }] : [])] },
+    ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: C.orange, data: d.swap, fill: 0.2 }] : [])] },
     s.online && l.memTotal ? `${bytes(l.memUsed)} / ${bytes(l.memTotal)}` : "");
   const parts = diskParts(d, l);
   $("#desc-disk").textContent = parts ? "各分区已用空间（堆积）" : "系统盘已用空间";
@@ -259,25 +263,64 @@ async function loadSeries(s) {
   chart("dio", { ...base, fmt: rate, series: [
     { label: "读", color: C.cyan, data: d.diskRead },
     { label: "写", color: C.orange, data: d.diskWrite }] }, s.online ? `读 ${rate(l.diskReadBps)} · 写 ${rate(l.diskWriteBps)}` : "");
-  chart("net", { ...base, fmt: rate, series: [
+  const count = (v) => (v == null ? "—" : v >= 100 ? Math.round(v) + "" : (+v.toFixed(1)) + "");
+  /** @param {number | null} v @param {boolean} [axis] */
+  const pps = (v, axis) => (v == null ? "—" : axis ? (v >= 1000 ? +(v / 1000).toFixed(1) + "k" : count(v)) + " pps" : count(v) + " pps");
+  const hasPps = has(d.netRxPps) || has(d.netTxPps);
+  const errs = sum(d.netErrs), drops = sum(d.netDrops);
+  $("#desc-net").textContent = hasPps
+    ? "物理网卡收发情况（已排除回环/虚拟网卡）；左轴吞吐，右轴包速率"
+    : "物理网卡收发情况（已排除回环/虚拟网卡）";
+  const nowPps = s.online && l.netRxPps != null ? ` · ${count(l.netRxPps)} / ${count(l.netTxPps)} pps` : "";
+  chart("net", { ...base, fmt: rate, fmt2: pps, series: [
     { label: "下行", color: C.cyan, data: d.netRx },
-    { label: "上行", color: C.violet, data: d.netTx }] }, s.online ? `↓ ${rate(l.netRxBps)} · ↑ ${rate(l.netTxBps)}` : "");
+    { label: "上行", color: C.violet, data: d.netTx },
+    { label: "下行峰值", color: C.cyan, data: d.netRxMax, area: false, dash: true, width: 1 },
+    { label: "上行峰值", color: C.violet, data: d.netTxMax, area: false, dash: true, width: 1 },
+    ...(hasPps ? [
+      { label: "收包", color: C.green, data: d.netRxPps, fill: 0.14, width: 1.2, right: true },
+      { label: "发包", color: C.orange, data: d.netTxPps, fill: 0.14, width: 1.2, right: true }] : [])] },
+  s.online ? `↓ ${rate(l.netRxBps)} · ↑ ${rate(l.netTxBps)}${nowPps}` : "");
+  renderNetSum(d, hasPps, errs, drops);
+  const hasErr = errs > 0 || drops > 0;
+  if (hasErr) chart("nerr", { ...base, fmt: count, series: [
+    { label: "错误", color: C.pink, data: d.netErrs },
+    { label: "丢包", color: C.orange, data: d.netDrops }] }, `错误 ${errs} · 丢包 ${drops}`);
+  const hasTCP = has(d.tcpEstab);
+  if (hasTCP) chart("tcp", { ...base, fmt: count, series: [
+    { label: "ESTABLISHED", color: C.blue, data: d.tcpEstab },
+    { label: "TIME_WAIT", color: C.orange, data: d.tcpTimeWait, fill: 0.2, width: 1.3 },
+    { label: "LISTEN", color: C.green, data: d.tcpListen, fill: 0.12, width: 1.3 }] },
+  s.online && l.tcp ? `已建立 ${l.tcp.established} · 监听 ${l.tcp.listen}` : "");
+  const hasConn = has(d.connTcp);
+  if (hasConn) renderConn(d, base, s.online && l.tcp?.total ? l.tcp : null, s.info?.os === "windows");
 
   const hasLoad = d.load1.some((v) => v > 0);
   const winLoad = s.info?.os === "windows";
   const hasTemp = d.temp.some((v) => v != null);
   $("#p-load").hidden = !hasLoad;
   $("#p-temp").hidden = !hasTemp;
-  const shown = [...$("#charts").children].filter((p) => !(/** @type {HTMLElement} */ (p).hidden));
-  shown.forEach((p, i) => p.classList.toggle("span-row", shown.length % 2 === 1 && i === shown.length - 1));
+  $("#p-nerr").hidden = !hasErr;
+  $("#p-tcp").hidden = !hasTCP;
+  $("#p-conn").hidden = !hasConn;
+  // A half-width panel left alone in its row (before a wide panel or at the end) takes the full row.
+  /** @type {Element | null} */
+  let alone = null;
+  for (const p of $("#charts").children) {
+    if (/** @type {HTMLElement} */ (p).hidden) continue;
+    const wide = p.classList.contains("wide");
+    p.classList.toggle("span-row", wide);
+    if (wide) { alone?.classList.add("span-row"); alone = null; } else alone = alone ? null : p;
+  }
+  alone?.classList.add("span-row");
   $("#p-load").querySelector("h3").textContent = winLoad ? "系统负载（估算）" : "系统负载";
   $("#desc-load").textContent = winLoad
     ? "Windows 无原生 load average，由 CPU 使用率与处理器队列长度折算"
     : "1 / 5 / 15 分钟平均负载";
   if (hasLoad) chart("load", { ...base, fmt: (v) => (v == null ? "—" : v.toFixed(2)), series: [
     { label: "load1", color: C.pink, data: d.load1 },
-    { label: "load5", color: C.violet, data: d.load5, area: false, width: 1.3 },
-    { label: "load15", color: C.cyan, data: d.load15, area: false, width: 1.3 }] },
+    { label: "load5", color: C.violet, data: d.load5, fill: 0.18, width: 1.3 },
+    { label: "load15", color: C.cyan, data: d.load15, fill: 0.12, width: 1.3 }] },
     s.online && l.load ? l.load.map((x) => x.toFixed(2)).join(" / ") : "");
   chart("procs", { ...base, fmt: (v) => (v == null ? "—" : Math.round(v) + ""), series: [{ label: "进程", color: C.orange, data: d.procs }] },
     s.online && l.procs ? l.procs + " 个" : "");
@@ -333,14 +376,77 @@ function diskParts(d, l) {
   };
 }
 
-/** @param {string} id @param {ChartOpts} opts @param {string} [now] */
-function chart(id, opts, now) {
+/** @param {(number | null)[]} a */
+const has = (a) => (a || []).some((v) => v != null);
+/** @param {(number | null)[]} a */
+const sum = (a) => (a || []).reduce((n, v) => n + (v || 0), 0);
+
+// Bucket averages over the range; P95 is taken across buckets, not raw samples.
+/** @param {(number | null)[]} a */
+function stats(a) {
+  const v = (a || []).filter((x) => x != null).sort((x, y) => x - y);
+  if (!v.length) return null;
+  return { avg: v.reduce((n, x) => n + x, 0) / v.length, p95: v[Math.min(v.length - 1, Math.ceil(v.length * 0.95) - 1)], max: v[v.length - 1] };
+}
+
+// Stacked TCP / UDP / other sockets; the legend gives each protocol's current,
+// average and peak (peak of bucket averages on coarse ranges).
+/**
+ * @param {Series} d
+ * @param {{ t: number[], stepSec: number, from: number, to: number }} base
+ * @param {Sample["tcp"] | null} now
+ * @param {boolean} win
+ */
+function renderConn(d, base, now, win) {
+  const rows = [
+    { label: "TCP", color: C.green, data: d.connTcp, cur: now?.total },
+    { label: "UDP", color: C.blue, data: d.connUdp, cur: now?.udp },
+    { label: "其他", color: C.pink, data: d.connOther, cur: now?.other },
+  ].filter((r) => r.label !== "其他" || (d.connOther || []).some((v) => v > 0));
+  const n = (v) => (v == null ? "—" : String(Math.round(v)));
+  chart("conn", { ...base, stacked: true, totalLabel: "合计", fmt: n, series: rows.map(({ label, color, data }) => ({ label, color, data, width: 1.2 })) },
+    now ? `合计 ${now.total + now.udp + now.other}` : "");
+  $("#desc-conn").textContent = win ? "按协议统计的套接字数量（堆积）；Windows 不统计原始套接字" : "按协议统计的套接字数量（堆积）；其他为原始 / ICMP 套接字";
+  $("#lg-conn").innerHTML = rows.map((r) => {
+    const st = stats(r.data);
+    return `<span><i style="background:${r.color}"></i>${r.label} <b class="lg-num">${n(r.cur)}</b>${st ? stat("平均", n(st.avg)) + stat("峰值", n(st.max)) : ""}</span>`;
+  }).join("");
+}
+
+/** @param {string} k @param {string} v @param {boolean} [bad] */
+const stat = (k, v, bad) => `<span class="lg-stat${bad ? " bad" : ""}">${esc(k)} <b>${esc(v)}</b></span>`;
+
+/** @param {Series} d @param {boolean} hasPps @param {number} errs @param {number} drops */
+function renderNetSum(d, hasPps, errs, drops) {
+  const rx = stats(d.netRx), tx = stats(d.netTx);
+  const box = $("#net-sum");
+  box.hidden = !rx || !tx;
+  if (!rx || !tx) return;
+  /** @param {string} k @param {string} a @param {string} b @param {string} [cls] */
+  const io = (k, a, b, cls = "") => `<div class="ns ${cls}"><span>${k}</span><b><em class="rx">↓ ${esc(a)}</em><em class="tx">↑ ${esc(b)}</em></b></div>`;
+  /** @param {string} k @param {number} n */
+  const cnt = (k, n) => `<div class="ns${n > 0 ? " bad" : ""}"><span>${k}</span><b>${n}</b></div>`;
+  box.innerHTML = io("平均", rate(rx.avg), rate(tx.avg)) + io("P95", rate(rx.p95), rate(tx.p95))
+    + io("峰值", rate(Math.max(0, ...d.netRxMax)), rate(Math.max(0, ...d.netTxMax)))
+    + io("累计流量", bytes(sum(d.netRxBytes)), bytes(sum(d.netTxBytes)));
+  const prx = stats(d.netRxPps), ptx = stats(d.netTxPps);
+  /** @param {number | undefined} v */
+  const p = (v) => (v == null ? "—" : Math.round(v) + " pps");
+  if (hasPps) box.innerHTML += io("平均包速率", p(prx?.avg), p(ptx?.avg), "pk") + cnt("错误包", errs) + cnt("丢包", drops);
+}
+
+/** @param {string} id @param {ChartOpts} opts @param {string} [now] @param {string} [extra] legend HTML appended after the series */
+function chart(id, opts, now, extra) {
   const box = $("#c-" + id);
   if (!box) return;
   renderChart(box, opts);
   if (now !== undefined) $("#now-" + id).textContent = now || "";
   const lg = $("#lg-" + id);
-  if (lg && id !== "temp") lg.innerHTML = html`${opts.series.map((s) => html`<span><i style="background:${s.color}"></i>${s.label}</span>`)}`;
+  if (lg && id !== "temp") {
+    const solid = opts.series.filter((s) => !s.dash);
+    const peak = solid.length < opts.series.length ? `<span><i class="dash"></i>虚线为区间峰值</span>` : "";
+    lg.innerHTML = html`${solid.map((s) => html`<span><i style="background:${s.color}"></i>${s.label}</span>`)}` + peak + (extra || "");
+  }
 }
 
 /** @param {SystemView} s */

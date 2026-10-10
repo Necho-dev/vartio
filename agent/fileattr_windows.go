@@ -21,7 +21,7 @@ func fileRoots() []string {
 		return nil
 	}
 	var out []string
-	for i := 0; i < 26; i++ {
+	for i := range 26 {
 		if mask&(1<<uint(i)) == 0 {
 			continue
 		}

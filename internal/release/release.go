@@ -64,7 +64,7 @@ func TrustedKeys() ([]ed25519.PublicKey, error) {
 
 func ParseKeys(text string) ([]ed25519.PublicKey, error) {
 	var keys []ed25519.PublicKey
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue

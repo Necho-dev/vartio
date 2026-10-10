@@ -75,6 +75,7 @@ func cpuTimes() (busy, total float64, ok bool) {
 	if err != nil || len(t) == 0 {
 		return 0, 0, false
 	}
-	total = t[0].Total()
-	return total - t[0].Idle - t[0].Iowait, total, true
+	c := t[0]
+	total = c.User + c.System + c.Idle + c.Nice + c.Iowait + c.Irq + c.Softirq + c.Steal
+	return total - c.Idle - c.Iowait, total, true
 }

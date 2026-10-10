@@ -27,7 +27,7 @@ func TestTrashLifecycle(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	work := t.TempDir()
 	p := filepath.Join(work, "note.txt")
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}

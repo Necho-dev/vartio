@@ -64,6 +64,19 @@ probe-hub 自带一个 Beszel 风格的监控页（`/`，embed 在二进制里�
 
 `{id}` 是设备 ID；只有一台主机报这个 BIOS UUID 时也可以直接传 BIOS UUID。
 
+### 网络指标
+
+网络带宽卡片占满一行，吞吐与包速率画在同一张图里：左轴吞吐（实线为桶内平均，虚线为桶内峰值），右轴包速率；底部汇总区间内的平均、P95（按降采样后的桶计算）、峰值、累计流量、平均包速率、错误包与丢包。另有网络连接数（TCP / UDP / 其他套接字堆积，图例给出当前、平均、峰值；需要 agent ≥ 1.15.0）与 TCP 连接状态（ESTABLISHED / TIME_WAIT / LISTEN）两张卡片；重传率照常采集入库，详情页不再单独画图；网卡错误/丢包只在区间内非零时出现。包、错误、TCP 数据需要 agent ≥ 1.14.0，旧样本对应字段为空，相应卡片自动隐藏。
+
+| 指标 | Linux | Windows | macOS |
+|------|-------|---------|-------|
+| 包 / 错误 / 丢包 | `/proc/net/dev`（gopsutil） | `GetIfEntry2`，单播 + 非单播包 | gopsutil |
+| TCP 连接数 | `/proc/net/tcp{,6}` | `GetExtendedTcpTable` | `netstat -an -f inet/inet6` |
+| UDP / 其他套接字 | `/proc/net/udp{,6}`、`raw{,6}`、`icmp{,6}` | `GetExtendedUdpTable`；不统计原始套接字 | 同上（`udp*`、`icm*`；`tcp46`/`udp46` 只计一次） |
+| 重传率 | `/proc/net/snmp` 的 `RetransSegs / OutSegs` | `GetTcpStatisticsEx` 的 `dwRetransSegs / (dwOutSegs + dwRetransSegs)`（`dwOutSegs` 不含重传） | `nettop` 的 `re-tx / bytes_out`（字节比例；非 root 读不到报文段计数） |
+
+都是系统内核自带的累计计数器。hub 每次采样记下发送量与重传量的增量（`tcp_out_segs` / `tcp_retrans_segs`，series 接口返回桶内合计），需要时按 Σ重传 / Σ发送 加权计算；单次采样的 `retransPct` 在发送不足 200 段时为空。hub 与探针之间的往返延迟（WebSocket ping/pong，精确到 0.01 ms）记入 `latency_ms`，在详情页头部显示，不单独画图。网卡错误增加时记 `net.errors` 告警事件，每台主机每小时最多一条。
+
 ### 设备 ID（指纹）
 
 agent ≥ 1.8.0 在 Hello 里带 `deviceId` = `sha256("pd1|os|系统安装ID|硬件UUID|主网卡MAC")` 前 10 字节（20 位 hex），以及三项各自的短摘要 `device: {mid, hw, mac}`（不上送原始 machine-id）。

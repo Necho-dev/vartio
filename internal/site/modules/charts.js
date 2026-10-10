@@ -56,10 +56,12 @@ function draw(box) {
   const to = o.to || Date.now();
   const from = o.from || (t.length ? t[0] : to - 3600e3);
   const span = Math.max(1, to - from);
-  const iw = W - PAD.l - PAD.r, ih = H - PAD.t - PAD.b;
+  const dual = !!o.fmt2 && o.series.some((s) => s.right);
+  const padR = dual ? PAD.l : PAD.r;
+  const iw = W - PAD.l - padR, ih = H - PAD.t - PAD.b;
   const x = (ms) => PAD.l + ((ms - from) / span) * iw;
 
-  let dataMax = 0;
+  let dataMax = 0, dataMax2 = 0;
   const stacked = !!o.stacked;
   const acc = stacked ? t.map(() => 0) : null;
   const plotted = o.series.map((s) => {
@@ -69,18 +71,28 @@ function draw(box) {
       if (stacked) { acc[i] += v; return acc[i]; }
       return v;
     });
-    for (const v of vals) if (v != null && v > dataMax) dataMax = v;
-    return { ...s, vals, lower };
+    const right = dual && !!s.right;
+    for (const v of vals) {
+      if (v == null) continue;
+      if (right) dataMax2 = Math.max(dataMax2, v); else dataMax = Math.max(dataMax, v);
+    }
+    return { ...s, vals, lower, right };
   });
   const yMax = o.max != null ? o.max : niceMax(dataMax * 1.05);
-  const y = (v) => PAD.t + ih - (Math.min(v, yMax) / yMax) * ih;
+  const yMax2 = niceMax(dataMax2 * 1.05);
+  const yOf = (m) => (v) => PAD.t + ih - (Math.min(v, m) / m) * ih;
+  const y = yOf(yMax), y2 = yOf(yMax2);
 
   const ticks = 4;
   for (let i = 0; i <= ticks; i++) {
     const v = (yMax / ticks) * i, yy = y(v);
-    el("line", { x1: PAD.l, x2: W - PAD.r, y1: yy, y2: yy, class: "gl" }, svg);
+    el("line", { x1: PAD.l, x2: W - padR, y1: yy, y2: yy, class: "gl" }, svg);
     const lab = el("text", { x: PAD.l - 8, y: yy + 3.5, "text-anchor": "end", class: "axis" }, svg);
     lab.textContent = o.fmt(v, true);
+    if (dual) {
+      const lab2 = el("text", { x: W - padR + 8, y: yy + 3.5, "text-anchor": "start", class: "axis" }, svg);
+      lab2.textContent = o.fmt2((yMax2 / ticks) * i, true);
+    }
   }
   const xt = Math.max(2, Math.min(6, Math.floor(iw / 110)));
   for (let i = 0; i <= xt; i++) {
@@ -103,7 +115,7 @@ function draw(box) {
   order.forEach((s, si) => {
     const gid = `g${Math.random().toString(36).slice(2)}${si}`;
     const lg = el("linearGradient", { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
-    el("stop", { offset: "0%", "stop-color": s.color, "stop-opacity": s.area === false ? 0 : stacked ? 0.5 : 0.38 }, lg);
+    el("stop", { offset: "0%", "stop-color": s.color, "stop-opacity": s.area === false ? 0 : stacked ? 0.5 : s.fill ?? 0.38 }, lg);
     el("stop", { offset: "100%", "stop-color": s.color, "stop-opacity": s.area === false ? 0 : stacked ? 0.28 : 0.03 }, lg);
     const segs = [];
     let cur = [];
@@ -114,7 +126,8 @@ function draw(box) {
         cur = [];
         if (v == null) continue;
       }
-      cur.push([x(t[i]), y(v), stacked ? y(s.lower[i]) : y(0)]);
+      const yy = s.right ? y2 : y;
+      cur.push([x(t[i]), yy(v), stacked ? yy(s.lower[i]) : yy(0)]);
     }
     if (cur.length) segs.push(cur);
     for (const seg of segs) {
@@ -153,8 +166,8 @@ function draw(box) {
     plotted.forEach((s, i) => {
       const v = s.vals[lo], raw = s.data[lo];
       if (v == null) { dots[i].setAttribute("visibility", "hidden"); return; }
-      dots[i].setAttribute("cx", cx); dots[i].setAttribute("cy", y(v)); dots[i].setAttribute("visibility", "visible");
-      rows += `<div class="r"><span><i style="background:${s.color}"></i>${esc(s.label)}</span><b>${o.fmt(raw)}</b></div>`;
+      dots[i].setAttribute("cx", cx); dots[i].setAttribute("cy", (s.right ? y2 : y)(v)); dots[i].setAttribute("visibility", "visible");
+      rows += `<div class="r"><span><i style="background:${s.color}"></i>${esc(s.label)}</span><b>${(s.right ? o.fmt2 : o.fmt)(raw)}</b></div>`;
     });
     if (stacked && o.totalLabel && plotted.length > 1 && acc[lo]) {
       rows += `<div class="r sum"><span>${o.totalLabel}</span><b>${o.fmt(acc[lo])}${o.capacity ? ` / ${o.fmt(o.capacity)}` : ""}</b></div>`;

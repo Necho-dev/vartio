@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ type session struct {
 	displayOut chan []byte
 	displayID  string
 	onUpgrade  func(UpgradeStep)
+	pings      map[string]chan struct{}
 	seen       time.Time
 	remote     string
 	since      time.Time
@@ -132,6 +134,48 @@ func (s *session) touch() {
 	s.mu.Lock()
 	s.seen = time.Now()
 	s.mu.Unlock()
+}
+
+// rtt measures one WebSocket ping/pong round trip; the agent echoes the payload.
+func (s *session) rtt(d time.Duration) (time.Duration, bool) {
+	tag := strconv.FormatInt(time.Now().UnixNano(), 36)
+	ch := make(chan struct{}, 1)
+	s.mu.Lock()
+	if s.pings == nil {
+		s.pings = map[string]chan struct{}{}
+	}
+	s.pings[tag] = ch
+	t0 := time.Now()
+	err := s.conn.WriteControl(websocket.PingMessage, []byte(tag), t0.Add(d))
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pings, tag)
+		s.mu.Unlock()
+	}()
+	if err != nil {
+		return 0, false
+	}
+	select {
+	case <-ch:
+		return time.Since(t0), true
+	case <-time.After(d):
+	case <-s.closed:
+	}
+	return 0, false
+}
+
+func (s *session) pong(data string) {
+	s.mu.Lock()
+	s.seen = time.Now()
+	ch := s.pings[data]
+	s.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // alive pings the agent and reports whether any frame or pong arrives within d.
@@ -286,8 +330,8 @@ func (s *session) readLoop() {
 	defer s.close()
 	s.conn.SetReadLimit(8 << 20)
 	_ = s.conn.SetReadDeadline(time.Now().Add(PongWait))
-	s.conn.SetPongHandler(func(string) error {
-		s.touch()
+	s.conn.SetPongHandler(func(data string) error {
+		s.pong(data)
 		return s.conn.SetReadDeadline(time.Now().Add(PongWait))
 	})
 	for {

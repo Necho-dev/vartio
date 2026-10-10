@@ -65,7 +65,7 @@ func TestAutoStep(t *testing.T) {
 		t.Fatalf("slow capture should step down, got %d", l)
 	}
 	l, g := autoStart, 0
-	for i := 0; i < autoUpAfter-1; i++ {
+	for i := range autoUpAfter - 1 {
 		if l, g = autoStep(l, g, iv/10, iv/20); l != autoStart {
 			t.Fatalf("stepped up too early after %d windows", i+1)
 		}

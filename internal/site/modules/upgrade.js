@@ -85,7 +85,7 @@ function upgradeDialog(list, latest, onEnd) {
       <div class="upd-head"><b>${esc(hostName(s))}</b><span class="faint">${esc(s.version)} → ${esc(latest)}</span><span class="upd-st">待升级</span></div>
       <div class="upd-bar"><i></i></div></li>`).join("")}</ul>
     <div class="form-actions" id="updActs"><button class="btn" id="updCancel">取消</button><button class="btn primary" id="updGo">开始升级</button></div>
-  </div>`, () => { closed = true; clearTimeout(timer); }, { small: !many });
+  </div>`, () => { closed = true; clearTimeout(timer); }, { small: true });
   $("#updCancel").addEventListener("click", closeModal);
   $("#updGo").addEventListener("click", start);
 

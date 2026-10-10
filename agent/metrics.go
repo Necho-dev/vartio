@@ -73,7 +73,10 @@ func collectMetrics() guest.Metrics {
 	}
 	out.Disks, out.RootMount = diskUsages(ctx)
 	out.DiskRead, out.DiskWrite = diskIO(ctx)
-	out.NetRx, out.NetTx = netIO(ctx)
+	out.NetRx, out.NetTx, out.NetPkts = netIO(ctx)
+	if t, err := tcpStats(ctx); err == nil {
+		out.TCP = t
+	}
 	out.NICs = nicList(ctx)
 	out.Temps = temps(ctx)
 	if pids, err := process.PidsWithContext(ctx); err == nil {
@@ -214,19 +217,27 @@ func skipNIC(name string) bool {
 	return false
 }
 
-func netIO(ctx context.Context) (rx, tx uint64) {
+func netIO(ctx context.Context) (rx, tx uint64, pk *guest.NetPackets) {
 	cs, err := net.IOCountersWithContext(ctx, true)
 	if err != nil {
-		return 0, 0
+		return 0, 0, nil
 	}
+	pk = &guest.NetPackets{}
 	for _, c := range cs {
 		if skipNIC(c.Name) {
 			continue
 		}
 		rx += c.BytesRecv
 		tx += c.BytesSent
+		nrx, ntx := nonUnicastPkts(c.Name)
+		pk.Rx += c.PacketsRecv + nrx
+		pk.Tx += c.PacketsSent + ntx
+		pk.ErrIn += c.Errin
+		pk.ErrOut += c.Errout
+		pk.DropIn += c.Dropin
+		pk.DropOut += c.Dropout
 	}
-	return rx, tx
+	return rx, tx, pk
 }
 
 func nicList(ctx context.Context) []guest.NICInfo {
