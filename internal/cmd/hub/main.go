@@ -21,7 +21,9 @@ import (
 	"govmomi-wmks/internal/monitor"
 )
 
-//go:embed web
+// Listed explicitly so web/types and web/tsconfig.json (type-check only) stay out of the binary.
+//
+//go:embed web/index.html web/app.css web/modules web/assets web/vendor
 var webFS embed.FS
 
 func main() {
