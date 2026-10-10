@@ -18,10 +18,7 @@ func runTray(ctx context.Context, cfg config, logFile string) {
 }
 
 func trayReady(ctx context.Context, cfg config, logFile string) {
-	beforeExit = func() {
-		systray.Quit()
-		time.Sleep(300 * time.Millisecond)
-	}
+	beforeExit = trayBeforeExit
 	setTrayIcon("off")
 	systray.SetTooltip("probe-agent " + agentVersion)
 

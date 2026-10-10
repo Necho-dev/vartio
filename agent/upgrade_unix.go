@@ -36,6 +36,7 @@ func applyUpgrade(st *upgradeState, staged string) error {
 		_ = swapBack(st.Exe)
 		return err
 	}
+	beforeExit()
 	err := syscall.Exec(st.Exe, append([]string{st.Exe}, st.Args...), os.Environ())
 	_ = swapBack(st.Exe)
 	return err

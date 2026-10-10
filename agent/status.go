@@ -14,7 +14,7 @@ import (
 // tray / menu bar icon instead of a terminal.
 var trayMode bool
 
-// beforeExit lets the tray remove its icon before the process exits for an upgrade.
+// beforeExit lets the tray remove its icon before the process exits or execs for an upgrade.
 var beforeExit = func() {}
 
 // linkState is what the tray shows about the hub connection.

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"fyne.io/systray"
@@ -33,6 +34,13 @@ var (
 
 func setTrayIcon(state string) {
 	systray.SetIcon(map[string][]byte{"ok": winOK, "off": winOff, "up": winUp}[state])
+}
+
+// trayBeforeExit removes the notification-area icon so no stale one lingers
+// after the process is replaced.
+func trayBeforeExit() {
+	systray.Quit()
+	time.Sleep(300 * time.Millisecond)
 }
 
 // trayWanted: everything except the service runs in the background with a

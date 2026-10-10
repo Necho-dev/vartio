@@ -163,7 +163,7 @@ dist/probe-agent/
 | 终端前台 | 直接运行 | 调试 | `console` |
 
 - **Windows 托盘**：`install` 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `ProbeAgent`，并立即在后台启动；`uninstall` 删除该项并结束本机的托盘探针。托盘与服务二选一，装了一种再装另一种会被拒绝。直接双击 exe 也会进入托盘模式，但不会开机自启
-- **macOS 菜单栏**：`install` 写 `~/Library/LaunchAgents/probe-agent.plist`（`RunAtLoad`、`KeepAlive`、仅 Aqua 会话）并 `launchctl bootstrap`。进程被结束会被 launchd 拉起，只有 `uninstall`（`bootout`）能停掉。不出现在程序坞。在终端里直接运行也会显示菜单栏图标，日志照常打到终端；root 或纯 SSH 登录时不显示
+- **macOS 菜单栏**：`install` 写 `~/Library/LaunchAgents/probe-agent.plist`（`RunAtLoad`、`KeepAlive`、仅 Aqua 会话）并 `launchctl bootstrap`。进程被结束会被 launchd 拉起，只有 `uninstall`（`bootout`）能停掉。不出现在程序坞。在终端里直接运行也会显示菜单栏图标，日志照常打到终端；root 或纯 SSH 登录时不显示。图标首次出现在系统图标（时钟、控制中心）左侧，避免被刘海挡住；按住 ⌘ 拖动可调整位置，重启和升级后保持（≥ 1.15.2，记录在 `~/Library/Preferences/probe-agent.plist`）
 - `install` 时如果 exe 旁还没有 `probe-agent.env`，会把当前环境里的 `GUEST_*` 写进去（0600），因为登录自启拿不到终端里的环境变量
 - 同一用户只允许一个实例：Windows 用命名互斥量 `Local\probe-agent`，并检查服务是否在跑；macOS 用 exe 旁的 `probe-agent.lock`（launchd 拉起的实例会等锁，而不是反复退出重启）。重复启动会提示"已在后台运行"后退出
 - 菜单内容：连接状态（已连接时长 / 未连接原因 / 升级中）、Hub 地址、版本与设备 ID、打开监控页、查看日志、立即重连。**没有退出**，防止误关监控
