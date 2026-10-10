@@ -23,6 +23,10 @@ func deviceID() (string, *guest.DeviceFacts) {
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("GUEST_DEVICE_ID"))); v != "" {
 		return v, facts
 	}
+	if inContainer() {
+		// The container's own NIC is regenerated on every recreate unless it shares the host network.
+		mac = ""
+	}
 	if mid == "" && hw == "" && mac == "" {
 		return "", nil
 	}

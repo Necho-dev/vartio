@@ -37,6 +37,9 @@ type System struct {
 	// Caps and Runner come from the live session only.
 	Caps   []string `json:"caps,omitempty"`
 	Runner string   `json:"runner,omitempty"`
+	// Credential is the hub's device credential state: active, pending, none,
+	// or "" when the hub runs without device credentials.
+	Credential string `json:"credential,omitempty"`
 }
 
 type Sample struct {
@@ -77,6 +80,54 @@ type Sample struct {
 	Disks          []guest.DiskUsage  `json:"disks,omitempty"`
 	Temps          []guest.TempSensor `json:"temps,omitempty"`
 	NICs           []guest.NICInfo    `json:"nics,omitempty"`
+	// NetNICs is per-interface throughput (nil until two samples land).
+	NetNICs []NICNet      `json:"netNics,omitempty"`
+	Docker  *DockerSample `json:"docker,omitempty"`
+}
+
+// NICNet is one physical NIC's rates for the latest sample and for history.
+type NICNet struct {
+	Name    string  `json:"name"`
+	RxBps   float64 `json:"rxBps"`
+	TxBps   float64 `json:"txBps"`
+	RxBytes uint64  `json:"rxBytes,omitempty"`
+	TxBytes uint64  `json:"txBytes,omitempty"`
+}
+
+type DockerSample struct {
+	Engine     string              `json:"engine,omitempty"`
+	Version    string              `json:"version,omitempty"`
+	Running    int                 `json:"running"`
+	Total      int                 `json:"total"`
+	Error      string              `json:"error,omitempty"`
+	Containers []ContainerSample   `json:"containers"`
+	Images     []guest.DockerImage `json:"images,omitempty"`
+}
+
+// ContainerSample rates are nil until a container has two samples in a row.
+// CPUPct follows `docker stats`: 100 is one core.
+type ContainerSample struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Image       string   `json:"image"`
+	State       string   `json:"state"`
+	Status      string   `json:"status,omitempty"`
+	Health      string   `json:"health,omitempty"`
+	Project     string   `json:"project,omitempty"`
+	Service     string   `json:"service,omitempty"`
+	Compose     string   `json:"compose,omitempty"`
+	Created     int64    `json:"created,omitempty"`
+	Ports       string   `json:"ports,omitempty"`
+	Update      bool     `json:"update,omitempty"`
+	Stats       bool     `json:"stats,omitempty"`
+	CPUPct      *float64 `json:"cpuPct,omitempty"`
+	MemUsed     uint64   `json:"memUsed,omitempty"`
+	MemLimit    uint64   `json:"memLimit,omitempty"`
+	NetRxBps    *float64 `json:"netRxBps,omitempty"`
+	NetTxBps    *float64 `json:"netTxBps,omitempty"`
+	BlkReadBps  *float64 `json:"blkReadBps,omitempty"`
+	BlkWriteBps *float64 `json:"blkWriteBps,omitempty"`
+	Pids        int      `json:"pids,omitempty"`
 }
 
 // Event categories and levels.
@@ -107,6 +158,8 @@ type counters struct {
 	read, write, rx, tx uint64
 	pk                  *guest.NetPackets
 	tcp                 *guest.TCPStats
+	ctr                 map[string]guest.ContainerStat
+	nic                 map[string][2]uint64
 }
 
 // netErrEvery throttles "net.errors" events per system.
@@ -120,8 +173,11 @@ type Monitor struct {
 	Hub       *guest.Hub
 	Store     *Store // nil: live view only, no history
 	Interval  time.Duration
-	Retention time.Duration
+	Retention time.Duration // raw samples
+	// Rollup tiers keep long ranges cheap; see PickSource.
+	Retention5m, Retention1h time.Duration
 
+	rollupMu sync.Mutex
 	mu       sync.Mutex
 	systems  map[string]*System
 	prev     map[string]counters
@@ -139,6 +195,7 @@ func New(hub *guest.Hub, store *Store, interval, retention time.Duration) *Monit
 	}
 	m := &Monitor{
 		Hub: hub, Store: store, Interval: interval, Retention: retention,
+		Retention5m: max(retention, 14*24*time.Hour), Retention1h: 365 * 24 * time.Hour,
 		systems:  map[string]*System{},
 		prev:     map[string]counters{},
 		polling:  map[string]bool{},
@@ -174,7 +231,10 @@ func (m *Monitor) Run(ctx context.Context) {
 	defer t.Stop()
 	prune := time.NewTicker(time.Hour)
 	defer prune.Stop()
+	rollup := time.NewTicker(time.Minute)
+	defer rollup.Stop()
 	m.prune(ctx)
+	go m.backfill(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -183,9 +243,46 @@ func (m *Monitor) Run(ctx context.Context) {
 			for _, s := range m.Hub.List() {
 				go m.poll(ctx, s.DeviceID)
 			}
+		case <-rollup.C:
+			// Covers the hour that just closed so the hourly tier sees its last 5-minute bucket.
+			m.rollup(ctx, time.Now().Add(-70*time.Minute))
 		case <-prune.C:
 			m.prune(ctx)
 		}
+	}
+}
+
+// backfill rolls up raw samples recorded since the last rollup (all of them
+// on first start after an upgrade).
+func (m *Monitor) backfill(ctx context.Context) {
+	if m.Store == nil {
+		return
+	}
+	since := time.Now().Add(-m.Retention)
+	if last, err := m.Store.LastRollup(ctx); err != nil {
+		log.Printf("monitor rollup: %v", err)
+		return
+	} else if last.After(since) {
+		since = last.Add(-time.Hour)
+	}
+	start := time.Now()
+	m.rollup(ctx, since)
+	if d := time.Since(start); d > time.Second {
+		log.Printf("monitor rollup: backfilled from %s in %s", since.Format(time.DateTime), d.Round(time.Millisecond))
+	}
+}
+
+func (m *Monitor) rollup(ctx context.Context, since time.Time) {
+	if m.Store == nil {
+		return
+	}
+	// Concurrent upserts over the same buckets can deadlock.
+	m.rollupMu.Lock()
+	defer m.rollupMu.Unlock()
+	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := m.Store.Rollup(c, since, m.Interval); err != nil {
+		log.Printf("monitor rollup: %v", err)
 	}
 }
 
@@ -199,6 +296,9 @@ func (m *Monitor) prune(ctx context.Context) {
 		log.Printf("monitor prune: %v", err)
 	} else if n > 0 {
 		log.Printf("monitor prune: %d samples older than %s", n, m.Retention)
+	}
+	if err := m.Store.PruneRollups(ctx, now.Add(-m.Retention5m), now.Add(-m.Retention1h)); err != nil {
+		log.Printf("monitor prune rollups: %v", err)
 	}
 }
 
@@ -351,7 +451,7 @@ func (m *Monitor) onDisconnect(info guest.SessionInfo) {
 
 // onReject logs a fingerprint collision, at most every 10 minutes per device, since
 // the refused agent keeps retrying.
-func (m *Monitor) onReject(hello guest.Hello, remote, _ string) {
+func (m *Monitor) onReject(hello guest.Hello, remote, code, _ string) {
 	key := hello.Key()
 	now := time.Now()
 	m.mu.Lock()
@@ -363,10 +463,19 @@ func (m *Monitor) onReject(hello guest.Hello, remote, _ string) {
 		known = false
 	}
 	m.mu.Unlock()
-	if known {
-		m.emit(key, now, Event{Kind: "conflict", Category: CatLifecycle, Level: LevelWarn, IP: remote, Version: hello.Version,
-			Detail: "同指纹设备重复接入已拒绝（对方主机名 " + hello.HostName + "，BIOS " + hello.BiosUUID + "）"})
+	if !known {
+		return
 	}
+	e := Event{Kind: "conflict", Category: CatLifecycle, Level: LevelWarn, IP: remote, Version: hello.Version,
+		Detail: "同指纹设备重复接入已拒绝（对方主机名 " + hello.HostName + "，BIOS " + hello.BiosUUID + "）"}
+	if code != "device_conflict" {
+		e.Kind = "auth.reject"
+		e.Detail = "设备凭据校验失败，已拒绝接入（" + code + "，对方主机名 " + hello.HostName + "）；探针重装丢失凭据时可在详情页重置凭据"
+		if code == "enrollment_disabled" {
+			e.Detail = "hub 已关闭新设备登记（PROBE_HUB_ENROLL=off），已拒绝无凭据接入（对方主机名 " + hello.HostName + "）"
+		}
+	}
+	m.emit(key, now, e)
 }
 
 func (m *Monitor) onAudit(a guest.Audit) {
@@ -469,24 +578,18 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 		TS: now.UTC().Truncate(time.Second), CPUPct: met.CPUPct,
 		MemUsed: met.MemUsed, MemTotal: met.MemTotal,
 		SwapUsed: met.SwapUsed, SwapTotal: met.SwapTotal,
-		RootMount: met.RootMount, Load: met.Load, Procs: met.Procs,
+		Load: met.Load, Procs: met.Procs,
 		LatencyMs: math.Round(float64(latency.Microseconds())/10) / 100,
-		Disks:     dedupePools(met.Disks, met.RootMount), Temps: met.Temps, NICs: met.NICs,
+		Temps:     met.Temps, NICs: met.NICs,
 	}
+	// RootMount only labels the system disk. The headline percentage is every
+	// partition after shared pools (APFS, one device mounted twice) are collapsed.
+	smp.RootMount = guest.CapacityMount(met.Disks, met.RootMount)
+	smp.Disks = dedupePools(met.Disks, smp.RootMount)
 	if met.MemTotal > 0 {
 		smp.MemPct = float64(met.MemUsed) / float64(met.MemTotal) * 100
 	}
-	for _, d := range met.Disks {
-		if d.Mount == met.RootMount {
-			smp.DiskUsed, smp.DiskTotal = d.Used, d.Total
-		}
-	}
-	if smp.DiskTotal == 0 {
-		for _, d := range met.Disks {
-			smp.DiskUsed += d.Used
-			smp.DiskTotal += d.Total
-		}
-	}
+	smp.DiskUsed, smp.DiskTotal = guest.DiskSum(smp.Disks)
 	if smp.DiskTotal > 0 {
 		smp.DiskPct = float64(smp.DiskUsed) / float64(smp.DiskTotal) * 100
 	}
@@ -496,16 +599,25 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 		}
 	}
 	smp.TCP = met.TCP
-	cur := counters{at: now, read: met.DiskRead, write: met.DiskWrite, rx: met.NetRx, tx: met.NetTx, pk: met.NetPkts, tcp: met.TCP}
+	cur := counters{at: now, read: met.DiskRead, write: met.DiskWrite, rx: met.NetRx, tx: met.NetTx, pk: met.NetPkts, tcp: met.TCP, nic: nicCounters(met.NICs)}
+	if d := met.Docker; d != nil {
+		cur.ctr = make(map[string]guest.ContainerStat, len(d.Containers))
+		for _, c := range d.Containers {
+			if c.Stats {
+				cur.ctr[c.ID] = c
+			}
+		}
+	}
 	m.mu.Lock()
 	prev, ok := m.prev[id]
 	m.prev[id] = cur
 	m.mu.Unlock()
-	if !ok {
-		return smp
-	}
 	dt := cur.at.Sub(prev.at).Seconds()
-	if dt <= 0.5 {
+	if !ok || dt <= 0.5 {
+		dt = 0
+	}
+	smp.Docker = dockerSample(met.Docker, prev.ctr, dt)
+	if dt == 0 {
 		return smp
 	}
 	smp.DiskReadBps = rate(prev.read, cur.read, dt)
@@ -513,6 +625,7 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 	smp.NetRxBps = rate(prev.rx, cur.rx, dt)
 	smp.NetTxBps = rate(prev.tx, cur.tx, dt)
 	smp.NetRxBytes, smp.NetTxBytes = delta(prev.rx, cur.rx), delta(prev.tx, cur.tx)
+	smp.NetNICs = nicRates(prev.nic, cur.nic, dt)
 	if p, c := prev.pk, cur.pk; p != nil && c != nil {
 		rx, tx := rate(p.Rx, c.Rx, dt), rate(p.Tx, c.Tx, dt)
 		errs := delta(p.ErrIn, c.ErrIn) + delta(p.ErrOut, c.ErrOut)
@@ -531,6 +644,75 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 		}
 	}
 	return smp
+}
+
+// maxContainerBps (100 Gbit/s) bounds believable container network and disk rates.
+const maxContainerBps = 12.5e9
+
+// dockerSample derives per-container rates from the previous sample's counters
+// (dt == 0: no usable previous sample).
+func dockerSample(d *guest.DockerInfo, prev map[string]guest.ContainerStat, dt float64) *DockerSample {
+	if d == nil {
+		return nil
+	}
+	out := &DockerSample{Engine: d.Engine, Version: d.Version, Running: d.Running, Total: d.Total, Error: d.Error,
+		Containers: make([]ContainerSample, 0, len(d.Containers)), Images: d.Images}
+	for _, c := range d.Containers {
+		cs := ContainerSample{ID: c.ID, Name: c.Name, Image: c.Image, State: c.State, Status: c.Status, Health: c.Health,
+			Project: c.Project, Service: c.Service, Compose: c.Compose, Created: c.Created, Ports: c.Ports, Update: c.Update, Stats: c.Stats, MemUsed: c.MemUsed, MemLimit: c.MemLimit, Pids: c.Pids}
+		if p, ok := prev[c.ID]; ok && c.Stats && dt > 0 && c.CPUNs >= p.CPUNs {
+			wall := dt
+			if c.ReadNs > p.ReadNs && p.ReadNs > 0 {
+				wall = float64(c.ReadNs-p.ReadNs) / 1e9
+			}
+			var cpu float64
+			if dSys := float64(c.SysNs) - float64(p.SysNs); c.SysNs > 0 && dSys > 0 {
+				cpu = float64(c.CPUNs-p.CPUNs) / dSys * float64(max(c.CPUs, 1)) * 100
+			} else {
+				cpu = float64(c.CPUNs-p.CPUNs) / (wall * 1e9) * 100
+			}
+			cpu = math.Round(cpu*100) / 100
+			rx, tx := rate(p.NetRx, c.NetRx, wall), rate(p.NetTx, c.NetTx, wall)
+			br, bw := rate(p.BlkRead, c.BlkRead, wall), rate(p.BlkWrite, c.BlkWrite, wall)
+			// A counter glitch shows up as an impossible rate; skip the sample.
+			if cpu <= float64(max(c.CPUs, 1))*110 && max(rx, tx, br, bw) <= maxContainerBps {
+				cs.CPUPct, cs.NetRxBps, cs.NetTxBps, cs.BlkReadBps, cs.BlkWriteBps = &cpu, &rx, &tx, &br, &bw
+			}
+		}
+		out.Containers = append(out.Containers, cs)
+	}
+	return out
+}
+
+func nicCounters(nics []guest.NICInfo) map[string][2]uint64 {
+	if len(nics) == 0 {
+		return nil
+	}
+	out := make(map[string][2]uint64, len(nics))
+	for _, n := range nics {
+		if n.Rx == 0 && n.Tx == 0 {
+			continue
+		}
+		out[n.Name] = [2]uint64{n.Rx, n.Tx}
+	}
+	return out
+}
+
+func nicRates(prev, cur map[string][2]uint64, dt float64) []NICNet {
+	if dt == 0 || len(cur) == 0 {
+		return nil
+	}
+	var out []NICNet
+	for name, c := range cur {
+		p, ok := prev[name]
+		if !ok {
+			continue
+		}
+		out = append(out, NICNet{Name: name, RxBps: rate(p[0], c[0], dt), TxBps: rate(p[1], c[1], dt),
+			RxBytes: delta(p[0], c[0]), TxBytes: delta(p[1], c[1])})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func delta(a, b uint64) uint64 {
@@ -581,6 +763,9 @@ func (m *Monitor) List() []System {
 		out = append(out, *s)
 	}
 	m.mu.Unlock()
+	for i := range out {
+		out[i].Credential = m.Hub.CredentialState(out[i].ID)
+	}
 	sort.Slice(out, func(i, j int) bool {
 		a, b := strings.ToLower(out[i].Name), strings.ToLower(out[j].Name)
 		if a == b {
@@ -594,12 +779,15 @@ func (m *Monitor) List() []System {
 // Get finds a system by device id, or by BIOS UUID when exactly one system has it.
 func (m *Monitor) Get(id string) (System, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	s := m.findLocked(id)
 	if s == nil {
+		m.mu.Unlock()
 		return System{}, false
 	}
-	return *s, true
+	out := *s
+	m.mu.Unlock()
+	out.Credential = m.Hub.CredentialState(out.ID)
+	return out, true
 }
 
 func (m *Monitor) findLocked(id string) *System {
@@ -692,6 +880,7 @@ func (m *Monitor) Delete(ctx context.Context, id string) error {
 	m.mu.Lock()
 	delete(m.systems, key)
 	m.mu.Unlock()
+	m.Hub.ForgetCredential(key)
 	return nil
 }
 

@@ -136,6 +136,33 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		defer cancel()
 		list, err := listeners(ctx, req)
 		return list, asRPC(err)
+	case guest.MethodDockerInspect:
+		var req guest.DockerInspectRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil || req.Container == "" {
+			return nil, bad("container required")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodDockerInspect, 0))
+		defer cancel()
+		doc, err := dockerInspect(ctx, req.Container)
+		return doc, asRPC(err)
+	case guest.MethodDockerLogs:
+		var req guest.DockerLogsRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil || req.Container == "" {
+			return nil, bad("container required")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodDockerLogs, 0))
+		defer cancel()
+		out, err := dockerLogs(ctx, req)
+		return out, asRPC(err)
+	case guest.MethodDockerCompose:
+		var req guest.DockerComposeRequest
+		if err := json.Unmarshal(fr.Params, &req); err != nil || req.Project == "" {
+			return nil, bad("project required")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodDockerCompose, 0))
+		defer cancel()
+		out, err := dockerCompose(ctx, req.Project)
+		return out, asRPC(err)
 	default:
 		return nil, &guest.FrameError{Code: "not_implemented", Message: fr.Method}
 	}

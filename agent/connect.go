@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,9 +72,12 @@ func serve(ctx context.Context, cfg config) error {
 // dialOnce reports connected=true once the hello handshake succeeded, so the caller
 // resets its backoff after a session that was actually up.
 func dialOnce(ctx context.Context, cfg config) (bool, error) {
+	ent := loadHubEntry(cfg.URL)
 	hdr := http.Header{}
-	if cfg.Token != "" {
-		hdr.Set("X-Guest-Token", cfg.Token)
+	cfg.setAgentAuth(hdr, ent)
+	nonce, err := randomHex(16)
+	if err != nil {
+		return false, err
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, cfg.URL, hdr)
 	if err != nil {
@@ -94,6 +98,7 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 		Arch:       runtime.GOARCH,
 		Runner:     runnerName(),
 		Upgrade:    pendingReport(),
+		Nonce:      nonce,
 	}
 	if err := conn.WriteJSON(hello); err != nil {
 		return false, err
@@ -107,6 +112,15 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 			return false, fmt.Errorf("%w: %s: %s", errHello, ack.Code, ack.Message)
 		}
 		return false, errHello
+	}
+	changed, err := acceptHello(&ent, nonce, cfg.deviceKey(), ack)
+	if err != nil {
+		return false, err
+	}
+	if changed {
+		if err := saveHubEntry(cfg.URL, ent); err != nil {
+			log.Printf("save hub credential to %s: %v", hubStatePath(), err)
+		}
 	}
 	log.Printf("connected as %s", cfg.DeviceID)
 	confirmUpgrade()
@@ -137,6 +151,12 @@ func caps() []string {
 	c = append(c, guest.CapFsWhich, guest.CapFsRead, guest.CapNetListeners)
 	if spawnEnabled() {
 		c = append(c, guest.CapProcSpawn)
+	}
+	if docker() != nil {
+		c = append(c, guest.CapDocker, guest.CapDockerInspect)
+		if dockerMode() == dockerRW {
+			c = append(c, guest.CapDockerExec)
+		}
 	}
 	return c
 }
@@ -238,6 +258,16 @@ func (a *agent) streamUpgrade(id string, st guest.UpgradeStep) {
 }
 
 func hostname() string {
+	if h := strings.TrimSpace(os.Getenv("GUEST_HOSTNAME")); h != "" {
+		return h
+	}
+	if inContainer() && hostRoot() != "" {
+		if b, err := os.ReadFile(hostPath("/etc/hostname")); err == nil {
+			if h := strings.TrimSpace(string(b)); h != "" {
+				return h
+			}
+		}
+	}
 	h, _ := os.Hostname()
 	return h
 }

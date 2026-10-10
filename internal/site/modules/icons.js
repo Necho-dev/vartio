@@ -18,6 +18,9 @@ const PATHS = {
   "folder-open": `<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />`,
   "trash-2": `<path d="M10 11v6" /><path d="M14 11v6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />`,
   "arrow-right-left": `<path d="m16 3 4 4-4 4" /><path d="M20 7H4" /><path d="m8 21-4-4 4-4" /><path d="M4 17h16" />`,
+  "container": `<path d="M22 7.7c0-.6-.4-1.2-.8-1.5l-6.3-3.9a1.72 1.72 0 0 0-1.7 0l-10.3 6c-.5.2-.9.8-.9 1.4v6.6c0 .5.4 1.2.8 1.5l6.3 3.9a1.72 1.72 0 0 0 1.7 0l10.3-6c.5-.3.9-1 .9-1.5Z" /><path d="M10 21.9V14L2.1 9.1" /><path d="m10 14 11.9-6.9" /><path d="M14 19.8v-8.1" /><path d="M18 17.5V9.4" />`,
+  "scroll-text": `<path d="M15 12h-5" /><path d="M15 8h-5" /><path d="M19 17V5a2 2 0 0 0-2-2H4" /><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" />`,
+  "info": `<circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />`,
   "chevron-left": `<path d="m15 18-6-6 6-6" />`,
   "chevron-right": `<path d="m9 18 6-6-6-6" />`,
   "arrow-up": `<path d="m5 12 7-7 7 7" /><path d="M12 19V5" />`,
@@ -61,3 +64,22 @@ const PATHS = {
  * @param {string} [cls]
  */
 export const icon = (name, cls = "") => `<svg class="i${cls ? " " + cls : ""}" viewBox="0 0 24 24" aria-hidden="true">${PATHS[name]}</svg>`;
+
+// Filled marks so a machine reads as macOS, Windows, Linux, or Docker at a glance.
+// Kept apart from PATHS: lucide-static has no OS glyphs, and the generator would drop them.
+const OS_FILL = {
+  darwin: `<path d="M16.37 1.43c0 1.14-.49 2.27-1.24 3.05-.84.86-2.2 1.52-3.3 1.43-.13-1.12.4-2.28 1.15-3.05.82-.85 2.22-1.48 3.39-1.43zM19.8 8.7c.06.07-1.72 1-1.7 2.96.03 2.35 2.06 3.13 2.09 3.14-.02.06-.33 1.12-1.08 2.22-.65.95-1.33 1.9-2.4 1.92-1.05.02-1.39-.62-2.59-.62s-1.58.6-2.57.64c-1.03.04-1.81-1.03-2.47-1.97-1.35-1.95-2.38-5.51-1-7.96.69-1.2 1.92-1.96 3.26-1.98 1.02-.02 1.98.69 2.59.69.61 0 1.75-.85 2.95-.73.5.02 1.91.2 2.82 1.53z"/>`,
+  windows: `<path d="M3.2 3.2h8v8h-8zm9.6 0h8v8h-8zM3.2 12.8h8v8h-8zm9.6 0h8v8h-8z"/>`,
+  linux: `<path fill-rule="evenodd" d="M12 1.8c.9 0 1.6.8 1.5 1.7.7.3 1.9.8 2.7 1.8 1.5 1.7 2.2 3.8 2.2 6.1 0 2.1-.6 3.6-1.5 4.6.4.8.6 1.6.6 2.3 0 1.4-1 2.6-2.5 2.6-.6 0-1.1-.2-1.5-.5-.4.6-1.1 1-1.9 1h-.8c-.8 0-1.5-.4-1.9-1-.4.3-.9.5-1.5.5-1.5 0-2.5-1.2-2.5-2.6 0-.7.2-1.5.6-2.3-.9-1-1.5-2.5-1.5-4.6 0-2.3.7-4.4 2.2-6.1.8-1 2-1.5 2.7-1.8-.1-.9.6-1.7 1.5-1.7zM9.3 8.45a1.05 1.05 0 1 0 2.1 0 1.05 1.05 0 1 0-2.1 0zM12.8 8.45a1.05 1.05 0 1 0 2.1 0 1.05 1.05 0 1 0-2.1 0zM8.9 14.6c.2-1.7 1.4-3 3.1-3s2.9 1.3 3.1 3c.1.4-.2.8-.7.8h-4.8c-.5 0-.8-.4-.7-.8z"/>`,
+};
+
+const OS_TITLE = { darwin: "MacOS", windows: "Windows", linux: "Linux", docker: "Docker" };
+
+/** @param {string} key osKey() */
+export function osIcon(key) {
+  const title = OS_TITLE[key];
+  if (!title) return "";
+  const body = key === "docker" ? PATHS.container : OS_FILL[key];
+  if (!body) return "";
+  return `<span class="os-mark ${key}${key === "docker" ? "" : " fill"}" title="${title}"><svg class="i" viewBox="0 0 24 24" aria-hidden="true">${body}</svg></span>`;
+}

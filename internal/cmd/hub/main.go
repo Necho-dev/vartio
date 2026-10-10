@@ -62,10 +62,21 @@ func main() {
 
 	hub := guest.NewHub(token)
 	hub.Releases = &guest.Releases{Dir: agentDir()}
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("PROBE_HUB_AUTH")), "off") {
+		auth, err := guest.LoadAuth(stateFile("PROBE_HUB_KEY_FILE", "probe-hub.key"), stateFile("PROBE_HUB_CREDENTIALS_FILE", "probe-hub.agents.json"))
+		if err != nil {
+			log.Fatalf("hub key: %v", err)
+		}
+		auth.Enroll = !strings.EqualFold(strings.TrimSpace(os.Getenv("PROBE_HUB_ENROLL")), "off")
+		hub.Auth = auth
+		log.Printf("hub public key %s (GUEST_HUB_KEY)  enroll=%v", auth.PublicKey(), auth.Enroll)
+	}
 	if err := hub.LoadForwards(stateFile("PROBE_HUB_FORWARDS_FILE", "probe-hub.forwards.json")); err != nil {
 		log.Fatalf("forwards: %v", err)
 	}
 	mon := monitor.New(hub, store, interval, retention)
+	mon.Retention5m = envDuration("PROBE_HUB_RETENTION_5M", mon.Retention5m)
+	mon.Retention1h = envDuration("PROBE_HUB_RETENTION_1H", mon.Retention1h)
 	if err := mon.Load(ctx); err != nil {
 		log.Fatalf("load systems: %v", err)
 	}

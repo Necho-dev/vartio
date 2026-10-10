@@ -18,7 +18,12 @@ func startPTY(cols, rows int, onOut func([]byte), onExit func()) (io.WriteCloser
 	if shell == "" {
 		shell = "/bin/bash"
 	}
-	cmd := exec.Command(shell, "-i")
+	name, args := shell, []string{"-i"}
+	if hostNS() {
+		// The container's $SHELL may not exist on the host.
+		name, args = hostCommand("/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash -l; exec sh -l")
+	}
+	cmd := exec.Command(name, args...)
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",

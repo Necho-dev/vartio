@@ -33,11 +33,13 @@ func runExec(req guest.ExecRequest) guest.ExecResult {
 		cmd = exec.CommandContext(ctx, "cmd.exe", args...)
 	default:
 		if len(req.Args) > 0 {
-			cmd = exec.CommandContext(ctx, req.Command, req.Args...)
+			name, args := hostCommand(req.Command, req.Args...)
+			cmd = exec.CommandContext(ctx, name, args...)
 		} else if runtime.GOOS == "windows" {
 			cmd = exec.CommandContext(ctx, "cmd.exe", "/c", req.Command)
 		} else {
-			cmd = exec.CommandContext(ctx, "/bin/sh", "-c", req.Command)
+			name, args := hostCommand("/bin/sh", "-c", req.Command)
+			cmd = exec.CommandContext(ctx, name, args...)
 		}
 	}
 	if req.Cwd != "" {

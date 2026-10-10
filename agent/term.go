@@ -45,7 +45,22 @@ func (t *termHub) open(id string, req guest.TermOpenRequest, onOut func([]byte),
 		return fmt.Errorf("at most %d terminals", guest.MaxTerms)
 	}
 	cols, rows := clampSize(req.Cols, req.Rows)
-	stdin, closer, resize, err := startPTY(cols, rows, onOut, exited)
+	var (
+		stdin  io.WriteCloser
+		closer func()
+		resize func(int, int)
+		err    error
+	)
+	switch req.Mode {
+	case "":
+		stdin, closer, resize, err = startPTY(cols, rows, onOut, exited)
+	case guest.TermLogs:
+		stdin, closer, resize, err = startDockerLogs(req, onOut, exited)
+	case guest.TermExec:
+		stdin, closer, resize, err = startDockerExec(req, cols, rows, onOut, exited)
+	default:
+		err = &guest.FrameError{Code: "bad_request", Message: "unknown terminal mode " + req.Mode}
+	}
 	if err != nil {
 		return err
 	}

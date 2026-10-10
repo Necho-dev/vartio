@@ -50,8 +50,15 @@ type upgradeState struct {
 	Cwd     string    `json:"cwd"`
 }
 
+// upgradeEnabled is on unless GUEST_UPGRADE=off. In a container a swapped-in
+// binary is lost when the container is recreated, so there it takes
+// GUEST_UPGRADE=on and the image is the normal way to upgrade.
 func upgradeEnabled() bool {
-	return !strings.EqualFold(strings.TrimSpace(os.Getenv("GUEST_UPGRADE")), "off")
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("GUEST_UPGRADE")))
+	if inContainer() {
+		return v == "on"
+	}
+	return v != "off"
 }
 
 func probation() time.Duration {
@@ -189,7 +196,7 @@ func (cfg config) hubGet(ctx context.Context, path string, q url.Values) (*http.
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("X-Guest-Token", cfg.Token)
+	cfg.setAgentAuth(req.Header, loadHubEntry(cfg.URL))
 	return http.DefaultClient.Do(req)
 }
 

@@ -1,6 +1,6 @@
 // @ts-check
-import { $, API, app, state, esc, rate, dur, ago, meter, osLabel, osKey, OS_NAMES, ip, api, every } from "./core.js";
-import { icon } from "./icons.js";
+import { $, API, app, state, esc, rate, dur, ago, meter, osLabel, osKey, OS_NAMES, OS_ORDER, ip, api, every } from "./core.js";
+import { icon, osIcon } from "./icons.js";
 import { latestAgent, outdated, canUpgrade, upgradeAll, upgradeOne, upgradeNotice } from "./upgrade.js";
 
 let latest = "";
@@ -60,7 +60,7 @@ function renderStats() {
   let rx = 0, tx = 0;
   on.forEach((x) => { if (x.latest) { rx += x.latest.netRxBps; tx += x.latest.netTxBps; } });
   $("#stats").innerHTML = `
-    <div class="stat"><div class="label">主机总数</div><div class="value">${s.length}</div><div class="sub">${Object.entries(countBy(s, osKey)).map(([k, n]) => `${OS_NAMES[k] || k} ${n}`).join(" · ") || "—"}</div></div>
+    <div class="stat"><div class="label">主机总数</div><div class="value">${s.length}</div><div class="sub">${osEntries(countBy(s, osKey)).map(([k, n]) => `${esc(OS_NAMES[k] || k)} ${n}`).join(" · ") || "—"}</div></div>
     <div class="stat ok"><div class="label">在线</div><div class="value">${on.length}</div><div class="sub">WSS 长连接存活</div></div>
     <div class="stat bad"><div class="label">离线</div><div class="value">${s.length - on.length}</div><div class="sub">${s.length - on.length ? "检查探针进程或网络" : "全部正常"}</div></div>
     <div class="stat net"><div class="label">实时总带宽</div><div class="value"><span class="rx">↓ ${rate(rx)}</span><br><span class="tx">↑ ${rate(tx)}</span></div></div>`;
@@ -79,15 +79,24 @@ function countBy(list, fn) {
   return m;
 }
 
+/** @param {Record<string, number>} counts */
+function osEntries(counts) {
+  return Object.entries(counts).sort((a, b) => {
+    const ia = OS_ORDER.indexOf(a[0]), ib = OS_ORDER.indexOf(b[0]);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+}
+
 function renderChips() {
   const s = state.systems;
+  /** @type {[string, string, number][]} */
   const chips = [["all", "全部", s.length], ["online", "在线", s.filter((x) => x.online).length], ["offline", "离线", s.filter((x) => !x.online).length]];
-  Object.entries(countBy(s, osKey)).forEach(([k, n]) => chips.push(["os:" + k, OS_NAMES[k] || k, n]));
+  osEntries(countBy(s, osKey)).forEach(([k, n]) => chips.push(["os:" + k, OS_NAMES[k] || k, n]));
   const tags = {};
   s.forEach((x) => (x.tags || []).forEach((t) => (tags[t] = (tags[t] || 0) + 1)));
   Object.entries(tags).sort().forEach(([t, n]) => chips.push(["tag:" + t, "#" + t, n]));
   $("#chips").innerHTML = `<span class="faint" style="font-size:12px;margin-right:2px">筛选</span>` +
-    chips.map(([k, l, n]) => `<button class="chip ${state.chip === k ? "on" : ""}" data-k="${esc(k)}">${esc(l)}<span class="n">${n}</span></button>`).join("");
+    chips.map(([k, l, n]) => `<button class="chip ${state.chip === k ? "on" : ""}" data-k="${esc(k)}">${k.startsWith("os:") ? osIcon(k.slice(3)) : ""}${esc(l)}<span class="n">${n}</span></button>`).join("");
   $("#chips").querySelectorAll(".chip").forEach((b) => b.addEventListener("click", () => {
     state.chip = b.dataset.k;
     renderChips();
@@ -155,12 +164,20 @@ export function renderTable() {
 }
 
 /** @param {SystemView} s */
+function osTag(s) {
+  const k = osKey(s);
+  const name = OS_NAMES[k];
+  if (!name || k === "unknown") return "";
+  return `<span class="os-tag">${osIcon(k)}<span>${esc(name)}</span></span>`;
+}
+
+/** @param {SystemView} s */
 function row(s) {
   const l = s.latest, on = s.online && l;
   const up = s.online && s.info && s.info.bootTime ? Date.now() / 1000 - s.info.bootTime : 0;
   const tags = (s.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
   return `<tr data-id="${esc(s.id)}" class="${s.online ? "" : "offline"}">
-    <td class="c-name"><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div>${esc(s.name || s.hostname || s.id)}<div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div>${tags ? `<div class="name-tags">${tags}</div>` : ""}</div></div></td>
+    <td class="c-name"><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div><div class="nm">${esc(s.name || s.hostname || s.id)}${osTag(s)}</div><div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div>${tags ? `<div class="name-tags">${tags}</div>` : ""}</div></div></td>
     <td class="c-cpu" data-l="CPU">${on ? meter(l.cpuPct) : `<span class="faint">—</span>`}</td>
     <td class="c-mem" data-l="内存">${on ? meter(l.memPct) : `<span class="faint">—</span>`}</td>
     <td class="c-disk" data-l="磁盘">${l ? meter(l.diskPct) : `<span class="faint">—</span>`}</td>

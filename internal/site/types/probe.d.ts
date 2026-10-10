@@ -78,6 +78,67 @@ interface Sample {
   disks?: DiskUsage[];
   temps?: TempSensor[];
   nics?: NicInfo[];
+  /** per-NIC rates once the agent reports cumulative rx/tx */
+  netNics?: { name: string; rxBps: number; txBps: number; rxBytes?: number; txBytes?: number }[];
+  /** agents with the docker cap (>= 1.17.0) */
+  docker?: DockerSample;
+}
+
+/** monitor.DockerSample */
+interface DockerSample {
+  engine?: string;
+  version?: string;
+  running: number;
+  total: number;
+  /** the engine did not answer this sample */
+  error?: string;
+  containers: ContainerSample[];
+  images?: DockerImage[];
+}
+
+interface DockerImage {
+  id: string;
+  name: string;
+  tags?: string[];
+  size: number;
+  created?: number;
+  inUse?: number;
+}
+
+/** monitor.ContainerSample; rates are absent until two samples in a row. */
+interface ContainerSample {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status?: string;
+  health?: "healthy" | "unhealthy" | "starting";
+  project?: string;
+  service?: string;
+  compose?: string;
+  /** unix seconds, container create time */
+  created?: number;
+  /** published ports, e.g. "127.0.0.1:5432→5432/tcp, 8080→80/tcp" */
+  ports?: string;
+  /** the registry has a newer image for this tag */
+  update?: boolean;
+  stats?: boolean;
+  /** 100 = one core, like docker stats */
+  cpuPct?: number;
+  memUsed?: number;
+  memLimit?: number;
+  netRxBps?: number;
+  netTxBps?: number;
+  blkReadBps?: number;
+  blkWriteBps?: number;
+  pids?: number;
+}
+
+/** monitor.ContainerSeries from GET /monitor/systems/{id}/containers/series */
+interface ContainerSeries {
+  stepSec: number;
+  t: number[];
+  containers: { name: string; memLimit: number; cpu: (number | null)[]; mem: (number | null)[]; netRx: (number | null)[]; netTx: (number | null)[]; blkRead: (number | null)[]; blkWrite: (number | null)[]; pids: (number | null)[] }[];
 }
 
 /** monitor.Event */
@@ -122,8 +183,10 @@ interface SystemView {
   events?: SystemEvent[];
   /** live session only */
   caps?: string[];
-  /** service | console | systemd | launchd */
+  /** service | console | systemd | launchd | docker */
   runner?: string;
+  /** device credential; absent when the hub runs with PROBE_HUB_AUTH=off */
+  credential?: "active" | "pending" | "none";
 }
 
 /** GET /releases */
@@ -206,6 +269,8 @@ interface Series {
   procs: number[];
   /** mount -> used bytes */
   diskParts: Record<string, (number | null)[]>;
+  /** per-NIC rates; missing until the agent reports counters */
+  netNics?: Record<string, { rx: (number | null)[]; tx: (number | null)[]; rxBytes: (number | null)[]; txBytes: (number | null)[] }>;
 }
 
 /** guest.ProcInfo */

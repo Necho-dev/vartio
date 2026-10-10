@@ -33,7 +33,7 @@ export const outdated = (s, latest) => !!latest && !!s.version && cmpVer(s.versi
 export const canUpgrade = (s) => s.online && (s.caps || []).includes("upgrade");
 
 /** @type {Record<string, string>} */
-export const RUNNERS = { service: "Windows 服务", tray: "后台（托盘图标）", console: "前台进程", systemd: "systemd 服务", launchd: "launchd 后台" };
+export const RUNNERS = { service: "Windows 服务", tray: "后台（托盘图标）", console: "前台进程", systemd: "systemd 服务", launchd: "launchd 后台", docker: "Docker 容器" };
 
 const hostName = (/** @type {SystemView} */ s) => s.name || s.hostname;
 

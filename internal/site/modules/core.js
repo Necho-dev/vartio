@@ -105,16 +105,20 @@ export const meter = (p) => `<div class="meter"><span class="pct">${pct(p)}</spa
 /** @param {SystemView} s */
 export function osLabel(s) {
   const i = s.info || /** @type {HostInfo} */ ({});
+  if (s.runner === "docker") return ["Docker", i.arch].filter(Boolean).join(" · ");
   const name = (i.platform || i.os || "").replace(/^Microsoft\s+/, "");
   return [name, i.arch].filter(Boolean).join(" · ");
 }
 /** @param {SystemView} s */
 export function osKey(s) {
+  if (s.runner === "docker") return "docker";
   const o = ((s.info && s.info.os) || "").toLowerCase();
   return o || "unknown";
 }
 /** @type {Record<string, string>} */
-export const OS_NAMES = { windows: "Windows", darwin: "macOS", linux: "Linux", unknown: "未知" };
+export const OS_NAMES = { windows: "Windows", darwin: "MacOS", linux: "Linux", docker: "Docker", unknown: "未知" };
+/** Stable order for fleet counts and filters. */
+export const OS_ORDER = ["darwin", "windows", "linux", "docker", "unknown"];
 /** @param {SystemView} s */
 export const ip = (s) => {
   const n = s.latest && s.latest.nics && s.latest.nics.find((x) => x.ipv4);

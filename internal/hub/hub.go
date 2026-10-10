@@ -25,12 +25,15 @@ type Hub struct {
 	// OnConnect / OnDisconnect / OnReject / OnAudit are optional; set before the hub serves traffic.
 	OnConnect    func(SessionInfo)
 	OnDisconnect func(SessionInfo)
-	// OnReject reports a hello refused because the same device id is already live.
-	OnReject func(hello Hello, remote, reason string)
+	// OnReject reports a refused hello: code is device_conflict (the same device id is
+	// already live) or an Auth refusal (credential_required, enrollment_disabled, unauthorized).
+	OnReject func(hello Hello, remote, code, reason string)
 	// OnAudit receives operator actions performed through the probe API.
 	OnAudit func(Audit)
 	// Releases is where signed agent builds are offered from; nil disables upgrades.
 	Releases *Releases
+	// Auth signs hellos and binds device credentials; nil keeps the token-only flow.
+	Auth *Auth
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -52,6 +55,7 @@ type streamTicket struct {
 	ID        string
 	Key       string
 	Kind      string
+	Term      TermOpenRequest
 	ExpiresAt time.Time
 }
 
@@ -254,15 +258,37 @@ func (h *Hub) Call(ctx context.Context, key, method string, params any) (json.Ra
 	return raw, nil
 }
 
-func (h *Hub) IssueTerm(key string) (map[string]string, error) {
-	return h.issueStream(key, "term", PathTermWS, "open in a browser; one-shot, expires in 2 minutes. view/type shell only. ESXi WSS is never used.")
+// IssueTerm hands out a terminal ticket. target picks a container's logs or a
+// shell in it (Mode, Container, Shell, Tail); the zero value is the agent's shell.
+func (h *Hub) IssueTerm(key string, target TermOpenRequest) (map[string]string, error) {
+	target = TermOpenRequest{Mode: target.Mode, Container: strings.TrimSpace(target.Container), Shell: strings.TrimSpace(target.Shell), Tail: target.Tail, Since: target.Since}
+	switch target.Mode {
+	case "":
+		target = TermOpenRequest{}
+	case TermLogs, TermExec:
+		if target.Container == "" {
+			return nil, esxi.ErrBad("container required")
+		}
+	default:
+		return nil, esxi.ErrBad("mode must be logs or exec")
+	}
+	return h.issueStream(key, "term", PathTermWS, "open in a browser; one-shot, expires in 2 minutes. view/type shell only. ESXi WSS is never used.", func(s *session) (TermOpenRequest, error) {
+		switch {
+		case target.Mode == "":
+		case !s.hello.Has(CapDocker):
+			return target, errCapMissing(CapDocker)
+		case target.Mode == TermExec && !s.hello.Has(CapDockerExec):
+			return target, &esxi.Error{Status: http.StatusForbidden, Code: "agent_policy", Message: "探针未开放容器终端（需 GUEST_DOCKER=rw）"}
+		}
+		return target, nil
+	})
 }
 
 func (h *Hub) IssueDisplay(key string) (map[string]string, error) {
-	return h.issueStream(key, "display", PathDisplayWS, "view-only JPEG up to 10fps (quality=auto|smooth|hd on the ws URL); no input. one-shot, expires in 2 minutes. ESXi WSS is never used.")
+	return h.issueStream(key, "display", PathDisplayWS, "view-only JPEG up to 10fps (quality=auto|smooth|hd on the ws URL); no input. one-shot, expires in 2 minutes. ESXi WSS is never used.", nil)
 }
 
-func (h *Hub) issueStream(key, kind, path, note string) (map[string]string, error) {
+func (h *Hub) issueStream(key, kind, path, note string, check func(*session) (TermOpenRequest, error)) (map[string]string, error) {
 	if err := h.CheckBound(key); err != nil {
 		return nil, err
 	}
@@ -272,6 +298,12 @@ func (h *Hub) issueStream(key, kind, path, note string) (map[string]string, erro
 	}
 	if s == nil {
 		return nil, esxi.ErrGuestOffline()
+	}
+	var target TermOpenRequest
+	if check != nil {
+		if target, err = check(s); err != nil {
+			return nil, err
+		}
 	}
 	id, err := randomID()
 	if err != nil {
@@ -284,7 +316,7 @@ func (h *Hub) issueStream(key, kind, path, note string) (map[string]string, erro
 			delete(h.tickets, k)
 		}
 	}
-	h.tickets[id] = streamTicket{ID: id, Key: s.hello.Key(), Kind: kind, ExpiresAt: time.Now().Add(TicketTTL)}
+	h.tickets[id] = streamTicket{ID: id, Key: s.hello.Key(), Kind: kind, Term: target, ExpiresAt: time.Now().Add(TicketTTL)}
 	h.mu.Unlock()
 	return map[string]string{
 		"ws":   path + "?id=" + id,

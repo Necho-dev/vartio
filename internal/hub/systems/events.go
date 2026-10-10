@@ -51,6 +51,63 @@ func diff(pi guest.SysInfo, ps *Sample, ni guest.SysInfo, ns *Sample) []Event {
 	if d := nicChanges(ps.NICs, ns.NICs); d != "" {
 		add(CatChange, "nic", d)
 	}
+	return append(out, containerEvents(ps.Docker, ns.Docker)...)
+}
+
+// containerEvents reports containers that stopped, started or changed health,
+// one event per kind. An engine that did not answer either time says nothing.
+func containerEvents(prev, cur *DockerSample) []Event {
+	if prev == nil || cur == nil || prev.Error != "" || cur.Error != "" {
+		return nil
+	}
+	was := make(map[string]ContainerSample, len(prev.Containers))
+	for _, c := range prev.Containers {
+		was[c.Name] = c
+	}
+	var stopped, started, sick, well []string
+	seen := map[string]bool{}
+	for _, c := range cur.Containers {
+		seen[c.Name] = true
+		p, ok := was[c.Name]
+		switch {
+		case c.State == "running" && (!ok || p.State != "running"):
+			started = append(started, c.Name)
+		case c.State != "running" && ok && p.State == "running":
+			stopped = append(stopped, c.Name+"（"+c.Status+"）")
+		}
+		if ok && c.Health != p.Health {
+			switch {
+			case c.Health == "unhealthy":
+				sick = append(sick, c.Name)
+			case c.Health == "healthy" && p.Health == "unhealthy":
+				well = append(well, c.Name)
+			}
+		}
+	}
+	// A full list cannot tell a removed container from one cut off by MaxContainers.
+	if len(cur.Containers) < guest.MaxContainers {
+		for _, c := range prev.Containers {
+			if !seen[c.Name] && c.State == "running" {
+				stopped = append(stopped, c.Name+"（已删除）")
+			}
+		}
+	}
+	var out []Event
+	add := func(kind, level string, names []string) {
+		if len(names) == 0 {
+			return
+		}
+		sort.Strings(names)
+		detail := strings.Join(names[:min(len(names), 10)], "、")
+		if len(names) > 10 {
+			detail += fmt.Sprintf(" 等 %d 个", len(names))
+		}
+		out = append(out, Event{Kind: kind, Category: CatLifecycle, Level: level, Detail: detail})
+	}
+	add("container.stop", LevelWarn, stopped)
+	add("container.start", LevelInfo, started)
+	add("container.unhealthy", LevelWarn, sick)
+	add("container.healthy", LevelInfo, well)
 	return out
 }
 

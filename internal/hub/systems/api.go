@@ -118,7 +118,37 @@ func (m *Monitor) Register(mux *http.ServeMux, authRequired bool) {
 			writeErr(w, errNotFound)
 			return
 		}
-		out, err := m.Store.Series(r.Context(), sys.ID, time.Now().Add(-span), step, m.Interval)
+		from := time.Now().Add(-span)
+		src, step := PickSource(from, step, m.Retention)
+		out, err := m.Store.Series(r.Context(), sys.ID, src, from, step, m.Interval)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("GET "+PathSystems+"/{id}/containers/series", func(w http.ResponseWriter, r *http.Request) {
+		span, ok := ranges[r.URL.Query().Get("range")]
+		if !ok {
+			span = time.Hour
+		}
+		step := stepFor(span, m.Interval)
+		top, _ := strconv.Atoi(r.URL.Query().Get("top"))
+		if top <= 0 || top > 50 {
+			top = 8
+		}
+		if m.Store == nil {
+			writeJSON(w, http.StatusOK, ContainerSeries{StepSec: int(step / time.Second), T: []int64{}, Containers: []ContainerLine{}})
+			return
+		}
+		sys, ok := m.Get(r.PathValue("id"))
+		if !ok {
+			writeErr(w, errNotFound)
+			return
+		}
+		from := time.Now().Add(-span)
+		src, step := PickSource(from, step, m.Retention)
+		out, err := m.Store.ContainerSeries(r.Context(), sys.ID, src, from, step, top)
 		if err != nil {
 			writeErr(w, err)
 			return

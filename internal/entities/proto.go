@@ -33,6 +33,9 @@ const (
 	MethodTrash          = "files.trash"
 	MethodUpgrade        = "agent.upgrade"
 	MethodTunnelOpen     = "tunnel.open"
+	MethodDockerInspect  = CapDockerInspect
+	MethodDockerLogs     = "docker.logs"
+	MethodDockerCompose  = "docker.compose"
 	MethodFsWhich        = CapFsWhich
 	MethodProcSpawn      = CapProcSpawn
 	MethodNetListeners   = CapNetListeners
@@ -80,6 +83,50 @@ const CapUpgrade = "upgrade"
 // CapTunnelTCP means the agent dials TCP targets its local policy allows
 // (loopback by default) and relays bytes for tunnel.open.
 const CapTunnelTCP = "tunnel.tcp"
+
+// CapDocker means the agent reaches a Docker-compatible engine: metrics carry
+// its containers and term.open accepts TermLogs. CapDockerExec (GUEST_DOCKER=rw)
+// adds TermExec, a shell inside a container. CapDockerInspect (agent >= 1.18.0)
+// answers MethodDockerInspect with the engine's inspect document minus Config.Env.
+const (
+	CapDocker        = "docker"
+	CapDockerExec    = "docker.exec"
+	CapDockerInspect = "docker.inspect"
+)
+
+type DockerInspectRequest struct {
+	Container string `json:"container"`
+}
+
+// DockerLogsRequest pulls a snapshot (no follow). Timestamps are always on.
+type DockerLogsRequest struct {
+	Container string `json:"container"`
+	Tail      int    `json:"tail,omitempty"`
+	Since     int64  `json:"since,omitempty"`
+	Until     int64  `json:"until,omitempty"`
+}
+
+type DockerLogsResult struct {
+	Text string `json:"text"`
+}
+
+type DockerComposeRequest struct {
+	Project string `json:"project"`
+}
+
+type DockerComposeResult struct {
+	Project  string   `json:"project"`
+	File     string   `json:"file,omitempty"`
+	Content  string   `json:"content,omitempty"`
+	Services []string `json:"services,omitempty"`
+	Error    string   `json:"error,omitempty"`
+}
+
+// TermOpenRequest.Mode values; empty is the agent's own shell.
+const (
+	TermLogs = "logs"
+	TermExec = "exec"
+)
 
 // Tunnel byte frames carry the tunnel id in Frame.ID, both directions. Either
 // side sends StreamTunnelClose (Data empty) when its end is gone.
@@ -228,10 +275,12 @@ type Hello struct {
 	Primitives map[string]int `json:"primitives,omitempty"`
 	OS         string         `json:"os,omitempty"`
 	Arch       string         `json:"arch,omitempty"`
-	// Runner is how the agent is supervised: service, systemd, launchd or console.
+	// Runner is how the agent is supervised: service, systemd, launchd, docker or console.
 	Runner string `json:"runner,omitempty"`
 	// Upgrade reports the outcome of the last upgrade attempt, once, on the next connect.
 	Upgrade *UpgradeReport `json:"upgrade,omitempty"`
+	// Nonce (agent >= 1.18.0) asks the hub to sign HelloOK and hand out a device credential.
+	Nonce string `json:"nonce,omitempty"`
 }
 
 // UpgradeRequest asks the agent to install Version. URL is a hub path; the agent
@@ -340,6 +389,13 @@ type HelloOK struct {
 	OK      bool   `json:"ok"`
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
+	// Credential is a newly issued device credential; the agent stores it and sends it
+	// back (X-Guest-Device / X-Guest-Credential) from then on.
+	Credential string `json:"credential,omitempty"`
+	// HubKey and Sig: the hub's Ed25519 public key and its signature over
+	// HelloSigMessage(Hello.Nonce, device id, Credential).
+	HubKey string `json:"hubKey,omitempty"`
+	Sig    string `json:"sig,omitempty"`
 }
 
 type Health struct {
@@ -377,6 +433,10 @@ type NICInfo struct {
 	IPv4     string `json:"ipv4,omitempty"`
 	LinkMbps int    `json:"linkMbps,omitempty"`
 	Up       bool   `json:"up"`
+	// Rx/Tx are cumulative byte counters (agent >= 1.18.0) so the hub can
+	// derive per-NIC rates. They are not shown in the inventory table.
+	Rx uint64 `json:"rx,omitempty"`
+	Tx uint64 `json:"tx,omitempty"`
 }
 
 type NetRates struct {
@@ -439,6 +499,68 @@ type Metrics struct {
 	NICs    []NICInfo    `json:"nics"`
 	Temps   []TempSensor `json:"temps,omitempty"`
 	Procs   int          `json:"procs"`
+	// Docker is set when the agent has CapDocker (agent >= 1.17.0).
+	Docker *DockerInfo `json:"docker,omitempty"`
+}
+
+// MaxContainers caps how many containers one sample lists.
+const MaxContainers = 200
+
+type DockerInfo struct {
+	// Engine is the product, e.g. "Docker Desktop 4.88.1" or "Podman Engine".
+	Engine  string `json:"engine,omitempty"`
+	Version string `json:"version,omitempty"`
+	Running int    `json:"running"`
+	Total   int    `json:"total"`
+	// Error is set when the engine did not answer this sample.
+	Error      string          `json:"error,omitempty"`
+	Containers []ContainerStat `json:"containers"`
+	Images     []DockerImage   `json:"images,omitempty"`
+}
+
+// DockerImage is one engine image (agent >= 1.18.0).
+type DockerImage struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Tags    []string `json:"tags,omitempty"`
+	Size    int64    `json:"size"`
+	Created int64    `json:"created,omitempty"`
+	InUse   int      `json:"inUse,omitempty"`
+}
+
+// ContainerStat counters are cumulative; Stats is false for stopped containers
+// and for running ones whose stats call timed out.
+type ContainerStat struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Image   string `json:"image"`
+	State   string `json:"state"`
+	Status  string `json:"status,omitempty"`
+	Health  string `json:"health,omitempty"`
+	Project string `json:"project,omitempty"`
+	Service string `json:"service,omitempty"`
+	// Compose is the first compose file path from engine labels, if any.
+	Compose string `json:"compose,omitempty"`
+	Created int64  `json:"created,omitempty"`
+	// Ports are the published ports, e.g. "8080→80/tcp, 127.0.0.1:5432→5432/tcp".
+	Ports string `json:"ports,omitempty"`
+	// Update is true when the registry has a newer image for the container's tag.
+	Update bool `json:"update,omitempty"`
+	Stats  bool `json:"stats,omitempty"`
+	// CPUNs is container CPU time, SysNs host CPU time over all cores (0 where it
+	// is not comparable: Podman, Windows), CPUs the cores the container may use,
+	// ReadNs the engine's sample time; without SysNs the hub divides by wall time.
+	CPUNs    uint64 `json:"cpuNs,omitempty"`
+	SysNs    uint64 `json:"sysNs,omitempty"`
+	CPUs     int    `json:"cpus,omitempty"`
+	ReadNs   int64  `json:"readNs,omitempty"`
+	MemUsed  uint64 `json:"memUsed,omitempty"`
+	MemLimit uint64 `json:"memLimit,omitempty"`
+	NetRx    uint64 `json:"netRx,omitempty"`
+	NetTx    uint64 `json:"netTx,omitempty"`
+	BlkRead  uint64 `json:"blkRead,omitempty"`
+	BlkWrite uint64 `json:"blkWrite,omitempty"`
+	Pids     int    `json:"pids,omitempty"`
 }
 
 // NetPackets are cumulative counters.
@@ -526,6 +648,15 @@ type TermOpenRequest struct {
 	ID   string `json:"id,omitempty"`
 	Cols int    `json:"cols,omitempty"`
 	Rows int    `json:"rows,omitempty"`
+	// Mode TermLogs follows a container's output; TermExec runs Shell (bash,
+	// falling back to sh, when empty) in it. Container is a name or id.
+	Mode      string `json:"mode,omitempty"`
+	Container string `json:"container,omitempty"`
+	Shell     string `json:"shell,omitempty"`
+	// Tail is how many past log lines TermLogs replays (default 500).
+	Tail int `json:"tail,omitempty"`
+	// Since is a unix timestamp; TermLogs only returns lines after it.
+	Since int64 `json:"since,omitempty"`
 }
 
 type TermOpenResult struct {
@@ -731,8 +862,10 @@ type AgentFlag struct {
 
 func TimeoutFor(method string, execSec int) time.Duration {
 	switch method {
-	case MethodHealth, MethodMetrics, MethodProcsList, MethodServicesList, MethodFsWhich, MethodFsRead:
+	case MethodHealth, MethodMetrics, MethodProcsList, MethodServicesList, MethodFsWhich, MethodFsRead, MethodDockerInspect, MethodDockerCompose:
 		return ListTimeout
+	case MethodDockerLogs:
+		return ActionTimeout
 	case MethodProcsAction, MethodServicesAction, MethodProcSpawn, MethodNetListeners:
 		return ActionTimeout
 	case MethodPower:

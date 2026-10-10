@@ -50,9 +50,13 @@ probe-hub 自带一个 Beszel 风格的监控页（`/`，embed 在二进制里�
 | `PROBE_HUB_DSN` | `postgres://probe_hub:***@127.0.0.1:5432/probe_hub?sslmode=disable`；不设则只有实时视图、无历史 |
 | `GUEST_TOKEN` | 探针接入令牌 |
 | `PROBE_HUB_ADMIN_TOKEN` | 设置后页面与 `/v1/probe/sessions*`、`/v1/probe/monitor/*` 需 Bearer；`/v1/probe/connect` 与一次性 WS 票不受影响 |
-| `PROBE_HUB_INTERVAL` / `PROBE_HUB_RETENTION` | 采集间隔 / 样本保留（默认 `10s` / `168h`），事件保留 30 天 |
+| `PROBE_HUB_INTERVAL` / `PROBE_HUB_RETENTION` | 采集间隔 / 原始样本保留（默认 `10s` / `168h`），事件保留 30 天 |
+| `PROBE_HUB_RETENTION_5M` / `PROBE_HUB_RETENTION_1H` | 5 分钟 / 1 小时汇总的保留（默认 `336h`（且不短于原始样本）/ `8760h`） |
+| `PROBE_HUB_AUTH` / `PROBE_HUB_ENROLL` | 接入认证，见下文「接入认证」 |
 
 表：`probe_systems`（主机、标签、最新样本 jsonb，主键 `device_id`）、`probe_metrics`（`(device_id, ts)` 主键的时序样本）、`probe_events`（事件）。启动时自动建表，外键 `ON UPDATE CASCADE`，主机换键时历史跟着走。旧版以 `bios_uuid` 为主键的表不再自动迁移，需要清表重建。
+
+降采样（hub ≥ 1.18.0）：主机与容器样本另外汇总进 `probe_metrics_5m` / `probe_metrics_1h` 和 `probe_container_metrics_5m` / `_1h`。均值列取平均，峰值列（`cpu_max`、`net_rx_max`、`net_tx_max`）取最大，流量、报文段、错误包取合计，所以从汇总表算出的曲线与直接聚合原始样本一致。hub 每分钟重算最近 70 分钟（幂等 upsert，当前桶随新样本补齐），启动时从上次汇总处补齐（升级后首次启动会把现有原始样本全部汇总一遍）。曲线步长 ≥ 1 小时读小时表，≥ 15 分钟或区间超出原始样本保留读 5 分钟表，步长取汇总粒度的整数倍；其余读原始样本。默认配置下 7 天曲线读 5 分钟表，30 天读小时表，原始样本只需保留 7 天。
 
 监控 API（hub 独有）：
 
@@ -66,7 +70,7 @@ probe-hub 自带一个 Beszel 风格的监控页（`/`，embed 在二进制里�
 
 ### 网络指标
 
-网络带宽卡片占满一行，吞吐与包速率画在同一张图里：左轴吞吐（实线为桶内平均，虚线为桶内峰值），右轴包速率；底部汇总区间内的平均、P95（按降采样后的桶计算）、峰值、累计流量、平均包速率、错误包与丢包。另有网络连接数（TCP / UDP / 其他套接字堆积，图例给出当前、平均、峰值；需要 agent ≥ 1.15.0）与 TCP 连接状态（ESTABLISHED / TIME_WAIT / LISTEN）两张卡片；重传率照常采集入库，详情页不再单独画图；网卡错误/丢包只在区间内非零时出现。包、错误、TCP 数据需要 agent ≥ 1.14.0，旧样本对应字段为空，相应卡片自动隐藏。
+网络带宽卡片占满一行，标题旁可下拉指定网卡（默认全部物理网卡；分网卡曲线需要 agent 上报累计收发计数）。吞吐与包速率画在同一张图里：左轴吞吐（实线为桶内平均，虚线为桶内峰值），右轴包速率；底部汇总区间内的平均、P95（按降采样后的桶计算）、峰值、累计流量、平均包速率、错误包与丢包。另有网络连接数（TCP / UDP / 其他套接字堆积，图例给出当前、平均、峰值；需要 agent ≥ 1.15.0）与 TCP 连接状态（ESTABLISHED / TIME_WAIT / LISTEN）两张卡片；重传率照常采集入库，详情页不再单独画图；网卡错误/丢包只在区间内非零时出现。包、错误、TCP 数据需要 agent ≥ 1.14.0，旧样本对应字段为空，相应卡片自动隐藏。
 
 | 指标 | Linux | Windows | macOS |
 |------|-------|---------|-------|
@@ -100,13 +104,31 @@ hub 侧：
 
 | 分类 | kind |
 |------|------|
-| `lifecycle` | `online` `offline`（含在线时长；hub 重启补记）`upgrade`（注明远程升级 / 自动更新）`upgrade.failed`（已回滚，warn）`reboot`（启动时间前移 > 2 分钟）`rekey` `conflict` |
+| `lifecycle` | `online` `offline`（含在线时长；hub 重启补记）`upgrade`（注明远程升级 / 自动更新）`upgrade.failed`（已回滚，warn）`reboot`（启动时间前移 > 2 分钟）`rekey` `conflict` `auth.reject`（凭据缺失或登记关闭，warn，10 分钟一条）`container.start/stop/unhealthy/healthy`（同一次采样合并成一条；stop、unhealthy 为 warn） |
 | `change` | `remote`（来源 IP）`hostname` `os` `kernel` `cpu` `memory`（> 2%）`disk`（挂载点增删、容量 > 2%）`nic`（带 IPv4 的非容器网卡增删、IP/MAC 变化） |
-| `audit` | `term.open/close`（含时长）`display.open/close` `exec`（命令行 + 退出码）`power.*` `proc.*` `service.*` `file.upload/download/mkdir/rename/delete/trash` `trash.restore/purge/empty` `meta`（改名称/标签）`agent.upgrade`（下发升级，`from → to`） |
+| `audit` | `term.open/close`（含时长）`display.open/close` `exec`（命令行 + 退出码）`power.*` `proc.*` `service.*` `file.upload/download/mkdir/rename/delete/trash` `trash.restore/purge/empty` `meta`（改名称/标签）`agent.upgrade`（下发升级，`from → to`）`docker.logs` `docker.exec`（容器名）`credential.reset` |
 
 每条事件都带 `ip`（当时探针的来源 IP）和 `version`（当时的 agent 版本）两个基础属性；审计事件另有 `actor`，是操作者 IP（有 `X-Forwarded-For` 取第一个）。只读操作（列目录、进程列表、文件预览 `preview=1`）和在到达 agent 前就被拒的请求（参数错误、缺 confirm、离线）不记；agent 侧失败记为 `level: warn`。
 
 物理 Windows 机器的 SMBIOS UUID 若是占位值（全 0 / 全 F / `03000200-0400-0500-0006-000700080009`），探针改用注册表 `MachineGuid`，避免局域网多台机器撞 ID。
+
+### 接入认证
+
+hub ≥ 1.18.0 在共享的 `GUEST_TOKEN` 之上加了两层，旧探针不受影响：
+
+- **hub 身份**：hub 首次启动生成 Ed25519 密钥（`probe-hub.key`，0600，`PROBE_HUB_KEY_FILE` 可改路径），公钥打在启动日志里，也可 `GET /v1/probe/hub/key` 查询。探针（≥ 1.18.0）在 Hello 里带随机 `nonce`，hub 回 `HelloOK.sig = Sign("probe-hub-hello/v1\n" + nonce + "\n" + 设备 ID + "\n" + 凭据)`。探针首次连上时记住 hub 公钥（TOFU），之后签名不对、换了公钥或不签名的 hub 一律拒绝并重连。`GUEST_HUB_KEY=<base64>[,<base64>…]` 预置可信公钥（多个用于轮换），`GUEST_HUB_VERIFY=off` 跳过校验
+- **设备凭据**：用 `GUEST_TOKEN` 通过认证的新设备会收到一份专属凭据（hub 只存 SHA-256，`probe-hub.agents.json`，`PROBE_HUB_CREDENTIALS_FILE` 可改路径），此时状态为「待确认」。探针下次连接在 `X-Guest-Device` / `X-Guest-Credential` 头里出示后变为「已绑定」。已绑定的设备只能凭自己的凭据接入，单凭令牌冒用会被拒（`credential_required`，记 `auth.reject` 事件）。凭据本身就能通过认证，所以已绑定的探针在轮换 `GUEST_TOKEN` 后照样能连；新令牌只用于新设备登记
+
+探针把公钥和凭据存在 `GUEST_HUB_STATE`；没设时，容器内放 `GUEST_STATE_DIR/hub.json`，否则放 exe 旁的 `probe-agent.hub.json`（目录不可写时放用户配置目录 `probe-agent/hub.json`）。按控制地址分开保存，0600。
+
+| 操作 | 方法 |
+|------|------|
+| 探针丢了凭据（重装、换目录） | 详情页「接入凭据」点「重置」，或 `POST /v1/probe/sessions/{id}/credential/reset {"confirm":true}`（审计 `credential.reset`）；探针下次连接凭令牌重新登记 |
+| 禁止新设备接入 | `PROBE_HUB_ENROLL=off`。没有凭据的旧探针（< 1.18.0）也会被拒，先把探针全部升级 |
+| hub 换机 | 连同 `probe-hub.key`、`probe-hub.agents.json` 一起迁移；丢了 key，所有探针会拒绝新 hub，需要删掉探针侧的 hub.json 或设置 `GUEST_HUB_KEY` |
+| 关闭 | `PROBE_HUB_AUTH=off`，退回只校验令牌 |
+
+删除主机时同时删除它的凭据。签名能防假冒 hub，但明文 `ws://` 上的主动中间人仍可转发篡改帧，公网请用 `wss://`。
 
 ## 生产 REST
 
@@ -160,6 +182,7 @@ dist/probe-agent/
 | Windows 服务 | 管理员 `probe-agent.exe service install` | 无人登录的服务器；Session 0 看不到桌面，没有实时画面 | `service` |
 | macOS 菜单栏（推荐） | `./probe-agent install`（不要 sudo） | 登录用户的 LaunchAgent | `launchd` |
 | Linux | systemd unit | 服务器 | `systemd` |
+| Docker 容器 | `deploy/docker/compose.agent.yml`（见下文「Docker」） | 只想用镜像部署的 Linux 主机 | `docker` |
 | 终端前台 | 直接运行 | 调试 | `console` |
 
 - **Windows 托盘**：`install` 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `ProbeAgent`，并立即在后台启动；`uninstall` 删除该项并结束本机的托盘探针。托盘与服务二选一，装了一种再装另一种会被拒绝。直接双击 exe 也会进入托盘模式，但不会开机自启
@@ -173,6 +196,62 @@ dist/probe-agent/
 打进 `RV0000_BASE`。控制面 `LISTEN` 必须是 Guest **能出站到达** 的地址（常见 `PG-IKUAI-LAN` 上的内网 IP），不要用 `127.0.0.1`。
 
 身份：Guest SMBIOS UUID = ESXi `config.uuid` / `biosUuid`，vm-server 用它把 VM 对到探针；本机可用 `GUEST_BIOS_UUID` 覆盖。probe-hub 内部按设备 ID（见上文）区分主机。
+
+## Docker
+
+agent ≥ 1.17.0 支持两件事：任何平台上的探针都能监控本机的 Docker / Podman 容器；探针本身也可以跑在容器里。hub 也提供镜像。
+
+### 容器监控
+
+探针直接调 Docker Engine API（不依赖 docker CLI）。引擎地址按顺序找：`DOCKER_HOST`（`unix://` 或不带 TLS 的 `tcp://`）、`/var/run/docker.sock`、`/run/podman/podman.sock`、`$XDG_RUNTIME_DIR/{docker.sock,podman/podman.sock}`、`~/.docker/run`、`~/.orbstack/run`、`~/.colima/default`、`~/.rd` 下的 `docker.sock`。Windows 不支持 named pipe，需要 `DOCKER_HOST=tcp://…`。
+
+| `GUEST_DOCKER` | 能力 | 说明 |
+|----------------|------|------|
+| `ro`（默认） | `docker` | 容器列表、CPU / 内存 / 网络 / 磁盘 IO / 进程数、日志 |
+| `rw` | `docker` `docker.exec` | 另外允许在容器里开终端 |
+| `off` | — | 不访问引擎 |
+
+不提供启动、停止、删除。
+
+- 采集：每个采样周期 `GET /containers/json?all=1`，再对运行中的容器并发（8 路）取一次 `stats?stream=false&one-shot=true`，最多 200 个容器、100 次 stats；失败的容器当轮重试一次。Docker < 25 的 `one-shot` 不生效，每次 stats 要等约 1 秒，改为全部并发。agent 上报累计值和引擎的采样时刻，hub 算速率。CPU% 与 `docker stats` 一致（100% 为一个核心）；内存是 `usage − inactive_file`（cgroup v1 用 `total_inactive_file`，再退回 `cache`），不含可回收的页缓存
+- 引擎差异（agent ≥ 1.18.0）：Podman 不给主机 CPU 时间，hub 按两次采样的引擎时间戳折算；Podman 列表不带健康状态，取不到时补一次 inspect。Windows 容器的 CPU 单位是 100ns、内存取 `PrivateWorkingSet`。hub 丢弃超出核数 110% 的 CPU 和超过 100 Gbit/s 的网络 / 磁盘速率（计数器回绕、容器重建），该次不画点
+- `GUEST_DOCKER_EXCLUDE=buildx_*,*-tmp`：按容器名 glob 排除（逗号分隔），不采集、不列出，日志、终端、详情也拒绝
+- 端口：列表接口里的映射合并成 `127.0.0.1:5432→5432/tcp, 8080→80/tcp`（IPv4 / IPv6 同一端口只显示一次，未发布的端口不显示）
+- 镜像更新：每个镜像 6 小时查一次仓库，用 `HEAD /v2/<repo>/manifests/<tag>`（匿名 token）的 `Docker-Content-Digest` 对比本地 `RepoDigests`，有新版本时列表显示「可更新」。HEAD 不计入 Docker Hub 拉取限额；本地构建、按 digest 引用、需要登录的私有仓库会跳过。`GUEST_DOCKER_IMAGE_CHECK=off` 关闭
+- 详情：能力 `docker.inspect`（agent ≥ 1.18.0）。`GET /v1/probe/sessions/{id}/docker/inspect?container=名称` 返回引擎的 inspect 文档，探针端先删掉 `Config.Env`（常含密码）；页面上点容器的「详情」查看
+- 历史：表 `probe_container_metrics`，随 `PROBE_HUB_RETENTION` 清理，另有 5 分钟 / 1 小时汇总（见「监控页面」）。`GET /v1/probe/monitor/systems/{id}/containers/series?range=1h&top=8` 返回平均 CPU、平均内存各自前 N 名的并集（`top` 最大 50）
+- 日志：`GET /v1/probe/sessions/{id}/docker/logs?container=名称&tail=500&since=unix` 拉快照（带时间戳，最多约 2MB）；页面上可选时间范围、行数、模糊过滤、下载。追踪走终端票据 `mode=logs`
+- 编排：`GET /v1/probe/sessions/{id}/docker/compose?project=名称` 读 `com.docker.compose.project.config_files` 指向的 YAML。探针在容器里时，Docker Desktop（Mac）需要把 `$HOME` 挂进容器才能读到宿主机路径
+- 终端：复用终端票据。`POST /v1/probe/vms/{id}/term` 的请求体可带 `{"mode":"logs"|"exec", "container":"名称或 ID", "tail":500, "since":unix, "shell":"/bin/sh"}`，不带就是主机终端。`exec` 是 `docker exec` 进到容器内部（优先 bash，没有就 sh）。缺 `docker` 能力返回 `409`，exec 缺 `docker.exec` 返回 `403 agent_policy`
+- exec 关闭：Docker 在客户端断开后不会结束 TTY exec 里的 shell。每个会话带环境变量 `PROBE_EXEC=<随机值>`，关闭时探针再起一个 exec，找出环境里带这个标记的进程，先 HUP 再 KILL
+
+`docker.sock` 即使以只读方式挂载，也等同于宿主机 root。`ro` 只限制探针自己会调用的接口。
+
+### 探针跑在容器里
+
+```bash
+make docker-agent
+GUEST_CONTROL_URL=ws://hub:8766/v1/probe/connect GUEST_TOKEN=… \
+  docker compose -f deploy/docker/compose.agent.yml up -d
+```
+
+compose 用 `pid: host` 和 `network_mode: host` 看到宿主机的进程、网卡和连接，把宿主机 `/` 只读挂到 `/hostfs`。Docker Desktop（Mac）的 `/` 绑定看不到 virtiofs 里的 `/Users`，所以再把 `$HOME` 只读挂进去，才能读到 Compose 编排文件。容器内的行为：
+
+- 识别：`PROBE_AGENT_RUNNER=docker`（镜像里已设），或存在 `/.dockerenv`、`/run/.containerenv`。`runner` 为 `docker`
+- `GUEST_HOST_ROOT=/hostfs`：磁盘用量按 `/hostfs/<挂载点>` 统计；`os-release`、`machine-id`、主机名从 `/hostfs/etc` 读。`GUEST_HOSTNAME` 可以覆盖主机名
+- 设备 ID：容器里不用网卡 MAC（不共享宿主机网络时，每次重建容器都会变）。读不到宿主机的 `machine-id` 时，生成一个存在 `GUEST_STATE_DIR`（默认 `/var/lib/probe-agent`，compose 挂了数据卷）
+- 终端、命令执行、关机默认在探针容器里运行。`GUEST_HOST_NS=1` 时用 `nsenter -t 1 -m -u -i -n -p` 进入宿主机命名空间，需要 `privileged: true`
+- 远程升级默认关闭，换镜像重建容器即可；`GUEST_UPGRADE=on` 才允许原地替换容器内的二进制（重建后会回到镜像里的版本）
+- 宿主机根目录默认是普通绑定挂载，探针启动后才挂上的磁盘看不到；加 `,rslave` 可以看到，但 Docker Desktop 的根目录不是共享挂载，不支持
+
+### hub 镜像
+
+```bash
+make docker-hub
+GUEST_TOKEN=… PROBE_HUB_ADMIN_TOKEN=… docker compose -f deploy/docker/compose.hub.yml up -d
+```
+
+带一个 PostgreSQL 存历史。工作目录 `/data`（数据卷，hub 签名密钥 `probe-hub.key` 和设备凭据也在这里，重建容器时不要丢），远程升级用的签名产物挂到 `/data/dist/probe-agent`（compose 里有注释示例）。多架构镜像：`make docker-push REGISTRY=…`（buildx，默认 `linux/amd64,linux/arm64`，标签取 `agentVersion`）。
 
 ## 远程升级
 

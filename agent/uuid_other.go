@@ -36,10 +36,13 @@ func readMachineID() string {
 		id, _ := runIORegUUID()
 		return id
 	}
-	for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+	for _, p := range []string{hostPath("/etc/machine-id"), hostPath("/var/lib/dbus/machine-id")} {
 		if b, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(b)) != "" {
 			return strings.TrimSpace(string(b))
 		}
+	}
+	if inContainer() {
+		return containerMachineID()
 	}
 	return ""
 }

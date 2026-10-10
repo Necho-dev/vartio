@@ -53,18 +53,21 @@ const TERM_THEMES = {
 const termTheme = () => TERM_THEMES[document.documentElement.dataset.theme === "light" ? "light" : "dark"];
 
 // Each tab is its own ticket + WebSocket + agent PTY; closing the modal ends them all.
-/** @param {SystemView} s */
-export async function openTerm(s) {
+// target opens a container instead: mode "exec" is a shell in it, "logs" follows its output read-only.
+/** @param {SystemView} s @param {{ mode: "exec" | "logs", container: string }} [target] */
+export async function openTerm(s, target) {
   const tabs = [];
   let active = null, seq = 0, ro = null, closed = false, ctrl = false;
+  const logs = target?.mode === "logs";
   const enc = new TextEncoder();
-  const send = (t, d) => { if (t && t.ws && t.ws.readyState === 1) t.ws.send(enc.encode(d)); };
+  const send = (t, d) => { if (!logs && t && t.ws && t.ws.readyState === 1) t.ws.send(enc.encode(d)); };
   /** @param {boolean} on */
   const armCtrl = (on) => { ctrl = on; const b = document.querySelector(`#termKeys [data-i="${TERM_KEYS.findIndex((x) => x[1] === "ctrl")}"]`); if (b) b.classList.toggle("on", on); };
-  const base = `终端 · ${s.name}`;
-  openModal(base, `<div class="term-tabs" id="termTabs"><button class="term-add" id="termAdd" title="新建标签页">${icon("plus")}</button></div>
+  const base = !target ? `终端 · ${s.name}` : `${logs ? "容器日志" : "容器终端"} · ${target.container} · ${s.name}`;
+  const what = logs ? "日志" : "会话";
+  openModal(base, `<div class="term-tabs" id="termTabs"><button class="term-add" id="termAdd" title="新建标签页" ${logs ? "hidden" : ""}>${icon("plus")}</button></div>
     <div class="term" id="term"></div>
-    <div class="term-keys" id="termKeys">${TERM_KEYS.map(([l], i) => `<button data-i="${i}">${l}</button>`).join("")}</div>
+    ${logs ? "" : `<div class="term-keys" id="termKeys">${TERM_KEYS.map(([l], i) => `<button data-i="${i}">${l}</button>`).join("")}</div>`}
     <p class="modal-foot" id="termInfo">正在连接…</p>`, () => {
     closed = true;
     if (ro) ro.disconnect();
@@ -75,13 +78,15 @@ export async function openTerm(s) {
     if (t !== active) return;
     const el = $("#termInfo");
     if (!el) return;
-    el.textContent = t.dead ? "会话已结束 · 点击 + 新建标签页"
-      : t.ws && t.ws.readyState === 1 ? `已连接 · ${t.term.cols}×${t.term.rows} · ${tabs.length}/${TERM_MAX} 个会话 · 空闲 15 分钟自动断开${matchMedia("(pointer: coarse)").matches ? "" : " · 双击标题或右上角按钮铺满页面"}`
+    const full = matchMedia("(pointer: coarse)").matches ? "" : " · 双击标题或右上角按钮铺满页面";
+    el.textContent = t.dead ? (logs ? "日志流已结束（容器已停止或连接断开）" : "会话已结束 · 点击 + 新建标签页")
+      : t.ws && t.ws.readyState === 1 ? (logs ? `实时跟随 · 先回放最近 500 行 · 只读 · 空闲 15 分钟自动断开${full}`
+        : `容器终端 · ${t.term.cols}×${t.term.rows} · ${tabs.length}/${TERM_MAX} 个会话 · 空闲 15 分钟自动断开${full}`)
       : "正在连接…";
   };
   const label = (t) => {
-    t.btn.querySelector(".lbl").textContent = t.title ? `${t.n} · ${t.title}` : `会话 ${t.n}`;
-    t.btn.title = t.title || `会话 ${t.n}`;
+    t.btn.querySelector(".lbl").textContent = t.title ? `${t.n} · ${t.title}` : `${what} ${t.n}`;
+    t.btn.title = t.title || `${what} ${t.n}`;
     t.btn.classList.toggle("dead", t.dead);
     if (t === active) $("#modalTitle").textContent = t.title ? `${base} — ${t.title}` : base;
   };
@@ -120,7 +125,9 @@ export async function openTerm(s) {
     t.btn.className = "term-tab";
     t.btn.innerHTML = `<span class="dot"></span><span class="lbl"></span><span class="x" title="关闭">${icon("x")}</span>`;
     t.btn.addEventListener("click", (e) => {
-      if (e.target.classList.contains("x")) closeTab(t); else activate(t);
+      // The glyph is an <svg> inside .x; the click target is the path, not the span.
+      if (/** @type {Element} */ (e.target).closest(".x")) closeTab(t);
+      else activate(t);
     });
     t.btn.addEventListener("auxclick", (e) => { if (e.button === 1) closeTab(t); });
     $("#termTabs").insertBefore(t.btn, $("#termAdd"));
@@ -131,8 +138,8 @@ export async function openTerm(s) {
     $("#termAdd").disabled = tabs.length >= TERM_MAX;
 
     t.term = new Terminal({
-      allowProposedApi: true, cursorBlink: true, fontSize: 13, lineHeight: 1.15, scrollback: 5000,
-      fontFamily: TERM_FONT, rescaleOverlappingGlyphs: true, theme: termTheme(),
+      allowProposedApi: true, cursorBlink: !logs, fontSize: 13, lineHeight: 1.15, scrollback: logs ? 20000 : 5000,
+      fontFamily: TERM_FONT, rescaleOverlappingGlyphs: true, theme: termTheme(), disableStdin: logs,
     });
     t.fit = new FitAddon.FitAddon();
     t.term.loadAddon(t.fit);
@@ -145,7 +152,7 @@ export async function openTerm(s) {
     t.term.onTitleChange((x) => { t.title = x || ""; label(t); });
 
     try {
-      const tk = await api(`/sessions/${encodeURIComponent(s.id)}/term`, { method: "POST" });
+      const tk = await api(`/sessions/${encodeURIComponent(s.id)}/term`, { method: "POST", json: target || {} });
       if (closed || !tabs.includes(t)) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(`${proto}//${location.host}${tk.ws}&cols=${t.term.cols}&rows=${t.term.rows}`);
@@ -180,7 +187,7 @@ export async function openTerm(s) {
     if (closed) return;
     $("#termAdd").addEventListener("click", addTab);
     // pointerdown + preventDefault keeps focus (and the soft keyboard) on the terminal.
-    $("#termKeys").addEventListener("pointerdown", (e) => {
+    $("#termKeys")?.addEventListener("pointerdown", (e) => {
       const b = /** @type {HTMLElement} */ (e.target).closest("button");
       if (!b) return;
       e.preventDefault();

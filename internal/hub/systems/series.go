@@ -52,6 +52,16 @@ type Series struct {
 	ConnOther []*float64 `json:"connOther"`
 	// DiskParts maps mount point -> used bytes per bucket (nil = no sample).
 	DiskParts map[string][]*float64 `json:"diskParts"`
+	// NetNics is per-interface throughput; missing until the agent reports NIC counters.
+	NetNics map[string]NicLine `json:"netNics,omitempty"`
+}
+
+// NicLine is one NIC's series, aligned to Series.T.
+type NicLine struct {
+	Rx      []*float64 `json:"rx"`
+	Tx      []*float64 `json:"tx"`
+	RxBytes []*float64 `json:"rxBytes"`
+	TxBytes []*float64 `json:"txBytes"`
 }
 
 func newSeries(step time.Duration) *Series {
@@ -66,6 +76,7 @@ func newSeries(step time.Duration) *Series {
 		TCPOutSegs: []*float64{}, TCPRetransSegs: []*float64{},
 		ConnTCP: []*float64{}, ConnUDP: []*float64{}, ConnOther: []*float64{},
 		DiskParts: map[string][]*float64{},
+		NetNics:   map[string]NicLine{},
 	}
 }
 

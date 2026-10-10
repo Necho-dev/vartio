@@ -20,6 +20,8 @@ ICONS = [
     "activity", "search", "moon", "log-out", "maximize", "minimize", "x", "arrow-left", "pencil",
     # host actions
     "square-terminal", "monitor", "list", "folder-open", "trash-2", "arrow-right-left",
+    # containers
+    "container", "scroll-text", "info",
     # file manager
     "chevron-left", "chevron-right", "arrow-up", "arrow-down", "arrow-up-down", "house", "refresh-cw",
     "folder-plus", "upload", "folder-up", "download", "pencil-line", "trash", "plus", "rotate-ccw",
@@ -78,7 +80,18 @@ def main():
     else:
         src, version = fetch()
     rows = ",\n".join(f'  "{n}": `{inner(src / f"{n}.svg")}`' for n in ICONS)
-    OUT.write_text(TEMPLATE.replace("@VERSION@", version).replace("@ROWS@", rows))
+    body = TEMPLATE.replace("@VERSION@", version).replace("@ROWS@", rows)
+    # OS marks live below this line and are not in lucide-static.
+    extra = ""
+    marker = "// Filled marks so a machine reads as macOS"
+    if OUT.exists():
+        old = OUT.read_text()
+        at = old.find(marker)
+        if at >= 0:
+            extra = "\n" + old[at:]
+            if not extra.endswith("\n"):
+                extra += "\n"
+    OUT.write_text(body + extra)
     print(f"wrote {OUT} ({len(ICONS)} icons, lucide-static {version})")
 
 

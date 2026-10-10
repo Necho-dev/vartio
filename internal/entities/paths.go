@@ -16,6 +16,7 @@ const (
 	PathAgentDownload = PathAgent + "/download"
 	PathReleases      = "/v1/probe/releases"
 	PathUpgrade       = "/v1/probe/upgrade"
+	PathHubKey        = "/v1/probe/hub/key"
 )
 
 func IsPublicProbePath(path string) bool {

@@ -13,6 +13,8 @@ import (
 
 func runnerName() string {
 	switch {
+	case inContainer():
+		return "docker"
 	case os.Getenv("INVOCATION_ID") != "":
 		return "systemd"
 	case os.Getenv("XPC_SERVICE_NAME") != "" && os.Getenv("XPC_SERVICE_NAME") != "0":

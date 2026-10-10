@@ -58,6 +58,15 @@ func collectMetrics() guest.Metrics {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	out := guest.Metrics{TimeMs: time.Now().UnixMilli(), Info: staticInfo()}
+	var containers chan *guest.DockerInfo
+	if docker() != nil {
+		containers = make(chan *guest.DockerInfo, 1)
+		go func() {
+			c, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
+			defer cancel()
+			containers <- dockerMetrics(c)
+		}()
+	}
 	if pct, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pct) > 0 {
 		out.CPUPct = pct[0]
 	}
@@ -82,6 +91,9 @@ func collectMetrics() guest.Metrics {
 	if pids, err := process.PidsWithContext(ctx); err == nil {
 		out.Procs = len(pids)
 	}
+	if containers != nil {
+		out.Docker = <-containers
+	}
 	return out
 }
 
@@ -93,7 +105,7 @@ func diskUsages(ctx context.Context) ([]guest.DiskUsage, string) {
 		if skipMount(p) || seen[p.Device] {
 			continue
 		}
-		u, err := disk.UsageWithContext(ctx, p.Mountpoint)
+		u, err := disk.UsageWithContext(ctx, hostPath(p.Mountpoint))
 		if err != nil || u.Total == 0 {
 			continue
 		}
@@ -138,17 +150,21 @@ func pickRoot(disks []guest.DiskUsage) string {
 	case "darwin":
 		want = []string{"/System/Volumes/Data", "/"}
 	}
+	pref := ""
 	for _, w := range want {
 		for _, d := range disks {
 			if strings.EqualFold(d.Mount, w) {
-				return d.Mount
+				pref = d.Mount
+				break
 			}
 		}
+		if pref != "" {
+			break
+		}
 	}
-	if len(disks) > 0 {
-		return disks[0].Mount
-	}
-	return ""
+	// "/" is often an overlay or an initrd inside a container. Fall through to
+	// the largest writable disk (Docker Desktop: /var/lib, not /oldroot).
+	return guest.CapacityMount(disks, pref)
 }
 
 func skipMount(p disk.PartitionStat) bool {
@@ -261,6 +277,17 @@ func nicList(ctx context.Context) []guest.NICInfo {
 			continue
 		}
 		out = append(out, n)
+	}
+	if cs, err := net.IOCountersWithContext(ctx, true); err == nil {
+		by := make(map[string]net.IOCountersStat, len(cs))
+		for _, c := range cs {
+			by[c.Name] = c
+		}
+		for i := range out {
+			if c, ok := by[out[i].Name]; ok {
+				out[i].Rx, out[i].Tx = c.BytesRecv, c.BytesSent
+			}
+		}
 	}
 	return out
 }

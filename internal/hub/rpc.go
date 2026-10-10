@@ -2,6 +2,8 @@ package guest
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 
 	"govmomi-wmks/internal/esxi"
 )
@@ -20,6 +22,71 @@ func (h *Hub) Metrics(ctx context.Context, bios string) (Metrics, error) {
 		return Metrics{}, err
 	}
 	return decode[Metrics](raw)
+}
+
+// DockerInspect returns a container's inspect document (Config.Env removed by the agent).
+func (h *Hub) DockerInspect(ctx context.Context, key, container string) (json.RawMessage, error) {
+	container = strings.TrimSpace(container)
+	if container == "" {
+		return nil, esxi.ErrBad("container required")
+	}
+	s, err := h.lookup(key)
+	if err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, esxi.ErrGuestOffline()
+	}
+	if !s.hello.Has(CapDockerInspect) {
+		return nil, errCapMissing(CapDockerInspect)
+	}
+	return h.Call(ctx, key, MethodDockerInspect, DockerInspectRequest{Container: container})
+}
+
+func (h *Hub) dockerReady(key string) (*session, error) {
+	s, err := h.lookup(key)
+	if err != nil {
+		return nil, err
+	}
+	if s == nil {
+		return nil, esxi.ErrGuestOffline()
+	}
+	if !s.hello.Has(CapDocker) {
+		return nil, errCapMissing(CapDocker)
+	}
+	return s, nil
+}
+
+// DockerLogs returns a timestamped snapshot of a container's logs.
+func (h *Hub) DockerLogs(ctx context.Context, key, container string, tail int, since, until int64) (DockerLogsResult, error) {
+	container = strings.TrimSpace(container)
+	if container == "" {
+		return DockerLogsResult{}, esxi.ErrBad("container required")
+	}
+	if _, err := h.dockerReady(key); err != nil {
+		return DockerLogsResult{}, err
+	}
+	raw, err := h.Call(ctx, key, MethodDockerLogs, DockerLogsRequest{Container: container, Tail: tail, Since: since, Until: until})
+	if err != nil {
+		return DockerLogsResult{}, err
+	}
+	return decode[DockerLogsResult](raw)
+}
+
+// DockerCompose returns the compose file for a project, if the agent can read it.
+func (h *Hub) DockerCompose(ctx context.Context, key, project string) (DockerComposeResult, error) {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return DockerComposeResult{}, esxi.ErrBad("project required")
+	}
+	if _, err := h.dockerReady(key); err != nil {
+		return DockerComposeResult{}, err
+	}
+	raw, err := h.Call(ctx, key, MethodDockerCompose, DockerComposeRequest{Project: project})
+	if err != nil {
+		return DockerComposeResult{}, err
+	}
+	return decode[DockerComposeResult](raw)
 }
 
 func (h *Hub) Procs(ctx context.Context, bios string) ([]ProcInfo, error) {

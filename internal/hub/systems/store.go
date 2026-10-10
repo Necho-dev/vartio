@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,7 +14,7 @@ import (
 	"govmomi-wmks/internal/guest"
 )
 
-const schema = `
+var schema = `
 CREATE TABLE IF NOT EXISTS probe_systems (
 	device_id     text PRIMARY KEY,
 	bios_uuid     text NOT NULL DEFAULT '',
@@ -80,8 +82,29 @@ ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS tcp_out_segs bigint;
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS tcp_retrans_segs bigint;
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS conn_tcp integer;
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS conn_udp integer;
-ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS conn_other integer;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS 	conn_other integer;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS net_nics jsonb;
 CREATE INDEX IF NOT EXISTS probe_events_device_ts ON probe_events (device_id, ts DESC);
+CREATE TABLE IF NOT EXISTS probe_container_metrics (
+	device_id     text NOT NULL REFERENCES probe_systems(device_id) ON DELETE CASCADE ON UPDATE CASCADE,
+	ts            timestamptz NOT NULL,
+	name          text NOT NULL,
+	cpu_pct       real,
+	mem_used      bigint NOT NULL,
+	mem_limit     bigint NOT NULL,
+	net_rx_bps    double precision,
+	net_tx_bps    double precision,
+	blk_read_bps  double precision,
+	blk_write_bps double precision,
+	pids          integer,
+	PRIMARY KEY (device_id, ts, name)
+);
+ALTER TABLE probe_container_metrics ADD COLUMN IF NOT EXISTS pids integer;
+` + rollupSchema + `
+ALTER TABLE probe_container_metrics_5m ADD COLUMN IF NOT EXISTS pids double precision;
+ALTER TABLE probe_container_metrics_1h ADD COLUMN IF NOT EXISTS pids double precision;
+ALTER TABLE probe_metrics_5m ADD COLUMN IF NOT EXISTS net_nics jsonb;
+ALTER TABLE probe_metrics_1h ADD COLUMN IF NOT EXISTS net_nics jsonb;
 `
 
 // Store persists systems, samples and events in PostgreSQL.
@@ -211,6 +234,14 @@ func (s *Store) Record(ctx context.Context, id string, info guest.SysInfo, smp S
 		}
 		parts, _ = json.Marshal(used)
 	}
+	var nics []byte
+	if len(smp.NetNICs) > 0 {
+		m := make(map[string]nicPoint, len(smp.NetNICs))
+		for _, n := range smp.NetNICs {
+			m[n.Name] = nicPoint{Rx: n.RxBps, Tx: n.TxBps, Rb: n.RxBytes, Tb: n.TxBytes}
+		}
+		nics, _ = json.Marshal(m)
+	}
 	var estab, tw, listen, cTCP, cUDP, cOther *int
 	if t := smp.TCP; t != nil {
 		estab, tw, listen = &t.Established, &t.TimeWait, &t.Listen
@@ -220,14 +251,104 @@ func (s *Store) Record(ctx context.Context, id string, info guest.SysInfo, smp S
 	}
 	b.Queue(`INSERT INTO probe_metrics (device_id, ts, cpu_pct, mem_used, mem_total, swap_used, swap_total,
 			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, load5, load15, temp_max, procs, disk_parts,
-			net_rx_bytes, net_tx_bytes, net_rx_pps, net_tx_pps, net_errs, net_drops, tcp_estab, tcp_time_wait, tcp_listen, retrans_pct, latency_ms, tcp_out_segs, tcp_retrans_segs, conn_tcp, conn_udp, conn_other)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35) ON CONFLICT DO NOTHING`,
+			net_rx_bytes, net_tx_bytes, net_rx_pps, net_tx_pps, net_errs, net_drops, tcp_estab, tcp_time_wait, tcp_listen, retrans_pct, latency_ms, tcp_out_segs, tcp_retrans_segs, conn_tcp, conn_udp, conn_other, net_nics)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36) ON CONFLICT DO NOTHING`,
 		id, smp.TS, smp.CPUPct, int64(smp.MemUsed), int64(smp.MemTotal), int64(smp.SwapUsed), int64(smp.SwapTotal),
 		int64(smp.DiskUsed), int64(smp.DiskTotal), smp.DiskReadBps, smp.DiskWriteBps, smp.NetRxBps, smp.NetTxBps,
 		smp.Load[0], smp.Load[1], smp.Load[2], temp, smp.Procs, parts,
 		int64(smp.NetRxBytes), int64(smp.NetTxBytes), smp.NetRxPps, smp.NetTxPps, i64(smp.NetErrs), i64(smp.NetDrops),
-		estab, tw, listen, smp.RetransPct, smp.LatencyMs, i64(smp.TCPOutSegs), i64(smp.TCPRetransSegs), cTCP, cUDP, cOther)
+		estab, tw, listen, smp.RetransPct, smp.LatencyMs, i64(smp.TCPOutSegs), i64(smp.TCPRetransSegs), cTCP, cUDP, cOther, nics)
+	if d := smp.Docker; d != nil {
+		for _, c := range d.Containers {
+			if !c.Stats {
+				continue
+			}
+			b.Queue(`INSERT INTO probe_container_metrics (device_id, ts, name, cpu_pct, mem_used, mem_limit, net_rx_bps, net_tx_bps, blk_read_bps, blk_write_bps, pids)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
+				id, smp.TS, c.Name, c.CPUPct, int64(c.MemUsed), int64(c.MemLimit), c.NetRxBps, c.NetTxBps, c.BlkReadBps, c.BlkWriteBps, c.Pids)
+		}
+	}
 	return s.db.SendBatch(ctx, b).Close()
+}
+
+// ContainerSeries holds per-container lines on shared buckets; nil = no sample.
+type ContainerSeries struct {
+	StepSec    int             `json:"stepSec"`
+	T          []int64         `json:"t"`
+	Containers []ContainerLine `json:"containers"`
+}
+
+type ContainerLine struct {
+	Name     string     `json:"name"`
+	MemLimit float64    `json:"memLimit"`
+	CPU      []*float64 `json:"cpu"`
+	Mem      []*float64 `json:"mem"`
+	NetRx    []*float64 `json:"netRx"`
+	NetTx    []*float64 `json:"netTx"`
+	BlkRead  []*float64 `json:"blkRead"`
+	BlkWrite []*float64 `json:"blkWrite"`
+	Pids     []*float64 `json:"pids"`
+}
+
+// ContainerSeries returns the top containers by average CPU and by average
+// memory (up to top of each) over the range.
+func (s *Store) ContainerSeries(ctx context.Context, id string, src Source, from time.Time, step time.Duration, top int) (*ContainerSeries, error) {
+	out := &ContainerSeries{StepSec: int(step / time.Second), T: []int64{}, Containers: []ContainerLine{}}
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		WITH ranked AS (
+			SELECT name, rank() OVER (ORDER BY avg(cpu_pct) DESC NULLS LAST) AS rc, rank() OVER (ORDER BY avg(mem_used) DESC) AS rm
+			FROM %[1]s WHERE device_id = $1 AND ts >= $2 GROUP BY name)
+		SELECT date_bin(make_interval(secs => $3::float8), m.ts, TIMESTAMPTZ 'epoch') AS b, m.name,
+			avg(m.cpu_pct)::float8, avg(m.mem_used)::float8, max(m.mem_limit)::float8,
+			avg(m.net_rx_bps)::float8, avg(m.net_tx_bps)::float8, avg(m.blk_read_bps)::float8, avg(m.blk_write_bps)::float8,
+			avg(m.pids)::float8
+		FROM %[1]s m JOIN ranked r USING (name)
+		WHERE m.device_id = $1 AND m.ts >= $2 AND (r.rc <= $4 OR r.rm <= $4)
+		GROUP BY b, m.name ORDER BY b`, src.containers), id, from, step.Seconds(), top)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type point struct {
+		i                                     int
+		cpu, mem, limit, rx, tx, br, bw, pids *float64
+	}
+	byName := map[string][]point{}
+	var order []string
+	for rows.Next() {
+		var t time.Time
+		var name string
+		var p point
+		if err := rows.Scan(&t, &name, &p.cpu, &p.mem, &p.limit, &p.rx, &p.tx, &p.br, &p.bw, &p.pids); err != nil {
+			return nil, err
+		}
+		ms := t.UnixMilli()
+		if n := len(out.T); n == 0 || out.T[n-1] != ms {
+			out.T = append(out.T, ms)
+		}
+		p.i = len(out.T) - 1
+		if _, ok := byName[name]; !ok {
+			order = append(order, name)
+		}
+		byName[name] = append(byName[name], p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Strings(order)
+	n := len(out.T)
+	col := func() []*float64 { return make([]*float64, n) }
+	for _, name := range order {
+		l := ContainerLine{Name: name, CPU: col(), Mem: col(), NetRx: col(), NetTx: col(), BlkRead: col(), BlkWrite: col(), Pids: col()}
+		for _, p := range byName[name] {
+			l.CPU[p.i], l.Mem[p.i], l.NetRx[p.i], l.NetTx[p.i], l.BlkRead[p.i], l.BlkWrite[p.i], l.Pids[p.i] = p.cpu, p.mem, p.rx, p.tx, p.br, p.bw, p.pids
+			if p.limit != nil && *p.limit > l.MemLimit {
+				l.MemLimit = *p.limit
+			}
+		}
+		out.Containers = append(out.Containers, l)
+	}
+	return out, nil
 }
 
 func (s *Store) UpdateMeta(ctx context.Context, id string, name *string, tags []string) error {
@@ -281,24 +402,24 @@ func i64(p *uint64) *int64 {
 
 // Series buckets samples with date_bin so each range returns a few hundred points.
 // interval estimates traffic for rows recorded before byte deltas were stored.
-func (s *Store) Series(ctx context.Context, id string, from time.Time, step, interval time.Duration) (*Series, error) {
-	rows, err := s.db.Query(ctx, `
+func (s *Store) Series(ctx context.Context, id string, src Source, from time.Time, step, interval time.Duration) (*Series, error) {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b,
-			avg(cpu_pct), max(cpu_pct),
+			avg(cpu_pct)::float8, max(%[2]s)::float8,
 			avg(mem_used)::float8, max(mem_total)::float8, avg(swap_used)::float8,
 			avg(disk_used)::float8, max(disk_total)::float8,
-			avg(disk_read_bps), avg(disk_write_bps),
-			avg(net_rx_bps), avg(net_tx_bps), max(net_rx_bps), max(net_tx_bps),
+			avg(disk_read_bps)::float8, avg(disk_write_bps)::float8,
+			avg(net_rx_bps)::float8, avg(net_tx_bps)::float8, max(%[3]s)::float8, max(%[4]s)::float8,
 			sum(coalesce(net_rx_bytes, net_rx_bps * $4))::float8, sum(coalesce(net_tx_bytes, net_tx_bps * $4))::float8,
-			avg(load1), avg(load5)::float8, avg(load15)::float8, max(temp_max), avg(procs)::float8,
-			avg(net_rx_pps), avg(net_tx_pps), sum(net_errs)::float8, sum(net_drops)::float8,
+			avg(load1)::float8, avg(load5)::float8, avg(load15)::float8, max(temp_max)::float8, avg(procs)::float8,
+			avg(net_rx_pps)::float8, avg(net_tx_pps)::float8, sum(net_errs)::float8, sum(net_drops)::float8,
 			avg(tcp_estab)::float8, avg(tcp_time_wait)::float8, avg(tcp_listen)::float8,
 			avg(retrans_pct)::float8, avg(latency_ms)::float8,
 			sum(tcp_out_segs)::float8, sum(tcp_retrans_segs)::float8,
 			avg(conn_tcp)::float8, avg(conn_udp)::float8, avg(conn_other)::float8
-		FROM probe_metrics
+		FROM %[1]s
 		WHERE device_id = $1 AND ts >= $2
-		GROUP BY b ORDER BY b`, id, from, step.Seconds(), interval.Seconds())
+		GROUP BY b ORDER BY b`, src.host, src.cpuMax, src.rxMax, src.txMax), id, from, step.Seconds(), interval.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -317,16 +438,26 @@ func (s *Store) Series(ctx context.Context, id string, from time.Time, step, int
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return out, s.diskParts(ctx, out, id, from, step)
+	if err := s.diskParts(ctx, out, id, src, from, step); err != nil {
+		return out, err
+	}
+	return out, s.netNics(ctx, out, id, src, from, step)
+}
+
+type nicPoint struct {
+	Rx float64 `json:"rx"`
+	Tx float64 `json:"tx"`
+	Rb uint64  `json:"rb,omitempty"`
+	Tb uint64  `json:"tb,omitempty"`
 }
 
 // diskParts fills Series.DiskParts with per-mount used bytes, aligned to out.T.
-func (s *Store) diskParts(ctx context.Context, out *Series, id string, from time.Time, step time.Duration) error {
-	rows, err := s.db.Query(ctx, `
+func (s *Store) diskParts(ctx context.Context, out *Series, id string, src Source, from time.Time, step time.Duration) error {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b, p.key, avg(p.value::float8)
-		FROM probe_metrics, jsonb_each_text(disk_parts) p
+		FROM %s, jsonb_each_text(disk_parts) p
 		WHERE device_id = $1 AND ts >= $2 AND disk_parts IS NOT NULL
-		GROUP BY b, p.key`, id, from, step.Seconds())
+		GROUP BY b, p.key`, src.host), id, from, step.Seconds())
 	if err != nil {
 		return err
 	}
@@ -356,9 +487,50 @@ func (s *Store) diskParts(ctx context.Context, out *Series, id string, from time
 	return rows.Err()
 }
 
+// netNics fills Series.NetNics with per-interface rates, aligned to out.T.
+func (s *Store) netNics(ctx context.Context, out *Series, id string, src Source, from time.Time, step time.Duration) error {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b, p.key,
+			avg((p.value->>'rx')::float8), avg((p.value->>'tx')::float8),
+			sum(coalesce((p.value->>'rb')::float8, 0)), sum(coalesce((p.value->>'tb')::float8, 0))
+		FROM %s, jsonb_each(net_nics) p
+		WHERE device_id = $1 AND ts >= $2 AND net_nics IS NOT NULL
+		GROUP BY b, p.key`, src.host), id, from, step.Seconds())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	idx := make(map[int64]int, len(out.T))
+	for i, ms := range out.T {
+		idx[ms] = i
+	}
+	for rows.Next() {
+		var t time.Time
+		var name string
+		var rx, tx, rb, tb float64
+		if err := rows.Scan(&t, &name, &rx, &tx, &rb, &tb); err != nil {
+			return err
+		}
+		i, ok := idx[t.UnixMilli()]
+		if !ok {
+			continue
+		}
+		line, ok := out.NetNics[name]
+		if !ok {
+			line = NicLine{Rx: make([]*float64, len(out.T)), Tx: make([]*float64, len(out.T)), RxBytes: make([]*float64, len(out.T)), TxBytes: make([]*float64, len(out.T))}
+			out.NetNics[name] = line
+		}
+		line.Rx[i], line.Tx[i], line.RxBytes[i], line.TxBytes[i] = &rx, &tx, &rb, &tb
+	}
+	return rows.Err()
+}
+
 func (s *Store) Prune(ctx context.Context, metricsBefore, eventsBefore time.Time) (int64, error) {
 	tag, err := s.db.Exec(ctx, `DELETE FROM probe_metrics WHERE ts < $1`, metricsBefore)
 	if err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec(ctx, `DELETE FROM probe_container_metrics WHERE ts < $1`, metricsBefore); err != nil {
 		return 0, err
 	}
 	_, err = s.db.Exec(ctx, `DELETE FROM probe_events WHERE ts < $1`, eventsBefore)

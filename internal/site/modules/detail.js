@@ -1,7 +1,7 @@
 // @ts-check
-import { $, app, state, esc, html, bytes, rate, pct, dur, ago, meter, ip, api, every } from "./core.js";
+import { $, app, state, esc, html, bytes, rate, pct, dur, ago, meter, osKey, ip, api, every } from "./core.js";
 import { renderChart } from "./charts.js";
-import { icon } from "./icons.js";
+import { icon, osIcon } from "./icons.js";
 import { openModal, closeModal } from "./ui.js";
 import { route } from "./nav.js";
 import { openTerm } from "./term.js";
@@ -10,6 +10,7 @@ import { openProcs } from "./procs.js";
 import { openFiles } from "./files/index.js";
 import { openPluginDrawer } from "./plugins.js";
 import { openForwardDrawer } from "./forwards.js";
+import { containersSection, renderContainers, loadContainerSeries, isDockerRunner } from "./containers.js";
 import { latestAgent, outdated, canUpgrade, upgradeOne, RUNNERS } from "./upgrade.js";
 
 let latest = "";
@@ -30,22 +31,37 @@ export async function detail(id) {
     if (e.message !== "unauthorized") $("#d").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
-  $("#d").innerHTML = `
-    <section class="card hero" id="hero"></section>
-    <section class="grid2" id="charts">
-      ${panel("cpu", "CPU 使用率", "全部核心平均值")}
-      ${panel("mem", "内存使用", "已用物理内存（总量 - 可用）与交换区")}
-      ${panel("disk", "磁盘使用", "系统盘已用空间")}
-      ${panel("dio", "磁盘 I/O", "全部物理磁盘读写吞吐")}
-      ${panel("procs", "进程数", "运行中的进程总数")}
+  const docker = isDockerRunner(sys);
+  const hostCharts = `
+      ${docker ? "" : panel("cpu", "CPU 使用率", "全部核心平均值")}
+      ${docker ? "" : panel("mem", "内存使用", "已用物理内存（总量 - 可用）与交换区")}
+      ${panel("disk", "磁盘使用", docker ? "宿主机分区已用空间。容器没有独立容量，Docker 只提供读写吞吐" : "系统盘已用空间")}
+      ${docker ? "" : panel("dio", "磁盘 I/O", "全部物理磁盘读写吞吐")}
+      ${docker ? "" : panel("procs", "进程数", "运行中的进程总数")}
       ${panel("load", "系统负载", "")}
-      <div class="card panel wide" id="p-net"><span class="now" id="now-net"></span><h3>网络带宽</h3><p class="desc" id="desc-net">物理网卡收发情况（已排除回环/虚拟网卡）</p>
+      <div class="card panel wide" id="p-net">
+        <div class="panel-head"><h3>网络带宽</h3><select class="nic-pick" id="netNic" hidden></select><span class="now" id="now-net"></span></div>
+        <p class="desc" id="desc-net">物理网卡收发情况（已排除回环/虚拟网卡）</p>
         <div class="chart" id="c-net"></div><div class="legend" id="lg-net"></div><div class="net-sum" id="net-sum"></div></div>
       ${panel("conn", "网络连接数", "按协议统计的套接字数量（堆积）", true)}
       ${panel("tcp", "TCP 连接状态", "各状态的 TCP 连接数", true)}
       ${panel("nerr", "网卡错误与丢包", "区间内收发错误包与丢弃包数量", true)}
-      ${panel("temp", "温度", "传感器最高温度", true)}
+      ${panel("temp", "温度", "传感器最高温度", true)}`;
+  $("#d").innerHTML = `
+    <section class="card hero" id="hero"></section>
+    ${docker ? containersSection({ inset: false }) : ""}
+    ${docker ? `<div class="chart-sec"><span class="lvl ctr">容器</span><span>按容器堆积，与 docker stats 同一口径</span></div>
+    <section class="grid2" id="ctr-charts">
+      ${panel("cpu", "CPU 使用率", "各容器 CPU（堆积），100% 为一个核心，与 docker stats 一致", false, true)}
+      ${panel("mem", "内存使用", "各容器内存（堆积），不含可回收页缓存；合计对照主机内存")}
+      ${panel("cprocs", "进程数", "各容器进程数（堆积）")}
+      ${ioPanel("dio", "磁盘 I/O", "各容器读写吞吐（堆积）", { id: "dio", title: "读" }, { id: "diow", title: "写" })}
+      ${ioPanel("cnet", "网络带宽", "各容器收发（堆积），不按网卡拆分", { id: "cnet", title: "下行" }, { id: "cnettx", title: "上行" })}
     </section>
+    <div class="chart-sec"><span class="lvl host">宿主机</span><span>Docker 所在机器 / 虚拟机</span></div>` : ""}
+    <section class="grid2" id="charts">${hostCharts}
+    </section>
+    ${docker ? "" : containersSection()}
     <section class="grid2">
       <div class="card panel"><h3>磁盘分区</h3><p class="desc">最新一次采样</p><div id="disks"></div></div>
       <div class="card panel"><h3>网络接口</h3><p class="desc">带 IPv4 的物理网卡</p><div id="nics"></div></div>
@@ -55,6 +71,7 @@ export async function detail(id) {
     </section>`;
   renderHero(sys);
   renderInfo(sys);
+  renderContainers(sys);
   renderEvents(sys.events || []);
   $("#events").addEventListener("click", copyEvent);
   $("#evSeg").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
@@ -69,6 +86,7 @@ export async function detail(id) {
       latest = await latestAgent();
       renderHero(sys);
       renderInfo(sys);
+      renderContainers(sys);
       if (state.evCat) loadEvents(sys); else renderEvents(sys.events || []);
       if (state.range === "1h" || state.range === "6h") await loadSeries(sys);
     } catch (e) { /* keep last view */ }
@@ -87,6 +105,8 @@ const EV_NAMES = {
   "file.upload": "上传文件", "file.download": "下载文件", "file.mkdir": "新建目录", "file.rename": "重命名", "file.delete": "永久删除", "file.trash": "移入回收站",
   "trash.restore": "还原文件", "trash.purge": "彻底删除", "trash.empty": "清空回收站", meta: "编辑信息",
   "agent.upgrade": "下发升级", "upgrade.failed": "升级失败", "net.errors": "网卡错误",
+  "container.stop": "容器停止", "container.start": "容器启动", "container.unhealthy": "容器不健康", "container.healthy": "容器恢复健康",
+  "docker.logs": "查看容器日志", "docker.exec": "容器终端", "docker.compose": "查看编排", "auth.reject": "接入被拒", "credential.reset": "重置凭据",
 };
 
 /** @param {SystemView} s */
@@ -155,35 +175,140 @@ function renderEvents(ev) {
   }).join("");
 }
 
-/** @param {string} id @param {string} title @param {string} desc @param {boolean} [hidden] */
-function panel(id, title, desc, hidden) {
-  return `<div class="card panel" id="p-${id}" ${hidden ? "hidden" : ""}><span class="now" id="now-${id}"></span><h3>${title}</h3><p class="desc" id="desc-${id}">${desc}</p><div class="chart" id="c-${id}"></div><div class="legend" id="lg-${id}"></div></div>`;
+/** @type {string} */
+let selectedNic = "";
+/** @type {{ s: SystemView, d: Series, base: { t: number[], stepSec: number, from: number, to: number }, hasPps: boolean, pps: (v: number | null, axis?: boolean) => string, count: (v: number | null) => string, errs: number, drops: number, l: Partial<Sample> } | null} */
+let netCtx = null;
+
+/** @param {string} id */
+function nicStoreKey(id) {
+  return "probeHubNic:" + id;
+}
+
+/**
+ * @param {SystemView} s
+ * @param {Series} d
+ * @param {{ t: number[], stepSec: number, from: number, to: number }} base
+ * @param {{ hasPps: boolean, pps: (v: number | null, axis?: boolean) => string, count: (v: number | null) => string, errs: number, drops: number, l: Partial<Sample> }} extra
+ */
+function renderHostNet(s, d, base, extra) {
+  if (!netCtx || netCtx.s.id !== s.id) selectedNic = localStorage.getItem(nicStoreKey(s.id)) || "";
+  netCtx = { s, d, base, ...extra };
+  const sel = $("#netNic");
+  const nics = (s.latest?.nics || []).filter((n) => n.name);
+  const hist = Object.keys(d.netNics || {});
+  if (selectedNic && !nics.some((n) => n.name === selectedNic) && !hist.includes(selectedNic)) selectedNic = "";
+  const names = [...new Set([...nics.map((n) => n.name), ...hist])].sort();
+  if (sel) {
+    sel.hidden = names.length === 0;
+    if (!sel.dataset.bound) {
+      sel.dataset.bound = "1";
+      sel.addEventListener("change", () => {
+        selectedNic = sel.value;
+        if (netCtx) {
+          const k = nicStoreKey(netCtx.s.id);
+          if (selectedNic) localStorage.setItem(k, selectedNic);
+          else localStorage.removeItem(k);
+        }
+        paintHostNet();
+      });
+    }
+    sel.innerHTML = `<option value="">全部网卡</option>` + names.map((name) => {
+      const n = nics.find((x) => x.name === name);
+      return `<option value="${esc(name)}"${name === selectedNic ? " selected" : ""}>${esc(name)}${n?.ipv4 ? " · " + esc(n.ipv4) : ""}</option>`;
+    }).join("");
+  }
+  paintHostNet();
+}
+
+function paintHostNet() {
+  if (!netCtx) return;
+  const { s, d, base, hasPps, pps, count, errs, drops, l } = netCtx;
+  const nic = selectedNic;
+  const line = nic ? (d.netNics || {})[nic] : null;
+  if (nic) {
+    $("#desc-net").textContent = line
+      ? `网卡 ${nic} 的收发（宿主机）`
+      : `网卡 ${nic}：暂无分网卡历史，等探针上报累计计数后开始记录`;
+    const now = (s.latest?.netNics || []).find((n) => n.name === nic);
+    chart("net", { ...base, fmt: rate, empty: "该网卡暂无历史", series: line ? [
+      { label: "下行", color: C.cyan, data: line.rx },
+      { label: "上行", color: C.violet, data: line.tx }] : [] },
+    s.online && now ? `↓ ${rate(now.rxBps)} · ↑ ${rate(now.txBps)}` : "");
+    if (line) renderNetSum({ netRx: line.rx, netTx: line.tx, netRxMax: line.rx, netTxMax: line.tx, netRxBytes: line.rxBytes, netTxBytes: line.txBytes }, false, 0, 0);
+    else { const box = $("#net-sum"); if (box) box.hidden = true; }
+    return;
+  }
+  $("#desc-net").textContent = hasPps
+    ? "物理网卡收发情况（已排除回环/虚拟网卡）；左轴吞吐，右轴包速率"
+    : "物理网卡收发情况（已排除回环/虚拟网卡）";
+  const nowPps = s.online && l.netRxPps != null ? ` · ${count(l.netRxPps)} / ${count(l.netTxPps)} pps` : "";
+  chart("net", { ...base, fmt: rate, fmt2: pps, series: [
+    { label: "下行", color: C.cyan, data: d.netRx },
+    { label: "上行", color: C.violet, data: d.netTx },
+    { label: "下行峰值", color: C.cyan, data: d.netRxMax, area: false, dash: true, width: 1 },
+    { label: "上行峰值", color: C.violet, data: d.netTxMax, area: false, dash: true, width: 1 },
+    ...(hasPps ? [
+      { label: "收包", color: C.green, data: d.netRxPps, fill: 0.14, width: 1.2, right: true },
+      { label: "发包", color: C.orange, data: d.netTxPps, fill: 0.14, width: 1.2, right: true }] : [])] },
+  s.online ? `↓ ${rate(l.netRxBps)} · ↑ ${rate(l.netTxBps)}${nowPps}` : "");
+  renderNetSum(d, hasPps, errs, drops);
+}
+
+/** Stretch a half-width panel that would sit alone before a wide card or at the end. */
+function spanRows(grid) {
+  if (!grid) return;
+  /** @type {Element | null} */
+  let alone = null;
+  for (const p of grid.children) {
+    if (/** @type {HTMLElement} */ (p).hidden) continue;
+    const wide = p.classList.contains("wide");
+    p.classList.toggle("span-row", wide);
+    if (wide) { alone?.classList.add("span-row"); alone = null; } else alone = alone ? null : p;
+  }
+  alone?.classList.add("span-row");
+}
+
+/** @param {string} id @param {string} title @param {string} desc @param {boolean} [hidden] @param {boolean} [wide] */
+function panel(id, title, desc, hidden, wide) {
+  return `<div class="card panel${wide ? " wide" : ""}" id="p-${id}" ${hidden ? "hidden" : ""}><span class="now" id="now-${id}"></span><h3>${title}</h3><p class="desc" id="desc-${id}">${desc}</p><div class="chart" id="c-${id}"></div><div class="legend" id="lg-${id}"></div></div>`;
+}
+
+/** Wide card with two stacked charts (down/up or read/write). */
+function ioPanel(id, title, desc, left, right) {
+  return `<div class="card panel wide" id="p-${id}"><span class="now" id="now-${id}"></span><h3>${title}</h3><p class="desc" id="desc-${id}">${desc}</p>
+    <div class="grid2 ctr-split">
+      <div class="ctr-chart"><span class="now" id="now-${left.id}"></span><h4>${left.title}</h4><div class="chart" id="c-${left.id}"></div></div>
+      <div class="ctr-chart"><span class="now" id="now-${right.id}"></span><h4>${right.title}</h4><div class="chart" id="c-${right.id}"></div></div>
+    </div>
+    <div class="legend" id="lg-${id}"></div></div>`;
 }
 
 /** @param {SystemView} s */
 function renderHero(s) {
   const i = s.info || {}, l = s.latest;
+  const docker = isDockerRunner(s);
   const up = s.online && i.bootTime ? Date.now() / 1000 - i.bootTime : 0;
-  const fact = (icon, v) => (v ? `<span>${icon} <b>${esc(v)}</b></span>` : "");
+  const fact = (label, v) => (v ? `<span>${label} <b>${esc(v)}</b></span>` : "");
   $("#hero").innerHTML = `
     <div class="hero-main">
-      <h1>${esc(s.name || s.hostname)} <span class="badge ${s.online ? "up" : "down"}"><span class="dot ${s.online ? "up" : ""}"></span>${s.online ? "在线" : "离线"}</span>
+      <h1>${osIcon(osKey(s))}${esc(s.name || s.hostname)} <span class="badge ${s.online ? "up" : "down"}"><span class="dot ${s.online ? "up" : ""}"></span>${s.online ? "在线" : "离线"}</span>
         <span class="edit" id="editBtn" title="编辑名称和标签">${icon("pencil")} 编辑</span>
         <span class="hero-tags">${(s.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span></h1>
       <div class="facts">
         ${fact("主机名", s.hostname)}${fact("IP", ip(s))}${s.remoteAddr && s.remoteAddr !== ip(s) ? fact("来源", s.remoteAddr) : ""}
-        ${fact("系统", [i.platform, i.platformVersion].filter(Boolean).join(" "))}
+        ${fact("系统", docker ? "Docker" : [i.platform, i.platformVersion].filter(Boolean).join(" "))}
         ${fact("CPU", i.cpuModel ? `${i.cpuModel} (${i.cores || "?"}C/${i.threads || "?"}T)` : "")}
         ${fact("内存", l ? bytes(l.memTotal) : "")}
         ${s.online ? fact("运行", dur(up)) : fact("最后在线", ago(s.lastSeen))}
-        ${fact("探针", s.version)}${outdated(s, latest) && !canUpgrade(s) && s.online ? `<span class="faint">可更新至 ${esc(latest)}，当前版本需手动更新一次</span>` : ""}
+        ${fact("探针", s.version)}${outdated(s, latest) && !canUpgrade(s) && s.online ? `<span class="faint">可更新至 ${esc(latest)}，${s.runner === "docker" ? "请拉取新镜像后重建容器" : "当前版本需手动更新一次"}</span>` : ""}
         ${l && s.online ? fact("延迟", l.latencyMs + " ms") : ""}
       </div>
     </div>
     <div class="hero-actions">
       <div class="seg" id="rangeSeg">${RANGES.map(([k, n]) => `<button data-r="${k}" class="${state.range === k ? "on" : ""}">${n}</button>`).join("")}</div>
-      <button class="btn" id="termBtn" ${s.online ? "" : "disabled"}>${icon("square-terminal")}终端</button>
-      <button class="btn" id="screenBtn" ${s.online ? "" : "disabled"}>${icon("monitor")}实时画面</button>
+      ${docker ? "" : `<button class="btn" id="termBtn" ${s.online ? "" : "disabled"}>${icon("square-terminal")}终端</button>
+      <button class="btn" id="screenBtn" ${s.online ? "" : "disabled"}>${icon("monitor")}实时画面</button>`}
       <button class="btn" id="procBtn" ${s.online ? "" : "disabled"}>${icon("list")}进程</button>
       <button class="btn" id="filesBtn" ${s.online ? "" : "disabled"}>${icon("folder-open")}文件</button>
       <button class="btn" id="pluginBtn" ${s.online ? "" : "disabled"}>${icon("grid-2x2-plus")}插件</button>
@@ -198,8 +323,8 @@ function renderHero(s) {
     loadSeries(s);
   }));
   $("#editBtn").addEventListener("click", () => editSystem(s));
-  $("#termBtn").addEventListener("click", () => openTerm(s));
-  $("#screenBtn").addEventListener("click", () => openScreen(s));
+  $("#termBtn")?.addEventListener("click", () => openTerm(s));
+  $("#screenBtn")?.addEventListener("click", () => openScreen(s));
   $("#procBtn").addEventListener("click", () => openProcs(s));
   $("#filesBtn").addEventListener("click", () => openFiles(s));
   $("#pluginBtn").addEventListener("click", () => openPluginDrawer(s));
@@ -223,20 +348,38 @@ function renderInfo(s) {
   const nics = l.nics || [];
   $("#nics").innerHTML = nics.length ? `<table class="kv-table nic-table"><tr><th>名称</th><th>IPv4</th><th>MAC</th><th>状态</th></tr>
     ${nics.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.ipv4 || "—")}</td><td>${esc(n.mac || "—")}</td><td>${n.up ? '<span style="color:var(--green)">up</span>' : '<span class="faint">down</span>'}</td></tr>`).join("")}</table>` : `<div class="faint">暂无</div>`;
-  const kv = [["设备 ID", s.id], ["BIOS UUID", s.biosUuid], ["操作系统", [i.os, i.platform, i.platformVersion].filter(Boolean).join(" / ")], ["内核", i.kernel], ["架构", i.arch],
+  const kv = [["设备 ID", s.id], ["BIOS UUID", s.biosUuid], ["操作系统", isDockerRunner(s) ? "Docker" : [i.os, i.platform, i.platformVersion].filter(Boolean).join(" / ")], ["内核", i.kernel], ["架构", i.arch],
     ["CPU", i.cpuModel], ["核心/线程", i.cores ? `${i.cores} / ${i.threads}` : ""], ["进程数", l.procs],
     ["运行方式", s.online && s.runner ? RUNNERS[s.runner] || s.runner : ""], ["首次接入", s.firstSeen && new Date(s.firstSeen).toLocaleString()],
     ["本次连接", s.online && s.connectedAt ? new Date(s.connectedAt).toLocaleString() : ""], ["最近采样", l.ts && new Date(l.ts).toLocaleString()]];
   const hint = !s.online || s.runner !== "console" ? ""
     : i.os === "windows" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>以前台进程运行，重启或注销后不会自动启动。建议执行 <code>probe-agent.exe install</code> 设为登录自启的托盘模式；无人登录的服务器以管理员执行 <code>probe-agent.exe service install</code>。</span></p>`
     : i.os === "darwin" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>在终端里前台运行，重启或注销后不会自动启动。建议执行 <code>./probe-agent install</code> 设为登录自启，在菜单栏后台运行。</span></p>` : "";
-  $("#info").innerHTML = `<table class="kv-table info-table">${kv.filter(([, v]) => v !== "" && v != null).map(([k, v]) => `<tr><th style="width:110px">${k}</th><td>${esc(v)}</td></tr>`).join("")}</table>${hint}`;
+  const cred = s.credential && CREDS[s.credential];
+  const credRow = !cred ? "" : `<tr><th>接入凭据</th><td><span class="pl-pill ${cred[1]}" title="${esc(cred[2])}">${cred[0]}</span>
+    ${s.credential !== "none" ? `<button class="btn sm" id="credReset" title="作废该设备凭据：探针下次连接需凭 GUEST_TOKEN 重新登记">${icon("rotate-ccw")}重置</button>` : ""}</td></tr>`;
+  $("#info").innerHTML = `<table class="kv-table info-table">${kv.filter(([, v]) => v !== "" && v != null).map(([k, v]) => `<tr><th style="width:110px">${k}</th><td>${esc(v)}</td></tr>`).join("")}${credRow}</table>${hint}`;
+  const reset = $("#credReset");
+  if (reset) reset.addEventListener("click", async () => {
+    if (!confirm(`重置 ${s.name} 的接入凭据？\n探针当前连接不受影响；下次重连时需凭 GUEST_TOKEN 重新登记，若 hub 已设置 PROBE_HUB_ENROLL=off 将无法再接入。`)) return;
+    try { await api(`/sessions/${encodeURIComponent(s.id)}/credential/reset`, { method: "POST", json: { confirm: true } }); s.credential = "none"; renderInfo(s); }
+    catch (e) { alert(e.message); }
+  });
 }
+
+/** @type {Record<string, [string, string, string]>} */
+const CREDS = {
+  active: ["已绑定", "ok", "探针持有本设备专属凭据，单凭 GUEST_TOKEN 无法冒用该设备"],
+  pending: ["待确认", "info", "已签发凭据，探针下次重连出示后生效"],
+  none: ["未绑定", "warn", "探针仍只凭共享 GUEST_TOKEN 接入（1.18.0 以前的探针）"],
+};
 
 /** @param {SystemView} s */
 async function loadSeries(s) {
+  const docker = isDockerRunner(s);
+  loadContainerSeries(s);
   if (!state.config.history) {
-    ["cpu", "mem", "disk", "dio", "procs", "net", "load"].forEach((k) => chart(k, { t: [], series: [], fmt: (v) => String(v), empty: "未配置 PROBE_HUB_DSN，无历史数据" }));
+    (docker ? ["disk", "load", "net"] : ["cpu", "mem", "disk", "dio", "procs", "net", "load"]).forEach((k) => chart(k, { t: [], series: [], fmt: (v) => String(v), empty: "未配置 PROBE_HUB_DSN，无历史数据" }));
     return;
   }
   /** @type {Series} */
@@ -250,23 +393,27 @@ async function loadSeries(s) {
   const memMax = Math.max(0, ...d.memTotal) || l.memTotal || null;
   const diskMax = Math.max(0, ...d.diskTotal) || l.diskTotal || null;
 
-  chart("cpu", { ...base, max: 100, fmt: pct, series: [
-    { label: "平均", color: C.blue, data: d.cpu },
-    { label: "峰值", color: C.faint, data: d.cpuMax, area: false, dash: true, width: 1 }] }, s.online && l.cpuPct != null ? pct(l.cpuPct) : "");
-  chart("mem", { ...base, max: memMax, fmt: bytes, series: [
-    { label: "已用", color: C.green, data: d.mem },
-    ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: C.orange, data: d.swap, fill: 0.2 }] : [])] },
-    s.online && l.memTotal ? `${bytes(l.memUsed)} / ${bytes(l.memTotal)}` : "");
+  if (!docker) {
+    chart("cpu", { ...base, max: 100, fmt: pct, series: [
+      { label: "平均", color: C.blue, data: d.cpu },
+      { label: "峰值", color: C.faint, data: d.cpuMax, area: false, dash: true, width: 1 }] }, s.online && l.cpuPct != null ? pct(l.cpuPct) : "");
+    chart("mem", { ...base, max: memMax, fmt: bytes, series: [
+      { label: "已用", color: C.green, data: d.mem },
+      ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: C.orange, data: d.swap, fill: 0.2 }] : [])] },
+      s.online && l.memTotal ? `${bytes(l.memUsed)} / ${bytes(l.memTotal)}` : "");
+  }
   const parts = diskParts(d, l);
-  $("#desc-disk").textContent = parts ? "各分区已用空间（堆积）" : "系统盘已用空间";
+  const nDisk = poolDisks(l).disks.length;
+  $("#desc-disk").textContent = parts ? "各分区已用空间（堆积）" : nDisk > 1 ? "全部分区已用空间（合计）" : "系统盘已用空间";
   if (parts) {
     chart("disk", { ...base, stacked: true, totalLabel: "合计", capacity: parts.total || null, fmt: bytes, series: parts.series },
       parts.total ? `${bytes(parts.used)} / ${bytes(parts.total)} · ${parts.series.length} 个分区` : "");
   } else {
+    const where = nDisk > 1 ? `${nDisk} 个分区` : (l.rootMount || "");
     chart("disk", { ...base, capacity: diskMax, fmt: bytes, series: [{ label: "已用", color: C.violet, data: d.disk }] },
-      l.diskTotal ? `${bytes(l.diskUsed)} / ${bytes(l.diskTotal)} · ${l.rootMount || ""}` : "");
+      l.diskTotal ? `${bytes(l.diskUsed)} / ${bytes(l.diskTotal)}${where ? " · " + where : ""}` : "");
   }
-  chart("dio", { ...base, fmt: rate, series: [
+  if (!docker) chart("dio", { ...base, fmt: rate, series: [
     { label: "读", color: C.cyan, data: d.diskRead },
     { label: "写", color: C.orange, data: d.diskWrite }] }, s.online ? `读 ${rate(l.diskReadBps)} · 写 ${rate(l.diskWriteBps)}` : "");
   const count = (v) => (v == null ? "—" : v >= 100 ? Math.round(v) + "" : (+v.toFixed(1)) + "");
@@ -274,20 +421,7 @@ async function loadSeries(s) {
   const pps = (v, axis) => (v == null ? "—" : axis ? (v >= 1000 ? +(v / 1000).toFixed(1) + "k" : count(v)) + " pps" : count(v) + " pps");
   const hasPps = has(d.netRxPps) || has(d.netTxPps);
   const errs = sum(d.netErrs), drops = sum(d.netDrops);
-  $("#desc-net").textContent = hasPps
-    ? "物理网卡收发情况（已排除回环/虚拟网卡）；左轴吞吐，右轴包速率"
-    : "物理网卡收发情况（已排除回环/虚拟网卡）";
-  const nowPps = s.online && l.netRxPps != null ? ` · ${count(l.netRxPps)} / ${count(l.netTxPps)} pps` : "";
-  chart("net", { ...base, fmt: rate, fmt2: pps, series: [
-    { label: "下行", color: C.cyan, data: d.netRx },
-    { label: "上行", color: C.violet, data: d.netTx },
-    { label: "下行峰值", color: C.cyan, data: d.netRxMax, area: false, dash: true, width: 1 },
-    { label: "上行峰值", color: C.violet, data: d.netTxMax, area: false, dash: true, width: 1 },
-    ...(hasPps ? [
-      { label: "收包", color: C.green, data: d.netRxPps, fill: 0.14, width: 1.2, right: true },
-      { label: "发包", color: C.orange, data: d.netTxPps, fill: 0.14, width: 1.2, right: true }] : [])] },
-  s.online ? `↓ ${rate(l.netRxBps)} · ↑ ${rate(l.netTxBps)}${nowPps}` : "");
-  renderNetSum(d, hasPps, errs, drops);
+  renderHostNet(s, d, base, { hasPps, pps, count, errs, drops, l });
   const hasErr = errs > 0 || drops > 0;
   if (hasErr) chart("nerr", { ...base, fmt: count, series: [
     { label: "错误", color: C.pink, data: d.netErrs },
@@ -309,16 +443,8 @@ async function loadSeries(s) {
   $("#p-nerr").hidden = !hasErr;
   $("#p-tcp").hidden = !hasTCP;
   $("#p-conn").hidden = !hasConn;
-  // A half-width panel left alone in its row (before a wide panel or at the end) takes the full row.
-  /** @type {Element | null} */
-  let alone = null;
-  for (const p of $("#charts").children) {
-    if (/** @type {HTMLElement} */ (p).hidden) continue;
-    const wide = p.classList.contains("wide");
-    p.classList.toggle("span-row", wide);
-    if (wide) { alone?.classList.add("span-row"); alone = null; } else alone = alone ? null : p;
-  }
-  alone?.classList.add("span-row");
+  spanRows($("#charts"));
+  if (docker) spanRows($("#ctr-charts"));
   $("#p-load").querySelector("h3").textContent = winLoad ? "系统负载（估算）" : "系统负载";
   $("#desc-load").textContent = winLoad
     ? "Windows 无原生 load average，由 CPU 使用率与处理器队列长度折算"
@@ -328,7 +454,7 @@ async function loadSeries(s) {
     { label: "load5", color: C.violet, data: d.load5, fill: 0.18, width: 1.3 },
     { label: "load15", color: C.cyan, data: d.load15, fill: 0.12, width: 1.3 }] },
     s.online && l.load ? l.load.map((x) => x.toFixed(2)).join(" / ") : "");
-  chart("procs", { ...base, fmt: (v) => (v == null ? "—" : Math.round(v) + ""), series: [{ label: "进程", color: C.orange, data: d.procs }] },
+  if (!docker) chart("procs", { ...base, fmt: (v) => (v == null ? "—" : Math.round(v) + ""), series: [{ label: "进程", color: C.orange, data: d.procs }] },
     s.online && l.procs ? l.procs + " 个" : "");
 
   if (hasTemp) {
@@ -422,7 +548,12 @@ function renderConn(d, base, now, win) {
 /** @param {string} k @param {string} v @param {boolean} [bad] */
 const stat = (k, v, bad) => `<span class="lg-stat${bad ? " bad" : ""}">${esc(k)} <b>${esc(v)}</b></span>`;
 
-/** @param {Series} d @param {boolean} hasPps @param {number} errs @param {number} drops */
+/**
+ * @param {{ netRx: (number | null)[], netTx: (number | null)[], netRxMax: (number | null)[], netTxMax: (number | null)[], netRxBytes: (number | null)[], netTxBytes: (number | null)[], netRxPps?: (number | null)[], netTxPps?: (number | null)[] }} d
+ * @param {boolean} hasPps
+ * @param {number} errs
+ * @param {number} drops
+ */
 function renderNetSum(d, hasPps, errs, drops) {
   const rx = stats(d.netRx), tx = stats(d.netTx);
   const box = $("#net-sum");

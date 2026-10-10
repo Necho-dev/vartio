@@ -87,7 +87,7 @@ func downloadPath(version, goos, arch string) string {
 }
 
 func (h *Hub) agentAuthed(w http.ResponseWriter, r *http.Request) bool {
-	if tokenOK(h.Token, guestToken(r)) {
+	if h.agentAuthorized(r).ok() {
 		return true
 	}
 	writeAPIErr(w, &esxi.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "invalid or missing guest token"})

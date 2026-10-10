@@ -17,7 +17,7 @@ import (
 )
 
 // agentVersion is a var so test builds can override it with -ldflags -X.
-var agentVersion = "1.16.1"
+var agentVersion = "1.18.0"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] != "upgrade-watch" && !(len(os.Args) > 2 && os.Args[1] == "service" && os.Args[2] == "run") {
@@ -37,6 +37,7 @@ func main() {
 		}
 	}
 	loadEnv()
+	applyHostRoot()
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "service":

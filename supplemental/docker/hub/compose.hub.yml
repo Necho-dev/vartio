@@ -1,0 +1,43 @@
+# probe-hub with PostgreSQL for history. From the repo root:
+#   GUEST_TOKEN=... PROBE_HUB_ADMIN_TOKEN=... docker compose -f deploy/docker/compose.hub.yml up -d --build
+# UI: http://<host>:8766/   agents connect to ws://<host>:8766/v1/probe/connect
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: probe
+      POSTGRES_PASSWORD: ${PROBE_DB_PASSWORD:-probe}
+      POSTGRES_DB: probe
+    volumes:
+      - probe-pg:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U probe -d probe"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  probe-hub:
+    image: probe-hub:${PROBE_HUB_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/probe-hub.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PROBE_HUB_PORT:-8766}:8766"
+    environment:
+      PROBE_HUB_DSN: postgres://probe:${PROBE_DB_PASSWORD:-probe}@postgres:5432/probe?sslmode=disable
+      GUEST_TOKEN: ${GUEST_TOKEN:?set GUEST_TOKEN}
+      PROBE_HUB_ADMIN_TOKEN: ${PROBE_HUB_ADMIN_TOKEN:?set PROBE_HUB_ADMIN_TOKEN}
+      PROBE_HUB_RETENTION: ${PROBE_HUB_RETENTION:-168h}
+    volumes:
+      - probe-hub-data:/data
+      # Signed agent builds for remote upgrades (scripts/probe-agent-dist.sh output):
+      # - ../../dist/probe-agent:/data/dist/probe-agent:ro
+
+volumes:
+  probe-pg:
+  probe-hub-data:

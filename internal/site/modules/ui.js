@@ -44,25 +44,33 @@ $("#modalTitle").addEventListener("dblclick", () => { if (!$("#modalFull").hidde
 // ---------- drawer ----------
 /** @type {(() => void) | null} */
 let onDrawerClose = null;
+let drawerGen = 0;
 /**
  * @param {string} title
  * @param {string} sub
  * @param {string} html
  * @param {(() => void) | null} [onClose]
+ * @param {{ wide?: boolean }} [opts]
  */
-export function openDrawer(title, sub, html, onClose) {
+export function openDrawer(title, sub, html, onClose, opts = {}) {
   document.querySelectorAll(".tip").forEach((t) => { /** @type {HTMLElement} */ (t).hidden = true; });
   closeDrawer();
+  drawerGen++;
+  $("#drawer").dataset.gen = String(drawerGen);
+  $("#drawerActs").innerHTML = "";
   $("#drawerTitle").textContent = title;
   $("#drawerSub").textContent = sub || "";
   $("#drawerBody").innerHTML = html;
+  $("#drawer").classList.toggle("wide", !!opts.wide);
   $("#drawer").hidden = false;
   onDrawerClose = onClose || null;
 }
 export function closeDrawer() {
   if ($("#drawer").hidden) return;
   $("#drawer").hidden = true;
+  $("#drawer").classList.remove("wide");
   $("#drawerBody").innerHTML = "";
+  $("#drawerActs").innerHTML = "";
   if (onDrawerClose) onDrawerClose();
   onDrawerClose = null;
 }

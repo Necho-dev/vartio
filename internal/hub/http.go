@@ -50,7 +50,8 @@ func confirmed(r *http.Request, bodyConfirm bool) bool {
 
 // HandleConnect upgrades an outbound agent WebSocket. Agents dial this; we never dial them.
 func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
-	if !tokenOK(h.Token, guestToken(r)) {
+	auth := h.agentAuthorized(r)
+	if !auth.ok() {
 		writeAPIErr(w, &esxi.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "invalid or missing guest token"})
 		return
 	}
@@ -75,18 +76,23 @@ func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	remote := clientIP(r)
-	if err := h.admit(hello); err != nil {
+	var ack HelloOK
+	err = h.admit(hello)
+	if err == nil {
+		ack, err = h.helloAuth(hello, auth)
+	}
+	if err != nil {
 		var rpc *RPCError
 		errors.As(err, &rpc)
 		_ = conn.WriteJSON(HelloOK{OK: false, Code: rpc.Code, Message: rpc.Message})
 		_ = conn.Close()
 		log.Printf("guest rejected device=%s bios=%s from=%s: %s", hello.Key(), hello.BiosUUID, remote, rpc.Message)
 		if h.OnReject != nil {
-			h.OnReject(hello, remote, rpc.Message)
+			h.OnReject(hello, remote, rpc.Code, rpc.Message)
 		}
 		return
 	}
-	if err := conn.WriteJSON(HelloOK{OK: true}); err != nil {
+	if err := conn.WriteJSON(ack); err != nil {
 		_ = conn.Close()
 		return
 	}
@@ -123,6 +129,8 @@ func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PathUpgrade, h.wrap(h.handleUpgradeBatch))
 	mux.HandleFunc("GET "+PathUpgrade, h.wrap(h.handleUpgrades))
 	mux.HandleFunc("POST "+PathSessions+"/{id}/upgrade", h.wrap(h.handleUpgrade))
+	mux.HandleFunc("GET "+PathHubKey, h.wrap(h.handleHubKey))
+	mux.HandleFunc("POST "+PathSessions+"/{id}/credential/reset", h.wrap(h.handleCredentialReset))
 	mux.HandleFunc("GET "+PathSessions, h.wrap(h.handleSessions))
 	mux.HandleFunc("GET "+PathSessions+"/{id}", h.wrap(h.handleSessionInfo))
 	mux.HandleFunc("GET "+PathSessions+"/{id}/health", h.wrap(h.handleHealth))
@@ -132,6 +140,9 @@ func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PathSessions+"/{id}/services", h.wrap(h.handleServicesPost))
 	mux.HandleFunc("POST "+PathSessions+"/{id}/exec", h.wrap(h.handleExec))
 	mux.HandleFunc("POST "+PathSessions+"/{id}/term", h.wrap(h.handleTerm))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/docker/inspect", h.wrap(h.handleDockerInspect))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/docker/logs", h.wrap(h.handleDockerLogs))
+	mux.HandleFunc("GET "+PathSessions+"/{id}/docker/compose", h.wrap(h.handleDockerCompose))
 	mux.HandleFunc("POST "+PathSessions+"/{id}/power", h.wrap(h.handlePower))
 	mux.HandleFunc("GET "+PathTermWS, h.HandleTermWS)
 	mux.HandleFunc("GET "+PathDisplayWS, h.HandleDisplayWS)
@@ -171,6 +182,39 @@ func (h *Hub) handleHealth(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	return writeJSON(w, out)
+}
+
+func (h *Hub) handleDockerInspect(w http.ResponseWriter, r *http.Request) error {
+	out, err := h.DockerInspect(r.Context(), r.PathValue("id"), r.URL.Query().Get("container"))
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(out)
+	return err
+}
+
+func (h *Hub) handleDockerLogs(w http.ResponseWriter, r *http.Request) error {
+	q := r.URL.Query()
+	tail, _ := strconv.Atoi(q.Get("tail"))
+	since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
+	until, _ := strconv.ParseInt(q.Get("until"), 10, 64)
+	out, err := h.DockerLogs(r.Context(), r.PathValue("id"), q.Get("container"), tail, since, until)
+	if err != nil {
+		return err
+	}
+	h.audit(r.PathValue("id"), "docker.logs", "容器 "+q.Get("container"), clientIP(r), nil)
+	return writeJSON(w, out)
+}
+
+func (h *Hub) handleDockerCompose(w http.ResponseWriter, r *http.Request) error {
+	project := r.URL.Query().Get("project")
+	out, err := h.DockerCompose(r.Context(), r.PathValue("id"), project)
+	if err != nil {
+		return err
+	}
+	h.audit(r.PathValue("id"), "docker.compose", "项目 "+project, clientIP(r), nil)
 	return writeJSON(w, out)
 }
 
@@ -241,7 +285,11 @@ func (h *Hub) handleExec(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleTerm(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.IssueTerm(r.PathValue("id"))
+	var target TermOpenRequest
+	if err := json.NewDecoder(r.Body).Decode(&target); err != nil && !errors.Is(err, io.EOF) {
+		return esxi.ErrBad("invalid json")
+	}
+	out, err := h.IssueTerm(r.PathValue("id"), target)
 	if err != nil {
 		return err
 	}
@@ -398,16 +446,32 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 		_ = browser.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31m"+err.Error()+"\x1b[0m\r\n"))
 		return
 	}
-	if _, err := s.call(ctx, t.ID, MethodTermOpen, TermOpenRequest{ID: t.ID, Cols: cols, Rows: rows}); err != nil {
+	open := t.Term
+	open.ID, open.Cols, open.Rows = t.ID, cols, rows
+	kind, detail := "term", ""
+	if open.Mode != "" {
+		kind, detail = "docker."+open.Mode, "容器 "+open.Container
+	}
+	if _, err := s.call(ctx, t.ID, MethodTermOpen, open); err != nil {
 		s.detachTerm(sink)
-		_ = browser.WriteMessage(websocket.TextMessage, []byte("term.open: "+err.Error()))
+		if open.Mode != "" {
+			h.audit(t.Key, kind, detail, clientIP(r), err)
+		}
+		_ = browser.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31m"+err.Error()+"\x1b[0m\r\n"))
 		return
 	}
 	opened := time.Now()
-	h.audit(t.Key, "term.open", "", clientIP(r), nil)
-	defer func() {
-		h.audit(t.Key, "term.close", "时长 "+time.Since(opened).Round(time.Second).String(), clientIP(r), nil)
-	}()
+	switch open.Mode {
+	case "":
+		h.audit(t.Key, "term.open", "", clientIP(r), nil)
+	default:
+		h.audit(t.Key, kind, detail, clientIP(r), nil)
+	}
+	if open.Mode != TermLogs {
+		defer func() {
+			h.audit(t.Key, "term.close", strings.TrimSpace(detail+" 时长 "+time.Since(opened).Round(time.Second).String()), clientIP(r), nil)
+		}()
+	}
 	defer func() {
 		// Unregistered means the PTY is gone or now owned by a newer terminal.
 		if !s.detachTerm(sink) {
