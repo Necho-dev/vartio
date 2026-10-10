@@ -80,3 +80,13 @@ func TestFilesOps(t *testing.T) {
 		t.Fatalf("home %s delete must be refused", home)
 	}
 }
+
+func TestDedupePools(t *testing.T) {
+	apfs := guest.DiskUsage{FS: "apfs", Total: 500, Used: 400}
+	sys, data, ext := apfs, apfs, guest.DiskUsage{Mount: "/Volumes/X", FS: "apfs", Total: 100, Used: 1}
+	sys.Mount, data.Mount = "/", "/System/Volumes/Data"
+	got := dedupePools([]guest.DiskUsage{sys, data, ext}, "/System/Volumes/Data")
+	if len(got) != 2 || got[0].Mount != "/System/Volumes/Data" || got[1].Mount != "/Volumes/X" {
+		t.Fatalf("dedupePools = %+v", got)
+	}
+}

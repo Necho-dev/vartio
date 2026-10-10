@@ -1,6 +1,11 @@
 package monitor
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"govmomi-wmks/internal/guest"
+)
 
 // Series is columnar so a week of buckets stays a small JSON payload.
 type Series struct {
@@ -20,6 +25,8 @@ type Series struct {
 	Load1     []float64  `json:"load1"`
 	Temp      []*float64 `json:"temp"`
 	Procs     []float64  `json:"procs"`
+	// DiskParts maps mount point -> used bytes per bucket (nil = no sample).
+	DiskParts map[string][]*float64 `json:"diskParts"`
 }
 
 func newSeries(step time.Duration) *Series {
@@ -28,6 +35,7 @@ func newSeries(step time.Duration) *Series {
 		T:       []int64{}, CPU: []float64{}, CPUMax: []float64{}, Mem: []float64{}, MemTotal: []float64{},
 		Swap: []float64{}, Disk: []float64{}, DiskTotal: []float64{}, DiskRead: []float64{}, DiskWrite: []float64{},
 		NetRx: []float64{}, NetTx: []float64{}, Load1: []float64{}, Temp: []*float64{}, Procs: []float64{},
+		DiskParts: map[string][]*float64{},
 	}
 }
 
@@ -63,4 +71,24 @@ func stepFor(span, interval time.Duration) time.Duration {
 		step = interval
 	}
 	return step.Round(time.Second)
+}
+
+// dedupePools keeps one mount per storage pool: volumes reporting the same
+// fs/total/used (APFS containers) share one space. Agents >= 1.7.1 already do
+// this; older ones would otherwise double-count in stacked disk charts.
+func dedupePools(disks []guest.DiskUsage, root string) []guest.DiskUsage {
+	key := func(d guest.DiskUsage) string { return fmt.Sprintf("%s|%d|%d", d.FS, d.Total, d.Used) }
+	keep := map[string]string{}
+	for _, d := range disks {
+		if k := key(d); keep[k] == "" || d.Mount == root {
+			keep[k] = d.Mount
+		}
+	}
+	out := make([]guest.DiskUsage, 0, len(disks))
+	for _, d := range disks {
+		if keep[key(d)] == d.Mount {
+			out = append(out, d)
+		}
+	}
+	return out
 }

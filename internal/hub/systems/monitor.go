@@ -245,7 +245,7 @@ func (m *Monitor) derive(bios string, met guest.Metrics, latency time.Duration) 
 		SwapUsed: met.SwapUsed, SwapTotal: met.SwapTotal,
 		RootMount: met.RootMount, Load: met.Load, Procs: met.Procs,
 		LatencyMs: latency.Milliseconds(),
-		Disks:     met.Disks, Temps: met.Temps, NICs: met.NICs,
+		Disks:     dedupePools(met.Disks, met.RootMount), Temps: met.Temps, NICs: met.NICs,
 	}
 	if met.MemTotal > 0 {
 		smp.MemPct = float64(met.MemUsed) / float64(met.MemTotal) * 100

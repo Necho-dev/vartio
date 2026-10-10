@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS probe_events (
 	detail    text NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS probe_events_bios_ts ON probe_events (bios_uuid, ts DESC);
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS disk_parts jsonb;
 `
 
 // Store persists systems, samples and online/offline events in PostgreSQL.
@@ -159,12 +160,20 @@ func (s *Store) Record(ctx context.Context, bios string, info guest.SysInfo, smp
 	if smp.TempMax > 0 {
 		temp = &smp.TempMax
 	}
+	var parts []byte
+	if len(smp.Disks) > 0 {
+		used := make(map[string]uint64, len(smp.Disks))
+		for _, d := range smp.Disks {
+			used[d.Mount] = d.Used
+		}
+		parts, _ = json.Marshal(used)
+	}
 	b.Queue(`INSERT INTO probe_metrics (bios_uuid, ts, cpu_pct, mem_used, mem_total, swap_used, swap_total,
-			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, temp_max, procs)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT DO NOTHING`,
+			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, temp_max, procs, disk_parts)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) ON CONFLICT DO NOTHING`,
 		bios, smp.TS, smp.CPUPct, int64(smp.MemUsed), int64(smp.MemTotal), int64(smp.SwapUsed), int64(smp.SwapTotal),
 		int64(smp.DiskUsed), int64(smp.DiskTotal), smp.DiskReadBps, smp.DiskWriteBps, smp.NetRxBps, smp.NetTxBps,
-		smp.Load[0], temp, smp.Procs)
+		smp.Load[0], temp, smp.Procs, parts)
 	return s.db.SendBatch(ctx, b).Close()
 }
 
@@ -232,7 +241,46 @@ func (s *Store) Series(ctx context.Context, bios string, from time.Time, step ti
 		}
 		out.add(t, cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw, rx, tx, l1, temp, procs)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, s.diskParts(ctx, out, bios, from, step)
+}
+
+// diskParts fills Series.DiskParts with per-mount used bytes, aligned to out.T.
+func (s *Store) diskParts(ctx context.Context, out *Series, bios string, from time.Time, step time.Duration) error {
+	rows, err := s.db.Query(ctx, `
+		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b, p.key, avg(p.value::float8)
+		FROM probe_metrics, jsonb_each_text(disk_parts) p
+		WHERE bios_uuid = $1 AND ts >= $2 AND disk_parts IS NOT NULL
+		GROUP BY b, p.key`, bios, from, step.Seconds())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	idx := make(map[int64]int, len(out.T))
+	for i, ms := range out.T {
+		idx[ms] = i
+	}
+	for rows.Next() {
+		var t time.Time
+		var mount string
+		var used float64
+		if err := rows.Scan(&t, &mount, &used); err != nil {
+			return err
+		}
+		i, ok := idx[t.UnixMilli()]
+		if !ok {
+			continue
+		}
+		col := out.DiskParts[mount]
+		if col == nil {
+			col = make([]*float64, len(out.T))
+			out.DiskParts[mount] = col
+		}
+		col[i] = &used
+	}
+	return rows.Err()
 }
 
 func (s *Store) Prune(ctx context.Context, metricsBefore, eventsBefore time.Time) (int64, error) {
