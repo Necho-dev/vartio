@@ -1,6 +1,6 @@
 //go:build darwin
 
-package main
+package agent
 
 import (
 	_ "embed"
@@ -46,7 +46,7 @@ func setTrayIcon(state string) {
 // trayWanted: a menu bar item needs the user's GUI session, so not as root
 // (LaunchDaemon) and not from a plain SSH login.
 func trayWanted() bool {
-	if os.Getenv("GUEST_TRAY") == "off" || os.Geteuid() == 0 {
+	if getenv("VARTIO_AGENT_TRAY", "GUEST_TRAY") == "off" || os.Geteuid() == 0 {
 		return false
 	}
 	return os.Getenv("SSH_CONNECTION") == "" || runnerName() == "launchd"
@@ -106,6 +106,8 @@ func singleInstance() error {
 	return nil
 }
 
+// launchLabel stays probe-agent: installed LaunchAgents and the upgrade
+// watchdog restart this job. Screen Recording is also granted to this identifier.
 const launchLabel = "probe-agent"
 
 func plistPath() (string, error) {
@@ -147,6 +149,7 @@ func runInstall() int {
 		fmt.Println("已保存配置：", saved)
 	}
 	dir := filepath.Dir(exe)
+	logFile := agentLogFile(dir)
 	esc := html.EscapeString
 	body := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -159,7 +162,7 @@ func runInstall() int {
 	<key>KeepAlive</key><true/>
 	<key>ProcessType</key><string>Interactive</string>
 	<key>LimitLoadToSessionType</key><string>Aqua</string>
-	<key>StandardErrorPath</key><string>` + esc(filepath.Join(dir, "probe-agent.log")) + `</string>
+	<key>StandardErrorPath</key><string>` + esc(logFile) + `</string>
 </dict>
 </plist>
 `
@@ -177,7 +180,7 @@ func runInstall() int {
 	}
 	fmt.Println("已设置登录自启：探针在后台运行，菜单栏可见图标")
 	fmt.Println("  LaunchAgent：", plist)
-	fmt.Println("  日志：", filepath.Join(dir, "probe-agent.log"))
+	fmt.Println("  日志：", logFile)
 	return 0
 }
 

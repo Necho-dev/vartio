@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -16,7 +16,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -61,22 +62,22 @@ func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	var hello Hello
+	var hello entities.Hello
 	if err := conn.ReadJSON(&hello); err != nil {
-		_ = conn.WriteJSON(Frame{Error: &FrameError{Code: "bad_request", Message: "hello required"}})
+		_ = conn.WriteJSON(entities.Frame{Error: &entities.FrameError{Code: "bad_request", Message: "hello required"}})
 		_ = conn.Close()
 		return
 	}
 	hello.BiosUUID = normUUID(hello.BiosUUID)
 	hello.DeviceID = normUUID(hello.DeviceID)
 	if hello.BiosUUID == "" {
-		_ = conn.WriteJSON(Frame{Error: &FrameError{Code: "bad_request", Message: "biosUuid required"}})
+		_ = conn.WriteJSON(entities.Frame{Error: &entities.FrameError{Code: "bad_request", Message: "biosUuid required"}})
 		_ = conn.Close()
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	remote := clientIP(r)
-	var ack HelloOK
+	var ack entities.HelloOK
 	err = h.admit(hello)
 	if err == nil {
 		ack, err = h.helloAuth(hello, auth)
@@ -84,7 +85,7 @@ func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var rpc *RPCError
 		errors.As(err, &rpc)
-		_ = conn.WriteJSON(HelloOK{OK: false, Code: rpc.Code, Message: rpc.Message})
+		_ = conn.WriteJSON(entities.HelloOK{OK: false, Code: rpc.Code, Message: rpc.Message})
 		_ = conn.Close()
 		log.Printf("guest rejected device=%s bios=%s from=%s: %s", hello.Key(), hello.BiosUUID, remote, rpc.Message)
 		if h.OnReject != nil {
@@ -122,39 +123,39 @@ func (h *Hub) DevHandler() http.Handler {
 
 // RegisterDev mounts the standalone probe API (connect, sessions, streams) on mux.
 func (h *Hub) RegisterDev(mux *http.ServeMux) {
-	mux.HandleFunc("GET "+PathConnect, h.HandleConnect)
-	mux.HandleFunc("GET "+PathAgentLatest, h.handleAgentLatest)
-	mux.HandleFunc("GET "+PathAgentDownload+"/{version}/{os}/{arch}", h.handleAgentDownload)
-	mux.HandleFunc("GET "+PathReleases, h.wrap(h.handleReleases))
-	mux.HandleFunc("POST "+PathUpgrade, h.wrap(h.handleUpgradeBatch))
-	mux.HandleFunc("GET "+PathUpgrade, h.wrap(h.handleUpgrades))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/upgrade", h.wrap(h.handleUpgrade))
-	mux.HandleFunc("GET "+PathHubKey, h.wrap(h.handleHubKey))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/credential/reset", h.wrap(h.handleCredentialReset))
-	mux.HandleFunc("GET "+PathSessions, h.wrap(h.handleSessions))
-	mux.HandleFunc("GET "+PathSessions+"/{id}", h.wrap(h.handleSessionInfo))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/health", h.wrap(h.handleHealth))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/procs", h.wrap(h.handleProcsGet))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/procs", h.wrap(h.handleProcsPost))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/services", h.wrap(h.handleServicesGet))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/services", h.wrap(h.handleServicesPost))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/exec", h.wrap(h.handleExec))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/term", h.wrap(h.handleTerm))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/docker/inspect", h.wrap(h.handleDockerInspect))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/docker/logs", h.wrap(h.handleDockerLogs))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/docker/compose", h.wrap(h.handleDockerCompose))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/power", h.wrap(h.handlePower))
-	mux.HandleFunc("GET "+PathTermWS, h.HandleTermWS)
-	mux.HandleFunc("GET "+PathDisplayWS, h.HandleDisplayWS)
-	mux.HandleFunc("GET "+PathSessions+"/{id}/display", h.wrap(h.handleDisplayGet))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/display", h.wrap(h.handleDisplayPost))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/files", h.wrap(h.handleFilesList))
-	mux.HandleFunc("PUT "+PathSessions+"/{id}/files", h.wrap(h.handleFilesPut))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/files/content", h.wrap(h.handleFilesContent))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/files/op", h.wrap(h.handleFilesOp))
-	mux.HandleFunc("GET "+PathSessions+"/{id}/trash", h.wrap(h.handleTrashList))
-	mux.HandleFunc("POST "+PathSessions+"/{id}/trash", h.wrap(h.handleTrashOp))
-	h.RegisterTunnels(mux, PathSessions)
+	mux.HandleFunc("GET "+entities.PathConnect, h.HandleConnect)
+	mux.HandleFunc("GET "+entities.PathAgentLatest, h.handleAgentLatest)
+	mux.HandleFunc("GET "+entities.PathAgentDownload+"/{version}/{os}/{arch}", h.handleAgentDownload)
+	mux.HandleFunc("GET "+entities.PathReleases, h.wrap(h.handleReleases))
+	mux.HandleFunc("POST "+entities.PathUpgrade, h.wrap(h.handleUpgradeBatch))
+	mux.HandleFunc("GET "+entities.PathUpgrade, h.wrap(h.handleUpgrades))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/upgrade", h.wrap(h.handleUpgrade))
+	mux.HandleFunc("GET "+entities.PathHubKey, h.wrap(h.handleHubKey))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/credential/reset", h.wrap(h.handleCredentialReset))
+	mux.HandleFunc("GET "+entities.PathSessions, h.wrap(h.handleSessions))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}", h.wrap(h.handleSessionInfo))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/health", h.wrap(h.handleHealth))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/procs", h.wrap(h.handleProcsGet))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/procs", h.wrap(h.handleProcsPost))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/services", h.wrap(h.handleServicesGet))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/services", h.wrap(h.handleServicesPost))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/exec", h.wrap(h.handleExec))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/term", h.wrap(h.handleTerm))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/docker/inspect", h.wrap(h.handleDockerInspect))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/docker/logs", h.wrap(h.handleDockerLogs))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/docker/compose", h.wrap(h.handleDockerCompose))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/power", h.wrap(h.handlePower))
+	mux.HandleFunc("GET "+entities.PathTermWS, h.HandleTermWS)
+	mux.HandleFunc("GET "+entities.PathDisplayWS, h.HandleDisplayWS)
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/display", h.wrap(h.handleDisplayGet))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/display", h.wrap(h.handleDisplayPost))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/files", h.wrap(h.handleFilesList))
+	mux.HandleFunc("PUT "+entities.PathSessions+"/{id}/files", h.wrap(h.handleFilesPut))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/files/content", h.wrap(h.handleFilesContent))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/files/op", h.wrap(h.handleFilesOp))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/trash", h.wrap(h.handleTrashList))
+	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/trash", h.wrap(h.handleTrashOp))
+	h.RegisterTunnels(mux, entities.PathSessions)
 }
 
 func (h *Hub) wrap(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
@@ -265,7 +266,7 @@ func (h *Hub) handleServicesPost(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleExec(w http.ResponseWriter, r *http.Request) error {
-	var req ExecRequest
+	var req entities.ExecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		return common.ErrBad("invalid json")
 	}
@@ -285,7 +286,7 @@ func (h *Hub) handleExec(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleTerm(w http.ResponseWriter, r *http.Request) error {
-	var target TermOpenRequest
+	var target entities.TermOpenRequest
 	if err := json.NewDecoder(r.Body).Decode(&target); err != nil && !errors.Is(err, io.EOF) {
 		return common.ErrBad("invalid json")
 	}
@@ -311,11 +312,11 @@ func (h *Hub) handlePower(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleDisplayGet(w http.ResponseWriter, _ *http.Request) error {
-	return writeJSON(w, DisplayInfo{
+	return writeJSON(w, entities.DisplayInfo{
 		ViewOnly: true,
-		FPS:      DisplayFPS,
-		MaxSide:  DisplayMaxSide,
-		Note:     "POST for a one-shot " + PathDisplayWS + " ticket. JPEG up to 10fps, max side 2560, quality=auto|smooth|hd; no input. Does not fall back to hypervisor screenshot.",
+		FPS:      entities.DisplayFPS,
+		MaxSide:  entities.DisplayMaxSide,
+		Note:     "POST for a one-shot " + entities.PathDisplayWS + " ticket. JPEG up to 10fps, max side 2560, quality=auto|smooth|hd; no input. Does not fall back to hypervisor screenshot.",
 	})
 }
 
@@ -347,15 +348,15 @@ func (h *Hub) handleFilesContent(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleFilesOp(w http.ResponseWriter, r *http.Request) error {
-	var req FilesOpRequest
+	var req entities.FilesOpRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return common.ErrBad("invalid json")
 	}
 	req.Confirm = confirmed(r, req.Confirm)
 	out, err := h.FilesOp(r.Context(), r.PathValue("id"), req)
-	if req.Op != FileOpZip {
+	if req.Op != entities.FileOpZip {
 		detail := req.Path
-		if req.Op == FileOpRename {
+		if req.Op == entities.FileOpRename {
 			detail += " → " + req.To
 		}
 		h.record(r, "file."+req.Op, detail, err)
@@ -367,7 +368,7 @@ func (h *Hub) handleFilesOp(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleTrashList(w http.ResponseWriter, r *http.Request) error {
-	out, err := h.Trash(r.Context(), r.PathValue("id"), TrashRequest{Op: TrashList})
+	out, err := h.Trash(r.Context(), r.PathValue("id"), entities.TrashRequest{Op: entities.TrashList})
 	if err != nil {
 		return err
 	}
@@ -375,7 +376,7 @@ func (h *Hub) handleTrashList(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Hub) handleTrashOp(w http.ResponseWriter, r *http.Request) error {
-	var req TrashRequest
+	var req entities.TrashRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return common.ErrBad("invalid json")
 	}
@@ -385,9 +386,9 @@ func (h *Hub) handleTrashOp(w http.ResponseWriter, r *http.Request) error {
 	switch {
 	case len(out.Paths) > 0:
 		detail = strings.Join(out.Paths, ", ")
-	case req.Op == TrashPurge:
+	case req.Op == entities.TrashPurge:
 		detail = strconv.Itoa(len(req.IDs)) + " 项"
-	case req.Op == TrashEmpty && err == nil:
+	case req.Op == entities.TrashEmpty && err == nil:
 		detail = strconv.Itoa(out.Done) + " 项"
 	}
 	h.record(r, "trash."+req.Op, detail, err)
@@ -452,7 +453,7 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 	if open.Mode != "" {
 		kind, detail = "docker."+open.Mode, "容器 "+open.Container
 	}
-	if _, err := s.call(ctx, t.ID, MethodTermOpen, open); err != nil {
+	if _, err := s.call(ctx, t.ID, entities.MethodTermOpen, open); err != nil {
 		s.detachTerm(sink)
 		if open.Mode != "" {
 			h.audit(t.Key, kind, detail, clientIP(r), err)
@@ -467,7 +468,7 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.audit(t.Key, kind, detail, clientIP(r), nil)
 	}
-	if open.Mode != TermLogs {
+	if open.Mode != entities.TermLogs {
 		defer func() {
 			h.audit(t.Key, "term.close", strings.TrimSpace(detail+" 时长 "+time.Since(opened).Round(time.Second).String()), clientIP(r), nil)
 		}()
@@ -477,12 +478,12 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 		if !s.detachTerm(sink) {
 			return
 		}
-		c, cancel := context.WithTimeout(context.Background(), TermOpenTimeout)
-		_, _ = s.call(c, t.ID+"-close", MethodTermClose, map[string]string{"id": t.ID})
+		c, cancel := context.WithTimeout(context.Background(), entities.TermOpenTimeout)
+		_, _ = s.call(c, t.ID+"-close", entities.MethodTermClose, map[string]string{"id": t.ID})
 		cancel()
 	}()
 
-	idle := time.NewTimer(TermIdle)
+	idle := time.NewTimer(entities.TermIdle)
 	defer idle.Stop()
 	activity := make(chan struct{}, 1)
 	errc := make(chan error, 2)
@@ -500,13 +501,13 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 			if typ == websocket.TextMessage {
 				if size, ok := parseResize(data); ok {
 					size.ID = t.ID
-					c, cancel := context.WithTimeout(ctx, TermOpenTimeout)
-					_, _ = s.call(c, t.ID+"-resize-"+strconv.FormatInt(time.Now().UnixNano(), 36), MethodTermResize, size)
+					c, cancel := context.WithTimeout(ctx, entities.TermOpenTimeout)
+					_, _ = s.call(c, t.ID+"-resize-"+strconv.FormatInt(time.Now().UnixNano(), 36), entities.MethodTermResize, size)
 					cancel()
 					continue
 				}
 			}
-			_ = s.write(Frame{ID: t.ID, Stream: "in", Data: data})
+			_ = s.write(entities.Frame{ID: t.ID, Stream: "in", Data: data})
 		}
 	}()
 	go func() {
@@ -520,7 +521,7 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 				errc <- context.DeadlineExceeded
 				return
 			case <-activity:
-				idle.Reset(TermIdle)
+				idle.Reset(entities.TermIdle)
 			case <-sink.done:
 				if sink.bye != "" {
 					_ = browser.WriteMessage(websocket.BinaryMessage, []byte("\r\n\x1b[90m["+sink.bye+"]\x1b[0m\r\n"))
@@ -528,7 +529,7 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 				errc <- errOffline
 				return
 			case b := <-sink.out:
-				idle.Reset(TermIdle)
+				idle.Reset(entities.TermIdle)
 				if err := browser.WriteMessage(websocket.BinaryMessage, b); err != nil {
 					errc <- err
 					return
@@ -541,9 +542,9 @@ func (h *Hub) HandleTermWS(w http.ResponseWriter, r *http.Request) {
 
 // parseResize recognises the browser control message {"type":"resize","cols":N,"rows":N}.
 // Anything else on the socket is keyboard input.
-func parseResize(data []byte) (TermOpenRequest, bool) {
+func parseResize(data []byte) (entities.TermOpenRequest, bool) {
 	if len(data) < 8 || data[0] != '{' {
-		return TermOpenRequest{}, false
+		return entities.TermOpenRequest{}, false
 	}
 	var m struct {
 		Type string `json:"type"`
@@ -551,20 +552,20 @@ func parseResize(data []byte) (TermOpenRequest, bool) {
 		Rows int    `json:"rows"`
 	}
 	if json.Unmarshal(data, &m) != nil || m.Type != "resize" || m.Cols <= 0 || m.Rows <= 0 {
-		return TermOpenRequest{}, false
+		return entities.TermOpenRequest{}, false
 	}
-	return TermOpenRequest{Cols: m.Cols, Rows: m.Rows}, true
+	return entities.TermOpenRequest{Cols: m.Cols, Rows: m.Rows}, true
 }
 
 // displayMsg is a JSON text frame on the display WebSocket. Hub → browser:
 // "info" (screens, current screen, quality), "screen" / "quality" (switched),
 // "error". Browser → hub: "screen" or "quality" to switch.
 type displayMsg struct {
-	Type    string   `json:"type"`
-	Screens []Screen `json:"screens,omitempty"`
-	Screen  int      `json:"screen"`
-	Quality string   `json:"quality,omitempty"`
-	Message string   `json:"message,omitempty"`
+	Type    string            `json:"type"`
+	Screens []entities.Screen `json:"screens,omitempty"`
+	Screen  int               `json:"screen"`
+	Quality string            `json:"quality,omitempty"`
+	Message string            `json:"message,omitempty"`
 }
 
 func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
@@ -594,7 +595,7 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 	defer s.detachDisplay(sink)
 
 	ctx := r.Context()
-	raw, err := s.call(ctx, t.ID, MethodDisplayOpen, DisplayOpenRequest{Quality: r.URL.Query().Get("quality")})
+	raw, err := s.call(ctx, t.ID, entities.MethodDisplayOpen, entities.DisplayOpenRequest{Quality: r.URL.Query().Get("quality")})
 	if err != nil {
 		_ = browser.WriteMessage(websocket.TextMessage, []byte("display.open: "+err.Error()))
 		return
@@ -606,7 +607,7 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 		defer wmu.Unlock()
 		return browser.WriteMessage(kind, b)
 	}
-	var res DisplayOpenResult
+	var res entities.DisplayOpenResult
 	_ = json.Unmarshal(raw, &res)
 	if len(res.Screens) > 0 || res.Quality != "" {
 		b, _ := json.Marshal(displayMsg{Type: "info", Screens: res.Screens, Screen: res.Screen, Quality: res.Quality})
@@ -618,12 +619,12 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 		h.audit(t.Key, "display.close", "时长 "+time.Since(opened).Round(time.Second).String(), clientIP(r), nil)
 	}()
 	defer func() {
-		c, cancel := context.WithTimeout(context.Background(), TermOpenTimeout)
-		_, _ = s.call(c, t.ID+"-close", MethodDisplayClose, map[string]string{"id": t.ID})
+		c, cancel := context.WithTimeout(context.Background(), entities.TermOpenTimeout)
+		_, _ = s.call(c, t.ID+"-close", entities.MethodDisplayClose, map[string]string{"id": t.ID})
 		cancel()
 	}()
 
-	idle := time.NewTimer(DisplayIdle)
+	idle := time.NewTimer(entities.DisplayIdle)
 	defer idle.Stop()
 	errc := make(chan error, 2)
 	go func() {
@@ -640,17 +641,17 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			var method, what string
-			var params DisplayOpenRequest
+			var params entities.DisplayOpenRequest
 			switch {
 			case m.Type == "screen" && len(res.Screens) > 0:
-				method, what, params = MethodDisplaySelect, "切换屏幕", DisplayOpenRequest{ID: t.ID, Screen: m.Screen}
+				method, what, params = entities.MethodDisplaySelect, "切换屏幕", entities.DisplayOpenRequest{ID: t.ID, Screen: m.Screen}
 			case m.Type == "quality" && res.Quality != "":
-				method, what, params = MethodDisplayQuality, "切换清晰度", DisplayOpenRequest{ID: t.ID, Quality: m.Quality}
+				method, what, params = entities.MethodDisplayQuality, "切换清晰度", entities.DisplayOpenRequest{ID: t.ID, Quality: m.Quality}
 			default:
 				continue
 			}
 			n++
-			c, cancel := context.WithTimeout(ctx, TermOpenTimeout)
+			c, cancel := context.WithTimeout(ctx, entities.TermOpenTimeout)
 			out, err := s.call(c, fmt.Sprintf("%s-ctl-%d", t.ID, n), method, params)
 			cancel()
 			reply := displayMsg{Type: m.Type, Screen: m.Screen, Quality: m.Quality}
@@ -691,7 +692,7 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 					default:
 					}
 				}
-				idle.Reset(DisplayIdle)
+				idle.Reset(entities.DisplayIdle)
 				if err := write(websocket.BinaryMessage, b); err != nil {
 					errc <- err
 					return

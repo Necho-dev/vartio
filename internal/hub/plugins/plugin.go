@@ -1,7 +1,7 @@
 // Package plugin hosts hub-side extensions. Plugins never talk to an agent
 // directly: they get a Host scoped to what their Manifest declares, built on
 // the agent's general-purpose primitives (guest.PrimitiveVersions).
-package plugin
+package plugins
 
 import (
 	"context"
@@ -20,8 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/hub"
 )
 
 // PathPrefix sits under /v1/probe so probe-hub's admin token and vm-server's
@@ -30,8 +31,8 @@ import (
 // clients such as browser WebSockets that cannot send headers. UIPrefix
 // serves each plugin's front-end module, which the hub page mounts.
 const (
-	PathPrefix   = guest.PathPrefix + "/plugins"
-	PublicPrefix = guest.PathPrefix + "/ws/plugins"
+	PathPrefix   = entities.PathPrefix + "/plugins"
+	PublicPrefix = entities.PathPrefix + "/ws/plugins"
 	UIPrefix     = "/plugins"
 )
 
@@ -69,8 +70,8 @@ type Stopper interface {
 
 // Host is everything a plugin may do with agents.
 type Host interface {
-	Agents() []guest.SessionInfo
-	Agent(id string) (guest.SessionInfo, bool)
+	Agents() []entities.SessionInfo
+	Agent(id string) (entities.SessionInfo, bool)
 	// DialTCP opens a tunnel from the agent to target.
 	DialTCP(ctx context.Context, id, target string) (net.Conn, error)
 	// HTTPClient sends requests to target on the agent's machine; the URL host is ignored.
@@ -82,7 +83,7 @@ type Host interface {
 }
 
 type Registry struct {
-	hub *guest.Hub
+	hub *hub.Hub
 
 	mu        sync.Mutex
 	plugins   []*entry
@@ -97,7 +98,7 @@ type entry struct {
 	installed bool
 }
 
-func NewRegistry(hub *guest.Hub) *Registry {
+func NewRegistry(hub *hub.Hub) *Registry {
 	return &Registry{hub: hub}
 }
 
@@ -111,7 +112,7 @@ func (r *Registry) Add(ctx context.Context, p Plugin) error {
 		return fmt.Errorf("plugin %s registered twice", m.Name)
 	}
 	for _, c := range m.Primitives {
-		if _, ok := guest.PrimitiveVersions[c]; !ok {
+		if _, ok := entities.PrimitiveVersions[c]; !ok {
 			return fmt.Errorf("plugin %s needs unknown primitive %s", m.Name, c)
 		}
 	}
@@ -287,7 +288,7 @@ type listItem struct {
 	Agents []AgentReadiness `json:"agents"`
 }
 
-func (r *Registry) item(e *entry, sessions []guest.SessionInfo) listItem {
+func (r *Registry) item(e *entry, sessions []entities.SessionInfo) listItem {
 	r.mu.Lock()
 	it := listItem{Manifest: e.m, Installed: e.installed, Agents: []AgentReadiness{}}
 	r.mu.Unlock()
@@ -300,7 +301,7 @@ func (r *Registry) item(e *entry, sessions []guest.SessionInfo) listItem {
 	return it
 }
 
-func (r *Registry) sessions() []guest.SessionInfo {
+func (r *Registry) sessions() []entities.SessionInfo {
 	s := r.hub.List()
 	sort.Slice(s, func(i, j int) bool { return s[i].HostName < s[j].HostName })
 	return s
@@ -338,13 +339,13 @@ func (r *Registry) handleInstall(on bool) http.HandlerFunc {
 	}
 }
 
-func readiness(m Manifest, s guest.SessionInfo) AgentReadiness {
+func readiness(m Manifest, s entities.SessionInfo) AgentReadiness {
 	a := AgentReadiness{ID: s.DeviceID, HostName: s.HostName, OS: s.OS, Version: s.Version}
 	if a.ID == "" {
 		a.ID = s.BiosUUID
 	}
 	for _, c := range m.Primitives {
-		if s.Primitives[c] < guest.PrimitiveVersions[c] {
+		if s.Primitives[c] < entities.PrimitiveVersions[c] {
 			a.Missing = append(a.Missing, c)
 		}
 	}
@@ -354,17 +355,17 @@ func readiness(m Manifest, s guest.SessionInfo) AgentReadiness {
 
 // scopedHost enforces the plugin's manifest on every agent operation.
 type scopedHost struct {
-	hub *guest.Hub
+	hub *hub.Hub
 	m   Manifest
 }
 
-func (h *scopedHost) Agents() []guest.SessionInfo { return h.hub.List() }
+func (h *scopedHost) Agents() []entities.SessionInfo { return h.hub.List() }
 
-func (h *scopedHost) Agent(id string) (guest.SessionInfo, bool) { return h.hub.Info(id) }
+func (h *scopedHost) Agent(id string) (entities.SessionInfo, bool) { return h.hub.Info(id) }
 
 func (h *scopedHost) DialTCP(ctx context.Context, id, target string) (net.Conn, error) {
-	if !slices.Contains(h.m.Primitives, guest.CapTunnelTCP) {
-		return nil, errForbidden(h.m.Name + " did not declare " + guest.CapTunnelTCP)
+	if !slices.Contains(h.m.Primitives, entities.CapTunnelTCP) {
+		return nil, errForbidden(h.m.Name + " did not declare " + entities.CapTunnelTCP)
 	}
 	if !targetAllowed(h.m.Targets, target) {
 		return nil, errForbidden(h.m.Name + " may not dial " + target)

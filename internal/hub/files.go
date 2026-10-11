@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -11,13 +11,14 @@ import (
 	"strconv"
 	"strings"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
-func (h *Hub) CollectFile(ctx context.Context, bios, path string, max int64) ([]byte, FilesGetResult, error) {
+func (h *Hub) CollectFile(ctx context.Context, bios, path string, max int64) ([]byte, entities.FilesGetResult, error) {
 	st, err := h.FileStat(ctx, bios, path)
 	if err != nil {
-		return nil, FilesGetResult{}, err
+		return nil, entities.FilesGetResult{}, err
 	}
 	if st.IsDir {
 		return nil, st, common.ErrBad("path is a directory")
@@ -25,17 +26,17 @@ func (h *Hub) CollectFile(ctx context.Context, bios, path string, max int64) ([]
 	if max > 0 && st.Size > max {
 		return nil, st, nil
 	}
-	if st.Size > FileMaxBytes {
-		return nil, st, common.ErrTooLarge("file exceeds %d bytes", FileMaxBytes)
+	if st.Size > entities.FileMaxBytes {
+		return nil, st, common.ErrTooLarge("file exceeds %d bytes", entities.FileMaxBytes)
 	}
 	var buf []byte
 	var offset int64
 	for offset < st.Size {
-		raw, err := h.Call(ctx, bios, MethodFilesGet, FilesGetRequest{Path: path, Offset: offset, Length: FileChunk})
+		raw, err := h.Call(ctx, bios, entities.MethodFilesGet, entities.FilesGetRequest{Path: path, Offset: offset, Length: entities.FileChunk})
 		if err != nil {
 			return nil, st, err
 		}
-		chunk, err := decode[FilesGetResult](raw)
+		chunk, err := decode[entities.FilesGetResult](raw)
 		if err != nil {
 			return nil, st, err
 		}
@@ -50,37 +51,37 @@ func (h *Hub) CollectFile(ctx context.Context, bios, path string, max int64) ([]
 	return buf, st, nil
 }
 
-func (h *Hub) FilesOp(ctx context.Context, bios string, req FilesOpRequest) (FilesOpResult, error) {
+func (h *Hub) FilesOp(ctx context.Context, bios string, req entities.FilesOpRequest) (entities.FilesOpResult, error) {
 	switch req.Op {
-	case FileOpMkdir, FileOpRename, FileOpDelete, FileOpTrash, FileOpZip:
+	case entities.FileOpMkdir, entities.FileOpRename, entities.FileOpDelete, entities.FileOpTrash, entities.FileOpZip:
 	default:
-		return FilesOpResult{}, common.ErrBad("op must be mkdir, rename, delete, trash, or zip")
+		return entities.FilesOpResult{}, common.ErrBad("op must be mkdir, rename, delete, trash, or zip")
 	}
 	if strings.TrimSpace(req.Path) == "" {
-		return FilesOpResult{}, common.ErrBad("path required")
+		return entities.FilesOpResult{}, common.ErrBad("path required")
 	}
-	raw, err := h.Call(ctx, bios, MethodFilesOp, req)
+	raw, err := h.Call(ctx, bios, entities.MethodFilesOp, req)
 	if err != nil {
-		return FilesOpResult{}, err
+		return entities.FilesOpResult{}, err
 	}
-	return decode[FilesOpResult](raw)
+	return decode[entities.FilesOpResult](raw)
 }
 
-func (h *Hub) Trash(ctx context.Context, bios string, req TrashRequest) (TrashResult, error) {
+func (h *Hub) Trash(ctx context.Context, bios string, req entities.TrashRequest) (entities.TrashResult, error) {
 	switch req.Op {
-	case TrashList, TrashEmpty:
-	case TrashRestore, TrashPurge:
+	case entities.TrashList, entities.TrashEmpty:
+	case entities.TrashRestore, entities.TrashPurge:
 		if len(req.IDs) == 0 {
-			return TrashResult{}, common.ErrBad("ids required")
+			return entities.TrashResult{}, common.ErrBad("ids required")
 		}
 	default:
-		return TrashResult{}, common.ErrBad("op must be list, restore, purge, or empty")
+		return entities.TrashResult{}, common.ErrBad("op must be list, restore, purge, or empty")
 	}
-	raw, err := h.Call(ctx, bios, MethodTrash, req)
+	raw, err := h.Call(ctx, bios, entities.MethodTrash, req)
 	if err != nil {
-		return TrashResult{}, err
+		return entities.TrashResult{}, err
 	}
-	return decode[TrashResult](raw)
+	return decode[entities.TrashResult](raw)
 }
 
 // WriteFile streams a guest file; a directory is zipped on the guest first and
@@ -94,19 +95,19 @@ func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path s
 		return err
 	}
 	if st.IsDir {
-		z, err := h.FilesOp(ctx, bios, FilesOpRequest{Op: FileOpZip, Path: st.Path})
+		z, err := h.FilesOp(ctx, bios, entities.FilesOpRequest{Op: entities.FileOpZip, Path: st.Path})
 		if err != nil {
 			return err
 		}
 		defer func() {
-			c, cancel := context.WithTimeout(context.Background(), ActionTimeout)
+			c, cancel := context.WithTimeout(context.Background(), entities.ActionTimeout)
 			defer cancel()
-			_, _ = h.FilesOp(c, bios, FilesOpRequest{Op: FileOpDelete, Path: filepath.Dir(z.Path), Confirm: true})
+			_, _ = h.FilesOp(c, bios, entities.FilesOpRequest{Op: entities.FileOpDelete, Path: filepath.Dir(z.Path), Confirm: true})
 		}()
 		return h.WriteFile(w, ctx, bios, z.Path)
 	}
-	if st.Size > FileMaxBytes {
-		return common.ErrTooLarge("file exceeds %d bytes", FileMaxBytes)
+	if st.Size > entities.FileMaxBytes {
+		return common.ErrTooLarge("file exceeds %d bytes", entities.FileMaxBytes)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", contentDisposition(baseName(st.Path)))
@@ -116,11 +117,11 @@ func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path s
 	var offset int64
 	var lastSHA string
 	for offset < st.Size {
-		raw, err := h.Call(ctx, bios, MethodFilesGet, FilesGetRequest{Path: path, Offset: offset, Length: FileChunk})
+		raw, err := h.Call(ctx, bios, entities.MethodFilesGet, entities.FilesGetRequest{Path: path, Offset: offset, Length: entities.FileChunk})
 		if err != nil {
 			return err
 		}
-		chunk, err := decode[FilesGetResult](raw)
+		chunk, err := decode[entities.FilesGetResult](raw)
 		if err != nil {
 			return err
 		}
@@ -143,35 +144,35 @@ func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path s
 	return nil
 }
 
-func (h *Hub) ReadFile(ctx context.Context, bios, path string, r io.Reader, size int64, shaHex string, confirm bool) (FilesPutResult, error) {
+func (h *Hub) ReadFile(ctx context.Context, bios, path string, r io.Reader, size int64, shaHex string, confirm bool) (entities.FilesPutResult, error) {
 	if path == "" {
-		return FilesPutResult{}, common.ErrBad("path required")
+		return entities.FilesPutResult{}, common.ErrBad("path required")
 	}
-	if size > FileMaxBytes {
-		return FilesPutResult{}, common.ErrTooLarge("upload exceeds %d bytes", FileMaxBytes)
+	if size > entities.FileMaxBytes {
+		return entities.FilesPutResult{}, common.ErrTooLarge("upload exceeds %d bytes", entities.FileMaxBytes)
 	}
 	sum := sha256.New()
 	var offset int64
-	buf := make([]byte, FileChunk)
-	var last FilesPutResult
+	buf := make([]byte, entities.FileChunk)
+	var last entities.FilesPutResult
 	for {
 		n, err := io.ReadFull(r, buf)
 		if n == 0 && err == io.EOF {
-			raw, err := h.Call(ctx, bios, MethodFilesPut, FilesPutRequest{
+			raw, err := h.Call(ctx, bios, entities.MethodFilesPut, entities.FilesPutRequest{
 				Path: path, Offset: offset, EOF: true, SHA256: shaHex, Confirm: confirm && offset == 0,
 			})
 			if err != nil {
-				return FilesPutResult{}, err
+				return entities.FilesPutResult{}, err
 			}
-			return decode[FilesPutResult](raw)
+			return decode[entities.FilesPutResult](raw)
 		}
 		if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-			return FilesPutResult{}, err
+			return entities.FilesPutResult{}, err
 		}
 		chunk := buf[:n]
 		sum.Write(chunk)
 		eof := err == io.EOF || err == io.ErrUnexpectedEOF
-		req := FilesPutRequest{
+		req := entities.FilesPutRequest{
 			Path:    path,
 			Offset:  offset,
 			Data:    chunk,
@@ -184,13 +185,13 @@ func (h *Hub) ReadFile(ctx context.Context, bios, path string, r io.Reader, size
 			}
 			req.SHA256 = shaHex
 		}
-		raw, callErr := h.Call(ctx, bios, MethodFilesPut, req)
+		raw, callErr := h.Call(ctx, bios, entities.MethodFilesPut, req)
 		if callErr != nil {
-			return FilesPutResult{}, callErr
+			return entities.FilesPutResult{}, callErr
 		}
-		last, err = decode[FilesPutResult](raw)
+		last, err = decode[entities.FilesPutResult](raw)
 		if err != nil {
-			return FilesPutResult{}, err
+			return entities.FilesPutResult{}, err
 		}
 		offset += int64(n)
 		if eof {

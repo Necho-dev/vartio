@@ -1,6 +1,6 @@
 //go:build !windows
 
-package main
+package agent
 
 import (
 	"errors"
@@ -48,7 +48,7 @@ func spawnDetached(bin string, args []string, dir string) error {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if f, err := os.OpenFile(filepath.Join(filepath.Dir(bin), "probe-agent.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+	if f, err := os.OpenFile(agentLogFile(filepath.Dir(bin)), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 		cmd.Stdout, cmd.Stderr = f, f
 		defer f.Close()
 	}

@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"strings"
@@ -11,7 +11,7 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 var netPrev struct {
@@ -21,8 +21,8 @@ var netPrev struct {
 	tx uint64
 }
 
-func collectHealth(watches []watchSpec) (guest.Health, error) {
-	out := guest.Health{TimeUTC: time.Now().UTC().Format(time.RFC3339)}
+func collectHealth(watches []watchSpec) (entities.Health, error) {
+	out := entities.Health{TimeUTC: time.Now().UTC().Format(time.RFC3339)}
 	if info, err := cpu.Info(); err == nil && len(info) > 0 {
 		out.CPU.Model = strings.TrimSpace(info[0].ModelName)
 	}
@@ -43,7 +43,7 @@ func collectHealth(watches []watchSpec) (guest.Health, error) {
 			if err != nil || u.Total == 0 {
 				continue
 			}
-			out.Disks = append(out.Disks, guest.DiskInfo{
+			out.Disks = append(out.Disks, entities.DiskInfo{
 				Name:    p.Mountpoint,
 				TotalGB: float64(u.Total) / 1e9,
 				UsedGB:  float64(u.Used) / 1e9,
@@ -56,7 +56,7 @@ func collectHealth(watches []watchSpec) (guest.Health, error) {
 			if len(iface.Addrs) == 0 {
 				continue
 			}
-			n := guest.NICInfo{Name: iface.Name, MAC: iface.HardwareAddr, Up: hasFlag(iface.Flags, "up")}
+			n := entities.NICInfo{Name: iface.Name, MAC: iface.HardwareAddr, Up: hasFlag(iface.Flags, "up")}
 			for _, a := range iface.Addrs {
 				if strings.Contains(a.Addr, ".") && !strings.HasPrefix(a.Addr, "127.") {
 					n.IPv4 = strings.Split(a.Addr, "/")[0]
@@ -79,16 +79,16 @@ func collectHealth(watches []watchSpec) (guest.Health, error) {
 	return out, nil
 }
 
-func sampleNet() guest.NetRates {
+func sampleNet() entities.NetRates {
 	cs, err := net.IOCounters(false)
 	if err != nil || len(cs) == 0 {
-		return guest.NetRates{}
+		return entities.NetRates{}
 	}
 	now := time.Now()
 	rx, tx := cs[0].BytesRecv, cs[0].BytesSent
 	netPrev.mu.Lock()
 	defer netPrev.mu.Unlock()
-	var rates guest.NetRates
+	var rates entities.NetRates
 	if !netPrev.at.IsZero() {
 		dt := now.Sub(netPrev.at).Seconds()
 		if dt > 0 {
@@ -125,15 +125,15 @@ func hasFlag(flags []string, want string) bool {
 	return false
 }
 
-func evalWatch(w watchSpec) guest.Watch {
+func evalWatch(w watchSpec) entities.Watch {
 	switch w.Kind {
 	case "process":
 		ok, detail := procAlive(w.Name)
-		return guest.Watch{Kind: w.Kind, Name: w.Name, OK: ok, Detail: detail}
+		return entities.Watch{Kind: w.Kind, Name: w.Name, OK: ok, Detail: detail}
 	case "service":
 		ok, detail := serviceAlive(w.Name)
-		return guest.Watch{Kind: w.Kind, Name: w.Name, OK: ok, Detail: detail}
+		return entities.Watch{Kind: w.Kind, Name: w.Name, OK: ok, Detail: detail}
 	default:
-		return guest.Watch{Kind: w.Kind, Name: w.Name, OK: false, Detail: "unknown kind"}
+		return entities.Watch{Kind: w.Kind, Name: w.Name, OK: false, Detail: "unknown kind"}
 	}
 }

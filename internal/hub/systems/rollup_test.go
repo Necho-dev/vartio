@@ -1,4 +1,4 @@
-package monitor
+package systems
 
 import (
 	"context"
@@ -8,10 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"vartio/internal/entities"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"govmomi-wmks/internal/guest"
 )
 
 func TestPickSource(t *testing.T) {
@@ -72,8 +71,8 @@ func TestRollupMatchesRaw(t *testing.T) {
 		smp := Sample{TS: start.Add(time.Duration(i) * 10 * time.Second), CPUPct: cpu, MemUsed: uint64(i) << 20, MemTotal: 8 << 30,
 			NetRxBps: float64(i % 7), NetRxBytes: rx, Load: [3]float64{1, 2, 3}, Procs: 100 + i%3}
 		smp.Docker = &DockerSample{Containers: []ContainerSample{{Name: "web", Stats: true, CPUPct: &cpu, MemUsed: 64 << 20, MemLimit: 1 << 30}}}
-		smp.Disks = []guest.DiskUsage{{Mount: "/", Used: uint64(i%2) * 1000}}
-		if err := st.Record(ctx, "d1", guest.SysInfo{}, smp); err != nil {
+		smp.Disks = []entities.DiskUsage{{Mount: "/", Used: uint64(i%2) * 1000}}
+		if err := st.Record(ctx, "d1", entities.SysInfo{}, smp); err != nil {
 			t.Fatal(err)
 		}
 	}

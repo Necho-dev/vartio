@@ -1,11 +1,11 @@
-package guest
+package hub
 
 import (
 	"context"
 	"errors"
 	"net/http"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
 )
 
 var errOffline = errors.New("guest agent not connected")

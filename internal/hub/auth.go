@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"crypto/ed25519"
@@ -18,7 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 // Auth adds two things on top of the shared GUEST_TOKEN:
@@ -45,11 +46,6 @@ type Auth struct {
 const (
 	CredActive  = "active"  // the agent has presented its credential; token-only hellos are refused
 	CredPending = "pending" // issued, not yet presented back
-)
-
-const (
-	HeaderDevice     = "X-Guest-Device"
-	HeaderCredential = "X-Guest-Credential"
 )
 
 type credential struct {
@@ -122,14 +118,8 @@ func (a *Auth) PublicKey() string {
 	return base64.StdEncoding.EncodeToString(a.key.Public().(ed25519.PublicKey))
 }
 
-// HelloSigMessage is what the hub signs in HelloOK: the agent's nonce, the device id
-// and the credential being handed out, so none of them can be swapped in transit.
-func HelloSigMessage(nonce, device, credential string) []byte {
-	return []byte("probe-hub-hello/v1\n" + nonce + "\n" + device + "\n" + credential)
-}
-
 func (a *Auth) sign(nonce, device, cred string) string {
-	return base64.StdEncoding.EncodeToString(ed25519.Sign(a.key, HelloSigMessage(nonce, device, cred)))
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(a.key, entities.HelloSigMessage(nonce, device, cred)))
 }
 
 func hashCred(secret string) string {
@@ -234,7 +224,7 @@ func (a agentAuth) ok() bool { return a.token || a.credDevice != "" }
 func (h *Hub) agentAuthorized(r *http.Request) agentAuth {
 	var out agentAuth
 	if h.Auth != nil {
-		if dev := normUUID(r.Header.Get(HeaderDevice)); h.Auth.Valid(dev, r.Header.Get(HeaderCredential)) {
+		if dev := normUUID(r.Header.Get(entities.HeaderDevice)); h.Auth.Valid(dev, r.Header.Get(entities.HeaderCredential)) {
 			out.credDevice = dev
 		}
 	}
@@ -244,8 +234,8 @@ func (h *Hub) agentAuthorized(r *http.Request) agentAuth {
 
 // helloAuth decides on a hello after the WebSocket upgrade. It returns the HelloOK to
 // send, or an RPCError when the hello must be refused.
-func (h *Hub) helloAuth(hello Hello, auth agentAuth) (HelloOK, error) {
-	ok := HelloOK{OK: true}
+func (h *Hub) helloAuth(hello entities.Hello, auth agentAuth) (entities.HelloOK, error) {
+	ok := entities.HelloOK{OK: true}
 	if h.Auth == nil {
 		return ok, nil
 	}

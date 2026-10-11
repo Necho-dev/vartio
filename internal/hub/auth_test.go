@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"crypto/ed25519"
@@ -8,21 +8,22 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"vartio/internal/entities"
 
 	"github.com/gorilla/websocket"
 )
 
-func dialAuth(t *testing.T, url string, hdr http.Header, hello Hello) (HelloOK, *http.Response, error) {
+func dialAuth(t *testing.T, url string, hdr http.Header, hello entities.Hello) (entities.HelloOK, *http.Response, error) {
 	t.Helper()
 	conn, resp, err := websocket.DefaultDialer.Dial(url, hdr)
 	if err != nil {
-		return HelloOK{}, resp, err
+		return entities.HelloOK{}, resp, err
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	if err := conn.WriteJSON(hello); err != nil {
 		t.Fatal(err)
 	}
-	var ack HelloOK
+	var ack entities.HelloOK
 	if err := conn.ReadJSON(&ack); err != nil {
 		t.Fatal(err)
 	}
@@ -38,14 +39,14 @@ func dialAuth(t *testing.T, url string, hdr http.Header, hello Hello) (HelloOK, 
 	return ack, resp, nil
 }
 
-func verifyAck(t *testing.T, ack HelloOK, pub, nonce, device string) {
+func verifyAck(t *testing.T, ack entities.HelloOK, pub, nonce, device string) {
 	t.Helper()
 	if ack.HubKey != pub {
 		t.Fatalf("hub key %q, want %q", ack.HubKey, pub)
 	}
 	k, _ := base64.StdEncoding.DecodeString(ack.HubKey)
 	sig, _ := base64.StdEncoding.DecodeString(ack.Sig)
-	if !ed25519.Verify(k, HelloSigMessage(nonce, device, ack.Credential), sig) {
+	if !ed25519.Verify(k, entities.HelloSigMessage(nonce, device, ack.Credential), sig) {
 		t.Fatal("hello signature does not verify")
 	}
 }
@@ -61,10 +62,10 @@ func TestHubAuthCredentialLifecycle(t *testing.T) {
 	h.Auth = auth
 	srv := httptest.NewServer(h.DevHandler())
 	t.Cleanup(srv.Close)
-	url := "ws" + strings.TrimPrefix(srv.URL, "http") + PathConnect
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + entities.PathConnect
 	pub := auth.PublicKey()
 	token := http.Header{"X-Guest-Token": {"fleet"}}
-	hello := Hello{BiosUUID: "b1", DeviceID: "dev1", Nonce: "n1"}
+	hello := entities.Hello{BiosUUID: "b1", DeviceID: "dev1", Nonce: "n1"}
 
 	// Enroll with the fleet token; an unconfirmed credential is simply replaced.
 	ack, _, err := dialAuth(t, url, token, hello)
@@ -83,7 +84,7 @@ func TestHubAuthCredentialLifecycle(t *testing.T) {
 	waitOffline(t, h, "dev1")
 
 	// Presenting it (no token needed) activates it.
-	byCred := http.Header{HeaderDevice: {"dev1"}, HeaderCredential: {cred}}
+	byCred := http.Header{entities.HeaderDevice: {"dev1"}, entities.HeaderCredential: {cred}}
 	hello.Nonce = "n2"
 	ack, _, err = dialAuth(t, url, byCred, hello)
 	if err != nil || !ack.OK || ack.Credential != "" || auth.State("dev1") != CredActive {
@@ -98,11 +99,11 @@ func TestHubAuthCredentialLifecycle(t *testing.T) {
 		t.Fatalf("token-only on bound device: %+v", ack)
 	}
 	// A wrong credential without the token is refused at the HTTP upgrade.
-	if _, resp, err := dialAuth(t, url, http.Header{HeaderDevice: {"dev1"}, HeaderCredential: {"nope"}}, hello); err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+	if _, resp, err := dialAuth(t, url, http.Header{entities.HeaderDevice: {"dev1"}, entities.HeaderCredential: {"nope"}}, hello); err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong credential: %v", err)
 	}
 	// A credential for dev1 does not authenticate another device id.
-	if ack, _, _ := dialAuth(t, url, byCred, Hello{BiosUUID: "b2", DeviceID: "dev2", Nonce: "x"}); ack.OK || ack.Code != "unauthorized" {
+	if ack, _, _ := dialAuth(t, url, byCred, entities.Hello{BiosUUID: "b2", DeviceID: "dev2", Nonce: "x"}); ack.OK || ack.Code != "unauthorized" {
 		t.Fatalf("credential for other id: %+v", ack)
 	}
 
@@ -116,12 +117,12 @@ func TestHubAuthCredentialLifecycle(t *testing.T) {
 	h.Token = "fleet"
 
 	// Old agents (no nonce) keep the token-only flow and get nothing new.
-	if ack, _, _ := dialAuth(t, url, token, Hello{BiosUUID: "old"}); !ack.OK || ack.Credential != "" || ack.Sig != "" {
+	if ack, _, _ := dialAuth(t, url, token, entities.Hello{BiosUUID: "old"}); !ack.OK || ack.Credential != "" || ack.Sig != "" {
 		t.Fatalf("legacy agent: %+v", ack)
 	}
 
 	auth.Enroll = false
-	if ack, _, _ := dialAuth(t, url, token, Hello{BiosUUID: "b3", DeviceID: "dev3", Nonce: "y"}); ack.OK || ack.Code != "enrollment_disabled" {
+	if ack, _, _ := dialAuth(t, url, token, entities.Hello{BiosUUID: "b3", DeviceID: "dev3", Nonce: "y"}); ack.OK || ack.Code != "enrollment_disabled" {
 		t.Fatalf("enroll off: %+v", ack)
 	}
 	auth.Enroll = true

@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -13,24 +13,29 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"govmomi-wmks/internal/guest"
+	"vartio"
+	"vartio/internal/entities"
 )
 
-// agentVersion is a var so test builds can override it with -ldflags -X.
-var agentVersion = "1.18.6"
+// agentVersion follows vartio.Version. Override the stamp with -ldflags -X vartio.Version.
+// init reads this after the linker stamp is applied, so it must not be a const.
+var agentVersion = vartio.Version
 
-func main() {
+func Run() {
 	if len(os.Args) > 1 && os.Args[1] != "upgrade-watch" && !(len(os.Args) > 2 && os.Args[1] == "service" && os.Args[2] == "run") {
 		attachConsole()
 	}
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version":
+			// The first line stays probe-agent so agents already in the field
+			// accept this build: their self-test requires that exact name.
 			fmt.Printf("probe-agent %s %s/%s\n", agentVersion, runtime.GOOS, runtime.GOARCH)
+			fmt.Printf("vartio-agent %s %s/%s\n", agentVersion, runtime.GOOS, runtime.GOARCH)
 			return
 		case "upgrade-watch":
 			if len(os.Args) != 3 {
-				fmt.Fprintln(os.Stderr, "usage: probe-agent upgrade-watch <state file>")
+				fmt.Fprintln(os.Stderr, "usage: vartio-agent upgrade-watch <state file>")
 				os.Exit(2)
 			}
 			os.Exit(runWatch(os.Args[2]))
@@ -57,7 +62,7 @@ func main() {
 	}
 	logFile := setupLog()
 	cfg := loadConfig()
-	log.Printf("probe-agent %s control=%s device=%s bios=%s runner=%s", agentVersion, cfg.URL, cfg.DeviceID, cfg.BiosUUID, runnerName())
+	log.Printf("vartio-agent %s control=%s device=%s bios=%s runner=%s", agentVersion, cfg.URL, cfg.DeviceID, cfg.BiosUUID, runnerName())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if trayMode {
@@ -71,13 +76,16 @@ func main() {
 
 func loadEnv() {
 	_ = godotenv.Load()
+	names := []string{"vartio-agent.env", "probe-agent.env", "agent.env"}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		_ = godotenv.Load(filepath.Join(dir, "probe-agent.env"))
-		_ = godotenv.Load(filepath.Join(dir, "agent.env"))
+		for _, name := range names {
+			_ = godotenv.Load(filepath.Join(dir, name))
+		}
 	}
-	_ = godotenv.Load("probe-agent.env")
-	_ = godotenv.Load("agent.env")
+	for _, name := range names {
+		_ = godotenv.Load(name)
+	}
 }
 
 type config struct {
@@ -85,7 +93,7 @@ type config struct {
 	Token    string
 	BiosUUID string
 	DeviceID string
-	Device   *guest.DeviceFacts
+	Device   *entities.DeviceFacts
 	Watches  []watchSpec
 }
 
@@ -95,15 +103,15 @@ type watchSpec struct {
 }
 
 func loadConfig() config {
-	url := strings.TrimSpace(os.Getenv("GUEST_CONTROL_URL"))
+	url := strings.TrimSpace(getenv("VARTIO_AGENT_CONTROL_URL", "GUEST_CONTROL_URL"))
 	if url == "" {
 		url = "ws://127.0.0.1:8766/v1/probe/connect"
 	}
-	token := os.Getenv("GUEST_TOKEN")
+	token := getenv("VARTIO_AGENT_TOKEN", "GUEST_TOKEN")
 	if token == "" {
 		token = "dev"
 	}
-	bios := strings.TrimSpace(os.Getenv("GUEST_BIOS_UUID"))
+	bios := strings.TrimSpace(getenv("VARTIO_AGENT_BIOS_UUID", "GUEST_BIOS_UUID"))
 	if bios == "" {
 		if id, err := readBIOSUUID(); err == nil {
 			bios = id
@@ -113,10 +121,10 @@ func loadConfig() config {
 		}
 	}
 	var watches []watchSpec
-	for _, n := range splitCSV(os.Getenv("GUEST_WATCH_PROCS")) {
+	for _, n := range splitCSV(getenv("VARTIO_AGENT_WATCH_PROCS", "GUEST_WATCH_PROCS")) {
 		watches = append(watches, watchSpec{Kind: "process", Name: n})
 	}
-	for _, n := range splitCSV(os.Getenv("GUEST_WATCH_SERVICES")) {
+	for _, n := range splitCSV(getenv("VARTIO_AGENT_WATCH_SERVICES", "GUEST_WATCH_SERVICES")) {
 		watches = append(watches, watchSpec{Kind: "service", Name: n})
 	}
 	id, facts := deviceID()

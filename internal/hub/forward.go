@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -18,7 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 // Forward publishes a TCP service on an agent's machine as a port on the hub
@@ -157,8 +158,8 @@ func (h *Hub) AddForward(ctx context.Context, req ForwardRequest) (ForwardInfo, 
 		return ForwardInfo{}, common.ErrOffline()
 	}
 	info := s.info()
-	if !s.hello.Has(CapTunnelTCP) {
-		return ForwardInfo{}, errCapMissing(CapTunnelTCP)
+	if !s.hello.Has(entities.CapTunnelTCP) {
+		return ForwardInfo{}, errCapMissing(entities.CapTunnelTCP)
 	}
 	h.fw.mu.Lock()
 	err = h.portFreeLocked(req.Port)
@@ -166,7 +167,7 @@ func (h *Hub) AddForward(ctx context.Context, req ForwardRequest) (ForwardInfo, 
 	if err != nil {
 		return ForwardInfo{}, err
 	}
-	probe, err := h.dialTCP(ctx, info.DeviceID, req.Target, "forward:test", TunnelIdle)
+	probe, err := h.dialTCP(ctx, info.DeviceID, req.Target, "forward:test", entities.TunnelIdle)
 	if err != nil {
 		return ForwardInfo{}, err
 	}
@@ -260,7 +261,7 @@ func (h *Hub) serveForward(f *forward, c net.Conn) {
 	defer up.Close()
 	done := make(chan struct{}, 2)
 	pump := func(dst, src net.Conn, n *atomic.Int64) {
-		buf := make([]byte, TunnelChunk)
+		buf := make([]byte, entities.TunnelChunk)
 		for {
 			k, err := src.Read(buf)
 			if k > 0 {
@@ -380,10 +381,10 @@ func (h *Hub) saveForwardsLocked() {
 // ---------- HTTP ----------
 
 func (h *Hub) registerForwards(mux *http.ServeMux) {
-	mux.HandleFunc("GET "+PathForwards, h.wrap(func(w http.ResponseWriter, r *http.Request) error {
+	mux.HandleFunc("GET "+entities.PathForwards, h.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		return writeJSON(w, map[string]any{"forwards": h.Forwards(r.URL.Query().Get("agent")), "binds": ForwardBinds})
 	}))
-	mux.HandleFunc("POST "+PathForwards, h.wrap(func(w http.ResponseWriter, r *http.Request) error {
+	mux.HandleFunc("POST "+entities.PathForwards, h.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var req ForwardRequest
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 			return common.ErrBad("invalid json")
@@ -405,7 +406,7 @@ func (h *Hub) registerForwards(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusCreated)
 		return json.NewEncoder(w).Encode(out)
 	}))
-	mux.HandleFunc("DELETE "+PathForwards+"/{fid}", h.wrap(func(w http.ResponseWriter, r *http.Request) error {
+	mux.HandleFunc("DELETE "+entities.PathForwards+"/{fid}", h.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		f, err := h.RemoveForward(r.PathValue("fid"))
 		if err != nil {
 			return err

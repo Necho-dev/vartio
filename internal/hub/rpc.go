@@ -1,27 +1,28 @@
-package guest
+package hub
 
 import (
 	"context"
 	"encoding/json"
 	"strings"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
-func (h *Hub) Health(ctx context.Context, bios string) (Health, error) {
-	raw, err := h.Call(ctx, bios, MethodHealth, nil)
+func (h *Hub) Health(ctx context.Context, bios string) (entities.Health, error) {
+	raw, err := h.Call(ctx, bios, entities.MethodHealth, nil)
 	if err != nil {
-		return Health{}, err
+		return entities.Health{}, err
 	}
-	return decode[Health](raw)
+	return decode[entities.Health](raw)
 }
 
-func (h *Hub) Metrics(ctx context.Context, bios string) (Metrics, error) {
-	raw, err := h.Call(ctx, bios, MethodMetrics, nil)
+func (h *Hub) Metrics(ctx context.Context, bios string) (entities.Metrics, error) {
+	raw, err := h.Call(ctx, bios, entities.MethodMetrics, nil)
 	if err != nil {
-		return Metrics{}, err
+		return entities.Metrics{}, err
 	}
-	return decode[Metrics](raw)
+	return decode[entities.Metrics](raw)
 }
 
 // DockerInspect returns a container's inspect document (Config.Env removed by the agent).
@@ -37,10 +38,10 @@ func (h *Hub) DockerInspect(ctx context.Context, key, container string) (json.Ra
 	if s == nil {
 		return nil, common.ErrOffline()
 	}
-	if !s.hello.Has(CapDockerInspect) {
-		return nil, errCapMissing(CapDockerInspect)
+	if !s.hello.Has(entities.CapDockerInspect) {
+		return nil, errCapMissing(entities.CapDockerInspect)
 	}
-	return h.Call(ctx, key, MethodDockerInspect, DockerInspectRequest{Container: container})
+	return h.Call(ctx, key, entities.MethodDockerInspect, entities.DockerInspectRequest{Container: container})
 }
 
 func (h *Hub) dockerReady(key string) (*session, error) {
@@ -51,147 +52,147 @@ func (h *Hub) dockerReady(key string) (*session, error) {
 	if s == nil {
 		return nil, common.ErrOffline()
 	}
-	if !s.hello.Has(CapDocker) {
-		return nil, errCapMissing(CapDocker)
+	if !s.hello.Has(entities.CapDocker) {
+		return nil, errCapMissing(entities.CapDocker)
 	}
 	return s, nil
 }
 
 // DockerLogs returns a timestamped snapshot of a container's logs.
-func (h *Hub) DockerLogs(ctx context.Context, key, container string, tail int, since, until int64) (DockerLogsResult, error) {
+func (h *Hub) DockerLogs(ctx context.Context, key, container string, tail int, since, until int64) (entities.DockerLogsResult, error) {
 	container = strings.TrimSpace(container)
 	if container == "" {
-		return DockerLogsResult{}, common.ErrBad("container required")
+		return entities.DockerLogsResult{}, common.ErrBad("container required")
 	}
 	if _, err := h.dockerReady(key); err != nil {
-		return DockerLogsResult{}, err
+		return entities.DockerLogsResult{}, err
 	}
-	raw, err := h.Call(ctx, key, MethodDockerLogs, DockerLogsRequest{Container: container, Tail: tail, Since: since, Until: until})
+	raw, err := h.Call(ctx, key, entities.MethodDockerLogs, entities.DockerLogsRequest{Container: container, Tail: tail, Since: since, Until: until})
 	if err != nil {
-		return DockerLogsResult{}, err
+		return entities.DockerLogsResult{}, err
 	}
-	return decode[DockerLogsResult](raw)
+	return decode[entities.DockerLogsResult](raw)
 }
 
 // DockerCompose returns the compose file for a project, if the agent can read it.
-func (h *Hub) DockerCompose(ctx context.Context, key, project string) (DockerComposeResult, error) {
+func (h *Hub) DockerCompose(ctx context.Context, key, project string) (entities.DockerComposeResult, error) {
 	project = strings.TrimSpace(project)
 	if project == "" {
-		return DockerComposeResult{}, common.ErrBad("project required")
+		return entities.DockerComposeResult{}, common.ErrBad("project required")
 	}
 	if _, err := h.dockerReady(key); err != nil {
-		return DockerComposeResult{}, err
+		return entities.DockerComposeResult{}, err
 	}
-	raw, err := h.Call(ctx, key, MethodDockerCompose, DockerComposeRequest{Project: project})
+	raw, err := h.Call(ctx, key, entities.MethodDockerCompose, entities.DockerComposeRequest{Project: project})
 	if err != nil {
-		return DockerComposeResult{}, err
+		return entities.DockerComposeResult{}, err
 	}
-	return decode[DockerComposeResult](raw)
+	return decode[entities.DockerComposeResult](raw)
 }
 
-func (h *Hub) Procs(ctx context.Context, bios string) ([]ProcInfo, error) {
-	raw, err := h.Call(ctx, bios, MethodProcsList, nil)
+func (h *Hub) Procs(ctx context.Context, bios string) ([]entities.ProcInfo, error) {
+	raw, err := h.Call(ctx, bios, entities.MethodProcsList, nil)
 	if err != nil {
 		return nil, err
 	}
-	return decode[[]ProcInfo](raw)
+	return decode[[]entities.ProcInfo](raw)
 }
 
-func (h *Hub) ProcAction(ctx context.Context, bios, name, action string, confirm bool) (ActionResult, error) {
+func (h *Hub) ProcAction(ctx context.Context, bios, name, action string, confirm bool) (entities.ActionResult, error) {
 	if err := common.RequireConfirm(confirm); err != nil {
-		return ActionResult{}, err
+		return entities.ActionResult{}, err
 	}
 	switch action {
 	case "start", "stop", "kill":
 	default:
-		return ActionResult{}, common.ErrBad("action must be start, stop, or kill")
+		return entities.ActionResult{}, common.ErrBad("action must be start, stop, or kill")
 	}
 	if name == "" {
-		return ActionResult{}, common.ErrBad("name required")
+		return entities.ActionResult{}, common.ErrBad("name required")
 	}
-	raw, err := h.Call(ctx, bios, MethodProcsAction, ActionRequest{Name: name, Action: action})
+	raw, err := h.Call(ctx, bios, entities.MethodProcsAction, entities.ActionRequest{Name: name, Action: action})
 	if err != nil {
-		return ActionResult{}, err
+		return entities.ActionResult{}, err
 	}
-	return decode[ActionResult](raw)
+	return decode[entities.ActionResult](raw)
 }
 
-func (h *Hub) Services(ctx context.Context, bios string) ([]ServiceInfo, error) {
-	raw, err := h.Call(ctx, bios, MethodServicesList, nil)
+func (h *Hub) Services(ctx context.Context, bios string) ([]entities.ServiceInfo, error) {
+	raw, err := h.Call(ctx, bios, entities.MethodServicesList, nil)
 	if err != nil {
 		return nil, err
 	}
-	return decode[[]ServiceInfo](raw)
+	return decode[[]entities.ServiceInfo](raw)
 }
 
-func (h *Hub) ServiceAction(ctx context.Context, bios, name, action string, confirm bool) (ActionResult, error) {
+func (h *Hub) ServiceAction(ctx context.Context, bios, name, action string, confirm bool) (entities.ActionResult, error) {
 	if err := common.RequireConfirm(confirm); err != nil {
-		return ActionResult{}, err
+		return entities.ActionResult{}, err
 	}
 	switch action {
 	case "start", "stop", "restart":
 	default:
-		return ActionResult{}, common.ErrBad("action must be start, stop, or restart")
+		return entities.ActionResult{}, common.ErrBad("action must be start, stop, or restart")
 	}
 	if name == "" {
-		return ActionResult{}, common.ErrBad("name required")
+		return entities.ActionResult{}, common.ErrBad("name required")
 	}
-	raw, err := h.Call(ctx, bios, MethodServicesAction, ActionRequest{Name: name, Action: action})
+	raw, err := h.Call(ctx, bios, entities.MethodServicesAction, entities.ActionRequest{Name: name, Action: action})
 	if err != nil {
-		return ActionResult{}, err
+		return entities.ActionResult{}, err
 	}
-	return decode[ActionResult](raw)
+	return decode[entities.ActionResult](raw)
 }
 
-func (h *Hub) Exec(ctx context.Context, bios string, req ExecRequest) (ExecResult, error) {
+func (h *Hub) Exec(ctx context.Context, bios string, req entities.ExecRequest) (entities.ExecResult, error) {
 	if req.Command == "" {
-		return ExecResult{}, common.ErrBad("command required")
+		return entities.ExecResult{}, common.ErrBad("command required")
 	}
-	raw, err := h.Call(ctx, bios, MethodExec, req)
+	raw, err := h.Call(ctx, bios, entities.MethodExec, req)
 	if err != nil {
-		return ExecResult{}, err
+		return entities.ExecResult{}, err
 	}
-	return decode[ExecResult](raw)
+	return decode[entities.ExecResult](raw)
 }
 
-func (h *Hub) Power(ctx context.Context, bios, action string, confirm bool) (PowerResult, error) {
+func (h *Hub) Power(ctx context.Context, bios, action string, confirm bool) (entities.PowerResult, error) {
 	if err := common.RequireConfirm(confirm); err != nil {
-		return PowerResult{}, err
+		return entities.PowerResult{}, err
 	}
 	switch action {
 	case "shutdown", "reboot":
 	default:
-		return PowerResult{}, common.ErrBad("action must be shutdown or reboot")
+		return entities.PowerResult{}, common.ErrBad("action must be shutdown or reboot")
 	}
-	raw, err := h.Call(ctx, bios, MethodPower, PowerRequest{Action: action})
+	raw, err := h.Call(ctx, bios, entities.MethodPower, entities.PowerRequest{Action: action})
 	if err != nil {
-		return PowerResult{}, err
+		return entities.PowerResult{}, err
 	}
-	return decode[PowerResult](raw)
+	return decode[entities.PowerResult](raw)
 }
 
-func (h *Hub) FilesList(ctx context.Context, bios, path string) (FilesListResult, error) {
-	raw, err := h.Call(ctx, bios, MethodFilesList, FilesListRequest{Path: path})
+func (h *Hub) FilesList(ctx context.Context, bios, path string) (entities.FilesListResult, error) {
+	raw, err := h.Call(ctx, bios, entities.MethodFilesList, entities.FilesListRequest{Path: path})
 	if err != nil {
-		return FilesListResult{}, err
+		return entities.FilesListResult{}, err
 	}
-	out, err := decode[FilesListResult](raw)
+	out, err := decode[entities.FilesListResult](raw)
 	if err != nil {
-		return FilesListResult{}, err
+		return entities.FilesListResult{}, err
 	}
 	if out.Entries == nil {
-		out.Entries = []FileEntry{}
+		out.Entries = []entities.FileEntry{}
 	}
 	return out, nil
 }
 
-func (h *Hub) FileStat(ctx context.Context, bios, path string) (FilesGetResult, error) {
+func (h *Hub) FileStat(ctx context.Context, bios, path string) (entities.FilesGetResult, error) {
 	if path == "" {
-		return FilesGetResult{}, common.ErrBad("path required")
+		return entities.FilesGetResult{}, common.ErrBad("path required")
 	}
-	raw, err := h.Call(ctx, bios, MethodFilesGet, FilesGetRequest{Path: path, Stat: true})
+	raw, err := h.Call(ctx, bios, entities.MethodFilesGet, entities.FilesGetRequest{Path: path, Stat: true})
 	if err != nil {
-		return FilesGetResult{}, err
+		return entities.FilesGetResult{}, err
 	}
-	return decode[FilesGetResult](raw)
+	return decode[entities.FilesGetResult](raw)
 }

@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bytes"
@@ -7,11 +7,11 @@ import (
 	"os/exec"
 	"runtime"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func runExec(req guest.ExecRequest) guest.ExecResult {
-	timeout := guest.TimeoutFor(guest.MethodExec, req.TimeoutSec)
+func runExec(req entities.ExecRequest) entities.ExecResult {
+	timeout := entities.TimeoutFor(entities.MethodExec, req.TimeoutSec)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -55,7 +55,7 @@ func runExec(req guest.ExecRequest) guest.ExecResult {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	out := guest.ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	out := entities.ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if ctx.Err() == context.DeadlineExceeded {
 		out.TimedOut = true
 		out.ExitCode = -1

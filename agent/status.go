@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"fmt"
@@ -103,11 +103,12 @@ func (l *rotLog) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// logPath is probe-agent.log next to the binary, or the user cache dir when
-// that directory is not writable.
+// logPath is the log next to the binary, or the user cache dir when that
+// directory is not writable. An existing probe-agent.log stays in use.
 func logPath() string {
 	if exe, err := selfExe(); err == nil {
-		p := filepath.Join(filepath.Dir(exe), "probe-agent.log")
+		dir := filepath.Dir(exe)
+		p := agentLogFile(dir)
 		if f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 			f.Close()
 			return p
@@ -117,15 +118,24 @@ func logPath() string {
 	if err != nil {
 		dir = os.TempDir()
 	}
-	dir = filepath.Join(dir, "probe-agent")
+	legacy := filepath.Join(dir, "probe-agent")
+	if st, err := os.Stat(legacy); err == nil && st.IsDir() {
+		dir = legacy
+	} else {
+		dir = filepath.Join(dir, "vartio")
+	}
 	_ = os.MkdirAll(dir, 0o755)
-	return filepath.Join(dir, "probe-agent.log")
+	return filepath.Join(dir, "vartio-agent.log")
+}
+
+func agentLogFile(dir string) string {
+	return existingFile(filepath.Join(dir, "vartio-agent.log"), filepath.Join(dir, "probe-agent.log"))
 }
 
 // setupLog sends the log to a file when nobody is watching stderr.
 // GUEST_LOG=stderr forces stderr, any other value is a file path.
 func setupLog() string {
-	path := os.Getenv("GUEST_LOG")
+	path := getenv("VARTIO_AGENT_LOG", "GUEST_LOG")
 	switch {
 	case path == "stderr":
 		return ""

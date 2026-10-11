@@ -1,11 +1,11 @@
-package guest
+package entities
 
 import (
 	"encoding/json"
 	"slices"
 	"time"
 
-	"govmomi-wmks/internal/release"
+	"vartio/internal/release"
 )
 
 const (

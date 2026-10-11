@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -12,7 +12,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 // Hub holds outbound agent sessions keyed by device id (Hello.Key). Control plane
@@ -23,11 +24,11 @@ type Hub struct {
 	// Ambiguous is optional. When true for a biosUuid, VM-scoped APIs return guest_unbound.
 	Ambiguous func(biosUUID string) bool
 	// OnConnect / OnDisconnect / OnReject / OnAudit are optional; set before the hub serves traffic.
-	OnConnect    func(SessionInfo)
-	OnDisconnect func(SessionInfo)
+	OnConnect    func(entities.SessionInfo)
+	OnDisconnect func(entities.SessionInfo)
 	// OnReject reports a refused hello: code is device_conflict (the same device id is
 	// already live) or an Auth refusal (credential_required, enrollment_disabled, unauthorized).
-	OnReject func(hello Hello, remote, code, reason string)
+	OnReject func(hello entities.Hello, remote, code, reason string)
 	// OnAudit receives operator actions performed through the probe API.
 	OnAudit func(Audit)
 	// Releases is where signed agent builds are offered from; nil disables upgrades.
@@ -38,7 +39,7 @@ type Hub struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	tickets  map[string]streamTicket
-	upgrades map[string]*UpgradeProgress
+	upgrades map[string]*entities.UpgradeProgress
 	fw       forwards
 }
 
@@ -55,7 +56,7 @@ type streamTicket struct {
 	ID        string
 	Key       string
 	Kind      string
-	Term      TermOpenRequest
+	Term      entities.TermOpenRequest
 	ExpiresAt time.Time
 }
 
@@ -64,7 +65,7 @@ func NewHub(token string) *Hub {
 		Token:    token,
 		sessions: map[string]*session{},
 		tickets:  map[string]streamTicket{},
-		upgrades: map[string]*UpgradeProgress{},
+		upgrades: map[string]*entities.UpgradeProgress{},
 	}
 }
 
@@ -73,18 +74,18 @@ func (h *Hub) Online(key string) bool {
 	return s != nil
 }
 
-func (h *Hub) Info(key string) (SessionInfo, bool) {
+func (h *Hub) Info(key string) (entities.SessionInfo, bool) {
 	s, _ := h.lookup(key)
 	if s == nil {
-		return SessionInfo{Online: false, BiosUUID: normUUID(key)}, false
+		return entities.SessionInfo{Online: false, BiosUUID: normUUID(key)}, false
 	}
 	return s.info(), true
 }
 
-func (h *Hub) List() []SessionInfo {
+func (h *Hub) List() []entities.SessionInfo {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]SessionInfo, 0, len(h.sessions))
+	out := make([]entities.SessionInfo, 0, len(h.sessions))
 	for _, s := range h.sessions {
 		out = append(out, s.info())
 	}
@@ -172,7 +173,7 @@ func (h *Hub) drop(s *session) {
 // admit refuses a hello whose device id belongs to a session that still answers
 // pings: that is a second machine with the same fingerprint, not a reconnect. A
 // half-open old session (agent already gone) is replaced.
-func (h *Hub) admit(hello Hello) error {
+func (h *Hub) admit(hello entities.Hello) error {
 	h.mu.Lock()
 	old := h.sessions[hello.Key()]
 	h.mu.Unlock()
@@ -182,11 +183,11 @@ func (h *Hub) admit(hello Hello) error {
 	return &RPCError{Code: "device_conflict", Message: "device id " + hello.Key() + " is already connected from " + old.remote}
 }
 
-func (h *Hub) accept(conn *websocket.Conn, hello Hello, remote string) *session {
+func (h *Hub) accept(conn *websocket.Conn, hello entities.Hello, remote string) *session {
 	s := newSession(conn, hello, remote)
 	key := hello.Key()
-	s.onUpgrade = func(st UpgradeStep) {
-		h.progress(key, func(p *UpgradeProgress) { p.Stage, p.Done, p.Total = st.Stage, st.Done, st.Total })
+	s.onUpgrade = func(st entities.UpgradeStep) {
+		h.progress(key, func(p *entities.UpgradeProgress) { p.Stage, p.Done, p.Total = st.Stage, st.Done, st.Total })
 	}
 	h.settleUpgrade(key, hello)
 	h.mu.Lock()
@@ -238,10 +239,10 @@ func (h *Hub) Call(ctx context.Context, key, method string, params any) (json.Ra
 		return nil, common.ErrOffline()
 	}
 	execSec := 0
-	if req, ok := params.(ExecRequest); ok {
+	if req, ok := params.(entities.ExecRequest); ok {
 		execSec = req.TimeoutSec
 	}
-	timeout := TimeoutFor(method, execSec)
+	timeout := entities.TimeoutFor(method, execSec)
 	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > timeout {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -260,24 +261,24 @@ func (h *Hub) Call(ctx context.Context, key, method string, params any) (json.Ra
 
 // IssueTerm hands out a terminal ticket. target picks a container's logs or a
 // shell in it (Mode, Container, Shell, Tail); the zero value is the agent's shell.
-func (h *Hub) IssueTerm(key string, target TermOpenRequest) (map[string]string, error) {
-	target = TermOpenRequest{Mode: target.Mode, Container: strings.TrimSpace(target.Container), Shell: strings.TrimSpace(target.Shell), Tail: target.Tail, Since: target.Since}
+func (h *Hub) IssueTerm(key string, target entities.TermOpenRequest) (map[string]string, error) {
+	target = entities.TermOpenRequest{Mode: target.Mode, Container: strings.TrimSpace(target.Container), Shell: strings.TrimSpace(target.Shell), Tail: target.Tail, Since: target.Since}
 	switch target.Mode {
 	case "":
-		target = TermOpenRequest{}
-	case TermLogs, TermExec:
+		target = entities.TermOpenRequest{}
+	case entities.TermLogs, entities.TermExec:
 		if target.Container == "" {
 			return nil, common.ErrBad("container required")
 		}
 	default:
 		return nil, common.ErrBad("mode must be logs or exec")
 	}
-	return h.issueStream(key, "term", PathTermWS, "open in a browser; one-shot, expires in 2 minutes. view/type shell only. ESXi WSS is never used.", func(s *session) (TermOpenRequest, error) {
+	return h.issueStream(key, "term", entities.PathTermWS, "open in a browser; one-shot, expires in 2 minutes. view/type shell only. ESXi WSS is never used.", func(s *session) (entities.TermOpenRequest, error) {
 		switch {
 		case target.Mode == "":
-		case !s.hello.Has(CapDocker):
-			return target, errCapMissing(CapDocker)
-		case target.Mode == TermExec && !s.hello.Has(CapDockerExec):
+		case !s.hello.Has(entities.CapDocker):
+			return target, errCapMissing(entities.CapDocker)
+		case target.Mode == entities.TermExec && !s.hello.Has(entities.CapDockerExec):
 			return target, &common.Error{Status: http.StatusForbidden, Code: "agent_policy", Message: "探针未开放容器终端（需 GUEST_DOCKER=rw）"}
 		}
 		return target, nil
@@ -285,10 +286,10 @@ func (h *Hub) IssueTerm(key string, target TermOpenRequest) (map[string]string, 
 }
 
 func (h *Hub) IssueDisplay(key string) (map[string]string, error) {
-	return h.issueStream(key, "display", PathDisplayWS, "view-only JPEG up to 10fps (quality=auto|smooth|hd on the ws URL); no input. one-shot, expires in 2 minutes. ESXi WSS is never used.", nil)
+	return h.issueStream(key, "display", entities.PathDisplayWS, "view-only JPEG up to 10fps (quality=auto|smooth|hd on the ws URL); no input. one-shot, expires in 2 minutes. ESXi WSS is never used.", nil)
 }
 
-func (h *Hub) issueStream(key, kind, path, note string, check func(*session) (TermOpenRequest, error)) (map[string]string, error) {
+func (h *Hub) issueStream(key, kind, path, note string, check func(*session) (entities.TermOpenRequest, error)) (map[string]string, error) {
 	if err := h.CheckBound(key); err != nil {
 		return nil, err
 	}
@@ -299,7 +300,7 @@ func (h *Hub) issueStream(key, kind, path, note string, check func(*session) (Te
 	if s == nil {
 		return nil, common.ErrOffline()
 	}
-	var target TermOpenRequest
+	var target entities.TermOpenRequest
 	if check != nil {
 		if target, err = check(s); err != nil {
 			return nil, err
@@ -316,7 +317,7 @@ func (h *Hub) issueStream(key, kind, path, note string, check func(*session) (Te
 			delete(h.tickets, k)
 		}
 	}
-	h.tickets[id] = streamTicket{ID: id, Key: s.hello.Key(), Kind: kind, Term: target, ExpiresAt: time.Now().Add(TicketTTL)}
+	h.tickets[id] = streamTicket{ID: id, Key: s.hello.Key(), Kind: kind, Term: target, ExpiresAt: time.Now().Add(entities.TicketTTL)}
 	h.mu.Unlock()
 	return map[string]string{
 		"ws":   path + "?id=" + id,

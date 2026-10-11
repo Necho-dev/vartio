@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package agent
 
 import (
 	"fmt"
@@ -9,10 +9,10 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func listServices() ([]guest.ServiceInfo, error) {
+func listServices() ([]entities.ServiceInfo, error) {
 	m, err := mgr.Connect()
 	if err != nil {
 		return nil, err
@@ -22,7 +22,7 @@ func listServices() ([]guest.ServiceInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]guest.ServiceInfo, 0, len(names))
+	out := make([]entities.ServiceInfo, 0, len(names))
 	for _, name := range names {
 		s, err := m.OpenService(name)
 		if err != nil {
@@ -33,7 +33,7 @@ func listServices() ([]guest.ServiceInfo, error) {
 		if err != nil {
 			continue
 		}
-		out = append(out, guest.ServiceInfo{Name: name, Status: svcState(st.State)})
+		out = append(out, entities.ServiceInfo{Name: name, Status: svcState(st.State)})
 	}
 	return out, nil
 }
@@ -56,25 +56,25 @@ func serviceAlive(name string) (bool, string) {
 	return st.State == svc.Running, svcState(st.State)
 }
 
-func serviceAction(req guest.ActionRequest) (guest.ActionResult, *guest.FrameError) {
+func serviceAction(req entities.ActionRequest) (entities.ActionResult, *entities.FrameError) {
 	m, err := mgr.Connect()
 	if err != nil {
-		return guest.ActionResult{}, asRPC(err)
+		return entities.ActionResult{}, asRPC(err)
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(req.Name)
 	if err != nil {
-		return guest.ActionResult{}, asRPC(err)
+		return entities.ActionResult{}, asRPC(err)
 	}
 	defer s.Close()
 	switch req.Action {
 	case "start":
 		if err := s.Start(); err != nil {
-			return guest.ActionResult{}, asRPC(err)
+			return entities.ActionResult{}, asRPC(err)
 		}
 	case "stop":
 		if _, err := s.Control(svc.Stop); err != nil {
-			return guest.ActionResult{}, asRPC(err)
+			return entities.ActionResult{}, asRPC(err)
 		}
 	case "restart":
 		_, _ = s.Control(svc.Stop)
@@ -87,12 +87,12 @@ func serviceAction(req guest.ActionRequest) (guest.ActionResult, *guest.FrameErr
 			time.Sleep(200 * time.Millisecond)
 		}
 		if err := s.Start(); err != nil {
-			return guest.ActionResult{}, asRPC(err)
+			return entities.ActionResult{}, asRPC(err)
 		}
 	default:
-		return guest.ActionResult{}, bad("action must be start, stop, or restart")
+		return entities.ActionResult{}, bad("action must be start, stop, or restart")
 	}
-	return guest.ActionResult{OK: true, Name: req.Name, Action: req.Action}, nil
+	return entities.ActionResult{OK: true, Name: req.Name, Action: req.Action}, nil
 }
 
 func svcState(s svc.State) string {

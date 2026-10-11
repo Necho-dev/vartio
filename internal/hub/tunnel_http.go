@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import "net/http"
 

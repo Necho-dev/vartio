@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"os"
@@ -13,7 +13,7 @@ import (
 // disks, os-release and machine-id.
 
 var inContainer = sync.OnceValue(func() bool {
-	if os.Getenv("PROBE_AGENT_RUNNER") == "docker" {
+	if getenv("VARTIO_AGENT_RUNNER", "PROBE_AGENT_RUNNER") == "docker" {
 		return true
 	}
 	for _, p := range []string{"/.dockerenv", "/run/.containerenv"} {
@@ -26,7 +26,7 @@ var inContainer = sync.OnceValue(func() bool {
 
 // hostRoot is GUEST_HOST_ROOT, where the host's / is mounted ("" when unset).
 func hostRoot() string {
-	r := strings.TrimSpace(os.Getenv("GUEST_HOST_ROOT"))
+	r := strings.TrimSpace(getenv("VARTIO_AGENT_HOST_ROOT", "GUEST_HOST_ROOT"))
 	if r == "" || r == "/" {
 		return ""
 	}
@@ -51,7 +51,7 @@ func applyHostRoot() {
 // hostNS (GUEST_HOST_NS=1; needs pid: host and privileged) runs terminals and
 // commands in the host's namespaces instead of the agent container's.
 func hostNS() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("GUEST_HOST_NS")))
+	v := strings.ToLower(strings.TrimSpace(getenv("VARTIO_AGENT_HOST_NS", "GUEST_HOST_NS")))
 	return v == "1" || v == "true" || v == "on"
 }
 
@@ -64,10 +64,13 @@ func hostCommand(name string, args ...string) (string, []string) {
 
 // stateDir keeps container-local identity across image upgrades; mount a volume there.
 func stateDir() string {
-	if d := strings.TrimSpace(os.Getenv("GUEST_STATE_DIR")); d != "" {
+	if d := strings.TrimSpace(getenv("VARTIO_AGENT_STATE_DIR", "GUEST_STATE_DIR")); d != "" {
 		return d
 	}
-	return "/var/lib/probe-agent"
+	if st, err := os.Stat("/var/lib/probe-agent"); err == nil && st.IsDir() {
+		return "/var/lib/probe-agent"
+	}
+	return "/var/lib/vartio-agent"
 }
 
 // containerMachineID stands in for /etc/machine-id when the host's is not

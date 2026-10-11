@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 func TestDemuxLogs(t *testing.T) {
@@ -59,7 +59,7 @@ func TestHealthAndStats(t *testing.T) {
 		"networks":{"eth0":{"rx_bytes":10,"tx_bytes":20},"eth1":{"rx_bytes":1,"tx_bytes":2}},
 		"blkio_stats":{"io_service_bytes_recursive":[{"op":"read","value":5},{"op":"Write","value":7},{"op":"read","value":1}]},
 		"pids_stats":{"current":17}}`), &st)
-	var c guest.ContainerStat
+	var c entities.ContainerStat
 	applyStats(&c, st, engineInfo{major: 29})
 	if !c.Stats || c.CPUNs != 700 || c.SysNs != 9000 || c.CPUs != 8 || c.MemUsed != 130985984-10366976 || c.MemLimit != 8319770624 ||
 		c.NetRx != 11 || c.NetTx != 22 || c.BlkRead != 6 || c.BlkWrite != 7 || c.Pids != 17 {
@@ -94,14 +94,14 @@ func TestEngineQuirks(t *testing.T) {
 	read := `"read":"2026-10-10T15:00:00.5Z"`
 	var st apiStats
 	_ = json.Unmarshal([]byte(`{`+read+`,"cpu_stats":{"cpu_usage":{"total_usage":5000},"system_cpu_usage":777,"online_cpus":4},"memory_stats":{"usage":100}}`), &st)
-	var c guest.ContainerStat
+	var c entities.ContainerStat
 	applyStats(&c, st, podman)
 	if c.SysNs != 0 || c.CPUNs != 5000 || c.ReadNs == 0 {
 		t.Fatalf("podman stats must use wall time: %+v", c)
 	}
 	st = apiStats{}
 	_ = json.Unmarshal([]byte(`{`+read+`,"num_procs":2,"cpu_stats":{"cpu_usage":{"total_usage":30}},"memory_stats":{"privateworkingset":4096}}`), &st)
-	c = guest.ContainerStat{}
+	c = entities.ContainerStat{}
 	applyStats(&c, st, engineInfo{windows: true})
 	if c.CPUNs != 3000 || c.SysNs != 0 || c.CPUs != 2 || c.MemUsed != 4096 {
 		t.Fatalf("windows stats %+v", c)
@@ -202,7 +202,7 @@ func TestLiveDocker(t *testing.T) {
 	if info == nil || info.Error != "" || info.Version == "" || info.Running < 1 {
 		t.Fatalf("metrics %+v", info)
 	}
-	var mine *guest.ContainerStat
+	var mine *entities.ContainerStat
 	for i := range info.Containers {
 		if info.Containers[i].Name == name {
 			mine = &info.Containers[i]
@@ -215,7 +215,7 @@ func TestLiveDocker(t *testing.T) {
 	t.Run("logs", func(t *testing.T) {
 		var mu sync.Mutex
 		var buf bytes.Buffer
-		_, closer, _, err := startDockerLogs(guest.TermOpenRequest{Container: name, Tail: 5}, func(p []byte) {
+		_, closer, _, err := startDockerLogs(entities.TermOpenRequest{Container: name, Tail: 5}, func(p []byte) {
 			mu.Lock()
 			buf.Write(p)
 			mu.Unlock()
@@ -234,21 +234,21 @@ func TestLiveDocker(t *testing.T) {
 		if strings.Contains(strings.ReplaceAll(buf.String(), "\r\n", ""), "\n") {
 			t.Fatalf("bare LF in %q", buf.String())
 		}
-		if _, _, _, err := startDockerLogs(guest.TermOpenRequest{Container: "no-such-container-xyz"}, func([]byte) {}, func() {}); err == nil {
+		if _, _, _, err := startDockerLogs(entities.TermOpenRequest{Container: "no-such-container-xyz"}, func([]byte) {}, func() {}); err == nil {
 			t.Fatal("missing container: want error")
 		}
 	})
 
 	t.Run("exec", func(t *testing.T) {
 		t.Setenv("GUEST_DOCKER", "ro")
-		if _, _, _, err := startDockerExec(guest.TermOpenRequest{Container: name}, 80, 24, func([]byte) {}, func() {}); err == nil {
+		if _, _, _, err := startDockerExec(entities.TermOpenRequest{Container: name}, 80, 24, func([]byte) {}, func() {}); err == nil {
 			t.Fatal("ro: want agent_policy")
 		}
 		t.Setenv("GUEST_DOCKER", "rw")
 		var mu sync.Mutex
 		var buf bytes.Buffer
 		exited := make(chan struct{})
-		stdin, closer, resize, err := startDockerExec(guest.TermOpenRequest{Container: name}, 100, 30, func(p []byte) {
+		stdin, closer, resize, err := startDockerExec(entities.TermOpenRequest{Container: name}, 100, 30, func(p []byte) {
 			mu.Lock()
 			buf.Write(p)
 			mu.Unlock()

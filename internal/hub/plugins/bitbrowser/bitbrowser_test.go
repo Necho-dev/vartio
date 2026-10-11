@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"govmomi-wmks/internal/guest"
-	"govmomi-wmks/internal/plugin"
+	"vartio/internal/entities"
+	"vartio/internal/hub/plugins"
 )
 
 // fakeHost dials the fake BitBrowser directly instead of through an agent.
@@ -22,9 +22,9 @@ type fakeHost struct {
 	audits []string
 }
 
-func (h *fakeHost) Agents() []guest.SessionInfo { return []guest.SessionInfo{{DeviceID: "dev1"}} }
-func (h *fakeHost) Agent(id string) (guest.SessionInfo, bool) {
-	return guest.SessionInfo{DeviceID: id, Online: true}, id == "dev1"
+func (h *fakeHost) Agents() []entities.SessionInfo { return []entities.SessionInfo{{DeviceID: "dev1"}} }
+func (h *fakeHost) Agent(id string) (entities.SessionInfo, bool) {
+	return entities.SessionInfo{DeviceID: id, Online: true}, id == "dev1"
 }
 func (h *fakeHost) DialTCP(ctx context.Context, _, _ string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "tcp", h.addr)
@@ -80,7 +80,7 @@ func setup(t *testing.T) (*httptest.Server, *fakeHost, chan seen) {
 	mux := http.NewServeMux()
 	// probe-hub serves its monitor page on "GET /"; plugin routes must not conflict with it.
 	mux.HandleFunc("GET /", http.NotFound)
-	p.Routes(mux, plugin.PathPrefix+"/bitbrowser")
+	p.Routes(mux, plugins.PathPrefix+"/bitbrowser")
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, host, got
@@ -138,7 +138,7 @@ func TestSpecOperations(t *testing.T) {
 
 func TestCallValidatesForwardsAndAudits(t *testing.T) {
 	srv, host, got := setup(t)
-	base := srv.URL + plugin.PathPrefix + "/bitbrowser/agents/dev1"
+	base := srv.URL + plugins.PathPrefix + "/bitbrowser/agents/dev1"
 
 	code, body := do(t, "POST", base+"/call/browserList", `{"page":0}`, nil)
 	if code != 400 || !strings.Contains(body, "pageSize") {
@@ -193,7 +193,7 @@ func TestCallValidatesForwardsAndAudits(t *testing.T) {
 
 func TestPassthroughAndStatus(t *testing.T) {
 	srv, _, got := setup(t)
-	base := srv.URL + plugin.PathPrefix + "/bitbrowser/agents/dev1"
+	base := srv.URL + plugins.PathPrefix + "/bitbrowser/agents/dev1"
 
 	code, body := do(t, "POST", base+"/api/browser/ports", `{}`, map[string]string{"x-api-key": "k"})
 	if s := <-got; code != 200 || s.path != "/browser/ports" || s.key != "k" || !strings.Contains(body, "success") {
@@ -216,12 +216,12 @@ func TestPassthroughAndStatus(t *testing.T) {
 	if code != 200 || !st.Reachable || st.Message != "the server is running good." {
 		t.Fatalf("status %d %s", code, body)
 	}
-	code, _ = do(t, "GET", srv.URL+plugin.PathPrefix+"/bitbrowser/agents/ghost/status", "", nil)
+	code, _ = do(t, "GET", srv.URL+plugins.PathPrefix+"/bitbrowser/agents/ghost/status", "", nil)
 	if code != 409 {
 		t.Fatalf("offline agent status: %d", code)
 	}
 
-	code, body = do(t, "GET", srv.URL+plugin.PathPrefix+"/bitbrowser/openapi.json", "", nil)
+	code, body = do(t, "GET", srv.URL+plugins.PathPrefix+"/bitbrowser/openapi.json", "", nil)
 	var doc map[string]any
 	if code != 200 || json.Unmarshal([]byte(body), &doc) != nil || doc["openapi"] != "3.1.0" {
 		t.Fatalf("openapi %d", code)

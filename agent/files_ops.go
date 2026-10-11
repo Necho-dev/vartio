@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"archive/zip"
@@ -12,43 +12,43 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func filesOp(params json.RawMessage) (guest.FilesOpResult, *guest.FrameError) {
-	var req guest.FilesOpRequest
+func filesOp(params json.RawMessage) (entities.FilesOpResult, *entities.FrameError) {
+	var req entities.FilesOpRequest
 	if err := json.Unmarshal(params, &req); err != nil || strings.TrimSpace(req.Path) == "" {
-		return guest.FilesOpResult{}, bad("op and path required")
+		return entities.FilesOpResult{}, bad("op and path required")
 	}
 	abs, ferr := resolveGuestPath(req.Path)
 	if ferr != nil {
-		return guest.FilesOpResult{}, ferr
+		return entities.FilesOpResult{}, ferr
 	}
 	switch req.Op {
-	case guest.FileOpMkdir:
+	case entities.FileOpMkdir:
 		if err := os.MkdirAll(abs, 0o755); err != nil {
-			return guest.FilesOpResult{}, asRPC(err)
+			return entities.FilesOpResult{}, asRPC(err)
 		}
-		return guest.FilesOpResult{OK: true, Path: abs}, nil
-	case guest.FileOpRename:
+		return entities.FilesOpResult{OK: true, Path: abs}, nil
+	case entities.FileOpRename:
 		return fileRename(abs, req.To)
-	case guest.FileOpDelete:
+	case entities.FileOpDelete:
 		return fileDelete(abs, req.Confirm)
-	case guest.FileOpTrash:
+	case entities.FileOpTrash:
 		if protectedPath(abs) {
-			return guest.FilesOpResult{}, bad("refusing to delete a root or home directory")
+			return entities.FilesOpResult{}, bad("refusing to delete a root or home directory")
 		}
 		if _, err := os.Lstat(abs); err != nil {
-			return guest.FilesOpResult{}, notFoundOr(err, abs)
+			return entities.FilesOpResult{}, notFoundOr(err, abs)
 		}
 		if ferr := moveToTrash(abs); ferr != nil {
-			return guest.FilesOpResult{}, ferr
+			return entities.FilesOpResult{}, ferr
 		}
-		return guest.FilesOpResult{OK: true, Path: abs, Count: 1}, nil
-	case guest.FileOpZip:
+		return entities.FilesOpResult{OK: true, Path: abs, Count: 1}, nil
+	case entities.FileOpZip:
 		return fileZip(abs)
 	default:
-		return guest.FilesOpResult{}, bad("unknown op " + req.Op)
+		return entities.FilesOpResult{}, bad("unknown op " + req.Op)
 	}
 }
 
@@ -61,81 +61,81 @@ func protectedPath(abs string) bool {
 	return home != "" && strings.EqualFold(filepath.Clean(home), abs)
 }
 
-func fileRename(abs, to string) (guest.FilesOpResult, *guest.FrameError) {
+func fileRename(abs, to string) (entities.FilesOpResult, *entities.FrameError) {
 	to = strings.TrimSpace(to)
 	if to == "" || strings.ContainsRune(to, 0) {
-		return guest.FilesOpResult{}, bad("to required")
+		return entities.FilesOpResult{}, bad("to required")
 	}
 	if protectedPath(abs) {
-		return guest.FilesOpResult{}, bad("refusing to move a root or home directory")
+		return entities.FilesOpResult{}, bad("refusing to move a root or home directory")
 	}
 	dst := to
 	if !strings.ContainsAny(to, `/\`) {
 		dst = filepath.Join(filepath.Dir(abs), to)
 	} else {
-		var ferr *guest.FrameError
+		var ferr *entities.FrameError
 		if dst, ferr = resolveGuestPath(to); ferr != nil {
-			return guest.FilesOpResult{}, ferr
+			return entities.FilesOpResult{}, ferr
 		}
 	}
 	if _, err := os.Lstat(abs); err != nil {
-		return guest.FilesOpResult{}, notFoundOr(err, abs)
+		return entities.FilesOpResult{}, notFoundOr(err, abs)
 	}
 	// Case-only renames on case-insensitive filesystems hit the same file.
 	if _, err := os.Lstat(dst); err == nil && !strings.EqualFold(abs, dst) {
-		return guest.FilesOpResult{}, &guest.FrameError{Code: "conflict", Message: dst + " already exists"}
+		return entities.FilesOpResult{}, &entities.FrameError{Code: "conflict", Message: dst + " already exists"}
 	}
 	if err := os.Rename(abs, dst); err != nil {
-		return guest.FilesOpResult{}, asRPC(err)
+		return entities.FilesOpResult{}, asRPC(err)
 	}
-	return guest.FilesOpResult{OK: true, Path: dst}, nil
+	return entities.FilesOpResult{OK: true, Path: dst}, nil
 }
 
-func fileDelete(abs string, confirm bool) (guest.FilesOpResult, *guest.FrameError) {
+func fileDelete(abs string, confirm bool) (entities.FilesOpResult, *entities.FrameError) {
 	if protectedPath(abs) {
-		return guest.FilesOpResult{}, bad("refusing to delete a root or home directory")
+		return entities.FilesOpResult{}, bad("refusing to delete a root or home directory")
 	}
 	st, err := os.Lstat(abs)
 	if err != nil {
-		return guest.FilesOpResult{}, notFoundOr(err, abs)
+		return entities.FilesOpResult{}, notFoundOr(err, abs)
 	}
 	if !st.IsDir() {
 		if err := os.Remove(abs); err != nil {
-			return guest.FilesOpResult{}, asRPC(err)
+			return entities.FilesOpResult{}, asRPC(err)
 		}
-		return guest.FilesOpResult{OK: true, Path: abs, Count: 1}, nil
+		return entities.FilesOpResult{OK: true, Path: abs, Count: 1}, nil
 	}
 	if err := os.Remove(abs); err == nil {
-		return guest.FilesOpResult{OK: true, Path: abs, Count: 1}, nil
+		return entities.FilesOpResult{OK: true, Path: abs, Count: 1}, nil
 	}
 	if !confirm {
-		return guest.FilesOpResult{}, &guest.FrameError{Code: "confirm_required", Message: "directory is not empty"}
+		return entities.FilesOpResult{}, &entities.FrameError{Code: "confirm_required", Message: "directory is not empty"}
 	}
 	n := 0
 	_ = filepath.WalkDir(abs, func(string, fs.DirEntry, error) error { n++; return nil })
 	if err := os.RemoveAll(abs); err != nil {
-		return guest.FilesOpResult{}, asRPC(err)
+		return entities.FilesOpResult{}, asRPC(err)
 	}
-	return guest.FilesOpResult{OK: true, Path: abs, Count: n}, nil
+	return entities.FilesOpResult{OK: true, Path: abs, Count: n}, nil
 }
 
 // fileZip archives a directory into <staging>/zip-<ts>/<name>.zip; the caller
 // downloads it and deletes the zip-<ts> directory.
-func fileZip(abs string) (guest.FilesOpResult, *guest.FrameError) {
+func fileZip(abs string) (entities.FilesOpResult, *entities.FrameError) {
 	st, err := os.Stat(abs)
 	if err != nil {
-		return guest.FilesOpResult{}, notFoundOr(err, abs)
+		return entities.FilesOpResult{}, notFoundOr(err, abs)
 	}
 	if !st.IsDir() {
-		return guest.FilesOpResult{}, bad("zip expects a directory")
+		return entities.FilesOpResult{}, bad("zip expects a directory")
 	}
 	stage, err := ensureStaging()
 	if err != nil {
-		return guest.FilesOpResult{}, asRPC(err)
+		return entities.FilesOpResult{}, asRPC(err)
 	}
 	dir := filepath.Join(stage, fmt.Sprintf("zip-%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return guest.FilesOpResult{}, asRPC(err)
+		return entities.FilesOpResult{}, asRPC(err)
 	}
 	name := filepath.Base(abs)
 	if name == "" || name == "." || name == string(filepath.Separator) {
@@ -145,17 +145,17 @@ func fileZip(abs string) (guest.FilesOpResult, *guest.FrameError) {
 	n, err := writeZip(out, abs)
 	if err != nil {
 		_ = os.RemoveAll(dir)
-		var fe *guest.FrameError
+		var fe *entities.FrameError
 		if errors.As(err, &fe) {
-			return guest.FilesOpResult{}, fe
+			return entities.FilesOpResult{}, fe
 		}
-		return guest.FilesOpResult{}, asRPC(err)
+		return entities.FilesOpResult{}, asRPC(err)
 	}
 	zst, err := os.Stat(out)
 	if err != nil {
-		return guest.FilesOpResult{}, asRPC(err)
+		return entities.FilesOpResult{}, asRPC(err)
 	}
-	return guest.FilesOpResult{OK: true, Path: out, Size: zst.Size(), Count: n}, nil
+	return entities.FilesOpResult{OK: true, Path: out, Size: zst.Size(), Count: n}, nil
 }
 
 func writeZip(out, root string) (int, error) {
@@ -187,8 +187,8 @@ func writeZip(out, root string) (int, error) {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		if total += info.Size(); total > guest.FileMaxBytes {
-			return &guest.FrameError{Code: "too_large", Message: "directory exceeds 512MB"}
+		if total += info.Size(); total > entities.FileMaxBytes {
+			return &entities.FrameError{Code: "too_large", Message: "directory exceeds 512MB"}
 		}
 		hdr, err := zip.FileInfoHeader(info)
 		if err != nil {
@@ -236,9 +236,9 @@ func uniqueName(base string, taken func(string) bool) string {
 	return name
 }
 
-func notFoundOr(err error, abs string) *guest.FrameError {
+func notFoundOr(err error, abs string) *entities.FrameError {
 	if os.IsNotExist(err) {
-		return &guest.FrameError{Code: "not_found", Message: abs}
+		return &entities.FrameError{Code: "not_found", Message: abs}
 	}
 	return asRPC(err)
 }

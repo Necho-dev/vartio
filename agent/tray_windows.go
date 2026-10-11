@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package agent
 
 import (
 	_ "embed"
@@ -46,7 +46,7 @@ func trayBeforeExit() {
 // trayWanted: everything except the service runs in the background with a
 // tray icon (the binary is built with -H windowsgui, so there is no console).
 func trayWanted() bool {
-	if os.Getenv("GUEST_TRAY") == "off" {
+	if getenv("VARTIO_AGENT_TRAY", "GUEST_TRAY") == "off" {
 		return false
 	}
 	ok, _ := svc.IsWindowsService()
@@ -167,7 +167,7 @@ func autostartRegistered() bool {
 // and starts it now. Tray and service are alternatives, not both.
 func runInstall() int {
 	if serviceState() != 0 {
-		fmt.Fprintln(os.Stderr, "已安装为 Windows 服务。托盘模式与服务二选一，请先以管理员执行：probe-agent.exe service remove")
+		fmt.Fprintln(os.Stderr, "已安装为 Windows 服务。托盘模式与服务二选一，请先以管理员执行：vartio-agent.exe service remove")
 		return 1
 	}
 	exe, err := selfExe()
@@ -201,7 +201,7 @@ func runInstall() int {
 		fmt.Fprintln(os.Stderr, "启动失败：", err)
 		return 1
 	}
-	fmt.Println("探针已在后台启动，见任务栏右下角托盘图标；日志：", filepath.Join(filepath.Dir(exe), "probe-agent.log"))
+	fmt.Println("探针已在后台启动，见任务栏右下角托盘图标；日志：", agentLogFile(filepath.Dir(exe)))
 	return 0
 }
 

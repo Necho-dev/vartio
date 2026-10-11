@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"archive/zip"
@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func op(t *testing.T, req guest.FilesOpRequest) (guest.FilesOpResult, *guest.FrameError) {
+func op(t *testing.T, req entities.FilesOpRequest) (entities.FilesOpResult, *entities.FrameError) {
 	t.Helper()
 	b, _ := json.Marshal(req)
 	return filesOp(b)
@@ -31,25 +31,25 @@ func TestFilesOps(t *testing.T) {
 	t.Setenv("GUEST_FILE_STAGING", stage)
 	work := filepath.Join(t.TempDir(), "work")
 
-	if _, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpMkdir, Path: filepath.Join(work, "a", "b")}); fe != nil {
+	if _, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpMkdir, Path: filepath.Join(work, "a", "b")}); fe != nil {
 		t.Fatal(fe)
 	}
 	if err := os.WriteFile(filepath.Join(work, "a", "b", "x.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	r, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpRename, Path: filepath.Join(work, "a"), To: "c"})
+	r, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpRename, Path: filepath.Join(work, "a"), To: "c"})
 	if fe != nil || r.Path != filepath.Join(work, "c") {
 		t.Fatalf("rename %+v %v", r, fe)
 	}
 	if err := os.Mkdir(filepath.Join(work, "d"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpRename, Path: filepath.Join(work, "c"), To: "d"}); fe == nil || fe.Code != "conflict" {
+	if _, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpRename, Path: filepath.Join(work, "c"), To: "d"}); fe == nil || fe.Code != "conflict" {
 		t.Fatalf("rename onto existing: %v", fe)
 	}
 
-	z, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpZip, Path: filepath.Join(work, "c")})
+	z, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpZip, Path: filepath.Join(work, "c")})
 	if fe != nil || z.Count != 1 || filepath.Base(z.Path) != "c.zip" {
 		t.Fatalf("zip %+v %v", z, fe)
 	}
@@ -66,26 +66,26 @@ func TestFilesOps(t *testing.T) {
 		t.Fatalf("zip entries %v", names)
 	}
 
-	if _, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpDelete, Path: filepath.Join(work, "c")}); fe == nil || fe.Code != "confirm_required" {
+	if _, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpDelete, Path: filepath.Join(work, "c")}); fe == nil || fe.Code != "confirm_required" {
 		t.Fatalf("delete non-empty without confirm: %v", fe)
 	}
-	if r, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpDelete, Path: filepath.Join(work, "c"), Confirm: true}); fe != nil || r.Count != 3 {
+	if r, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpDelete, Path: filepath.Join(work, "c"), Confirm: true}); fe != nil || r.Count != 3 {
 		t.Fatalf("delete %+v %v", r, fe)
 	}
-	if _, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpDelete, Path: string(filepath.Separator), Confirm: true}); fe == nil {
+	if _, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpDelete, Path: string(filepath.Separator), Confirm: true}); fe == nil {
 		t.Fatal("root delete must be refused")
 	}
 	home, _ := os.UserHomeDir()
-	if _, fe := op(t, guest.FilesOpRequest{Op: guest.FileOpDelete, Path: "~", Confirm: true}); fe == nil {
+	if _, fe := op(t, entities.FilesOpRequest{Op: entities.FileOpDelete, Path: "~", Confirm: true}); fe == nil {
 		t.Fatalf("home %s delete must be refused", home)
 	}
 }
 
 func TestDedupePools(t *testing.T) {
-	apfs := guest.DiskUsage{FS: "apfs", Total: 500, Used: 400}
-	sys, data, ext := apfs, apfs, guest.DiskUsage{Mount: "/Volumes/X", FS: "apfs", Total: 100, Used: 1}
+	apfs := entities.DiskUsage{FS: "apfs", Total: 500, Used: 400}
+	sys, data, ext := apfs, apfs, entities.DiskUsage{Mount: "/Volumes/X", FS: "apfs", Total: 100, Used: 1}
 	sys.Mount, data.Mount = "/", "/System/Volumes/Data"
-	got := dedupePools([]guest.DiskUsage{sys, data, ext}, "/System/Volumes/Data")
+	got := dedupePools([]entities.DiskUsage{sys, data, ext}, "/System/Volumes/Data")
 	if len(got) != 2 || got[0].Mount != "/System/Volumes/Data" || got[1].Mount != "/Volumes/X" {
 		t.Fatalf("dedupePools = %+v", got)
 	}

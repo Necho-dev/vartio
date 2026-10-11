@@ -1,13 +1,13 @@
-package main
+package agent
 
 import (
 	"testing"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 func TestPickRootSkipsInitrd(t *testing.T) {
-	disks := []guest.DiskUsage{
+	disks := []entities.DiskUsage{
 		{Mount: "/oldroot", FS: "erofs", Total: 644 << 20, Used: 644 << 20},
 		{Mount: "/var/lib", FS: "ext4", Total: 452 << 30, Used: 3 << 30},
 	}
@@ -17,7 +17,7 @@ func TestPickRootSkipsInitrd(t *testing.T) {
 }
 
 func TestPickRootKeepsWritableRoot(t *testing.T) {
-	disks := []guest.DiskUsage{
+	disks := []entities.DiskUsage{
 		{Mount: "/", FS: "ext4", Total: 100, Used: 40},
 		{Mount: "/data", FS: "ext4", Total: 900, Used: 10},
 	}

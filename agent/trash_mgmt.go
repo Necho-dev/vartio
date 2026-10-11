@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // Platform hooks (trash_unix.go / trash_windows.go):
@@ -14,46 +14,46 @@ import (
 //   trashOrig(id) reports where an item came from ("" if unknown);
 //   trashForget(id) drops the item's metadata after restore/purge.
 
-func trashOp(params json.RawMessage) (guest.TrashResult, *guest.FrameError) {
-	var req guest.TrashRequest
+func trashOp(params json.RawMessage) (entities.TrashResult, *entities.FrameError) {
+	var req entities.TrashRequest
 	if err := json.Unmarshal(params, &req); err != nil {
-		return guest.TrashResult{}, bad("invalid params")
+		return entities.TrashResult{}, bad("invalid params")
 	}
 	items, loc, ferr := trashItems()
 	if ferr != nil {
-		return guest.TrashResult{}, ferr
+		return entities.TrashResult{}, ferr
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].DeletedUtc > items[j].DeletedUtc })
-	out := guest.TrashResult{Location: loc, Items: items}
+	out := entities.TrashResult{Location: loc, Items: items}
 	known := make(map[string]bool, len(items))
 	for _, it := range items {
 		known[it.ID] = true
 	}
 	ids := req.IDs
 	switch req.Op {
-	case guest.TrashList:
+	case entities.TrashList:
 		return out, nil
-	case guest.TrashEmpty:
+	case entities.TrashEmpty:
 		ids = ids[:0]
 		for _, it := range items {
 			ids = append(ids, it.ID)
 		}
 		fallthrough
-	case guest.TrashPurge:
+	case entities.TrashPurge:
 		if !req.Confirm {
-			return guest.TrashResult{}, &guest.FrameError{Code: "confirm_required", Message: "purge needs confirm"}
+			return entities.TrashResult{}, &entities.FrameError{Code: "confirm_required", Message: "purge needs confirm"}
 		}
-	case guest.TrashRestore:
+	case entities.TrashRestore:
 	default:
-		return guest.TrashResult{}, bad("unknown op " + req.Op)
+		return entities.TrashResult{}, bad("unknown op " + req.Op)
 	}
 	for _, id := range ids {
 		if !known[id] {
-			out.Failed = append(out.Failed, guest.TrashFailure{ID: id, Message: "not in trash"})
+			out.Failed = append(out.Failed, entities.TrashFailure{ID: id, Message: "not in trash"})
 			continue
 		}
 		var err error
-		if req.Op == guest.TrashRestore {
+		if req.Op == entities.TrashRestore {
 			var dst string
 			if dst, err = trashRestore(id); err == nil {
 				out.Paths = append(out.Paths, dst)
@@ -62,7 +62,7 @@ func trashOp(params json.RawMessage) (guest.TrashResult, *guest.FrameError) {
 			trashForget(id)
 		}
 		if err != nil {
-			out.Failed = append(out.Failed, guest.TrashFailure{ID: id, Message: err.Error()})
+			out.Failed = append(out.Failed, entities.TrashFailure{ID: id, Message: err.Error()})
 			continue
 		}
 		out.Done++
@@ -95,12 +95,12 @@ func trashRestore(id string) (string, error) {
 	return dst, nil
 }
 
-func trashEntry(id, name, orig string, deleted string) (guest.TrashItem, bool) {
+func trashEntry(id, name, orig string, deleted string) (entities.TrashItem, bool) {
 	st, err := os.Lstat(id)
 	if err != nil {
-		return guest.TrashItem{}, false
+		return entities.TrashItem{}, false
 	}
-	it := guest.TrashItem{ID: id, Name: name, Orig: orig, IsDir: st.IsDir(), DeletedUtc: deleted}
+	it := entities.TrashItem{ID: id, Name: name, Orig: orig, IsDir: st.IsDir(), DeletedUtc: deleted}
 	if !st.IsDir() {
 		it.Size = st.Size()
 	}

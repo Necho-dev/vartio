@@ -76,7 +76,7 @@ window.addEventListener("hashchange", route);
   try {
     state.config = await (await fetch(API + "/monitor/config")).json();
   } catch (e) {
-    app.innerHTML = `<div class="empty">无法连接 probe-hub：${esc(e.message)}</div>`;
+    app.innerHTML = `<div class="empty">无法连接 Vartio：${esc(e.message)}</div>`;
     return;
   }
   $("#logoutBtn").hidden = !state.config.authRequired;

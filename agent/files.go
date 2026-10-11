@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"crypto/sha256"
@@ -11,17 +11,17 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 func stagingDir() string {
-	if d := strings.TrimSpace(os.Getenv("GUEST_FILE_STAGING")); d != "" {
+	if d := strings.TrimSpace(getenv("VARTIO_AGENT_FILE_STAGING", "GUEST_FILE_STAGING")); d != "" {
 		return filepath.Clean(d)
 	}
 	if runtime.GOOS == "windows" {
-		return `C:\ProgramData\probe-agent\tmp`
+		return existingFile(`C:\ProgramData\vartio-agent\tmp`, `C:\ProgramData\probe-agent\tmp`)
 	}
-	return filepath.Join(os.TempDir(), "probe-agent")
+	return existingFile(filepath.Join(os.TempDir(), "vartio-agent"), filepath.Join(os.TempDir(), "probe-agent"))
 }
 
 func ensureStaging() (string, error) {
@@ -32,7 +32,7 @@ func ensureStaging() (string, error) {
 	return d, nil
 }
 
-func resolveGuestPath(p string) (string, *guest.FrameError) {
+func resolveGuestPath(p string) (string, *entities.FrameError) {
 	p = strings.TrimSpace(p)
 	if strings.ContainsRune(p, 0) {
 		return "", bad("invalid path")
@@ -62,23 +62,23 @@ func resolveGuestPath(p string) (string, *guest.FrameError) {
 	return abs, nil
 }
 
-func filesList(params json.RawMessage) (guest.FilesListResult, *guest.FrameError) {
-	var req guest.FilesListRequest
+func filesList(params json.RawMessage) (entities.FilesListResult, *entities.FrameError) {
+	var req entities.FilesListRequest
 	_ = json.Unmarshal(params, &req)
 	abs, ferr := resolveGuestPath(req.Path)
 	if ferr != nil {
-		return guest.FilesListResult{}, ferr
+		return entities.FilesListResult{}, ferr
 	}
 	st, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return guest.FilesListResult{}, &guest.FrameError{Code: "not_found", Message: abs}
+			return entities.FilesListResult{}, &entities.FrameError{Code: "not_found", Message: abs}
 		}
-		return guest.FilesListResult{}, asRPC(err)
+		return entities.FilesListResult{}, asRPC(err)
 	}
-	out := guest.FilesListResult{
+	out := entities.FilesListResult{
 		Path: abs, Staging: stagingDir(), Sep: string(filepath.Separator),
-		Roots: fileRoots(), Trash: true, Entries: []guest.FileEntry{},
+		Roots: fileRoots(), Trash: true, Entries: []entities.FileEntry{},
 	}
 	out.Home, _ = os.UserHomeDir()
 	if parent := filepath.Dir(abs); parent != abs {
@@ -90,7 +90,7 @@ func filesList(params json.RawMessage) (guest.FilesListResult, *guest.FrameError
 	}
 	ents, err := os.ReadDir(abs)
 	if err != nil {
-		return guest.FilesListResult{}, asRPC(err)
+		return entities.FilesListResult{}, asRPC(err)
 	}
 	for _, e := range ents {
 		info, err := e.Info()
@@ -110,8 +110,8 @@ func filesList(params json.RawMessage) (guest.FilesListResult, *guest.FrameError
 	return out, nil
 }
 
-func fileEntry(abs string, st os.FileInfo) guest.FileEntry {
-	return guest.FileEntry{
+func fileEntry(abs string, st os.FileInfo) entities.FileEntry {
+	return entities.FileEntry{
 		Name:     st.Name(),
 		Path:     abs,
 		IsDir:    st.IsDir(),
@@ -121,42 +121,42 @@ func fileEntry(abs string, st os.FileInfo) guest.FileEntry {
 	}
 }
 
-func filesGet(params json.RawMessage) (guest.FilesGetResult, *guest.FrameError) {
-	var req guest.FilesGetRequest
+func filesGet(params json.RawMessage) (entities.FilesGetResult, *entities.FrameError) {
+	var req entities.FilesGetRequest
 	if err := json.Unmarshal(params, &req); err != nil || strings.TrimSpace(req.Path) == "" {
-		return guest.FilesGetResult{}, bad("path required")
+		return entities.FilesGetResult{}, bad("path required")
 	}
 	abs, ferr := resolveGuestPath(req.Path)
 	if ferr != nil {
-		return guest.FilesGetResult{}, ferr
+		return entities.FilesGetResult{}, ferr
 	}
 	st, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return guest.FilesGetResult{}, &guest.FrameError{Code: "not_found", Message: abs}
+			return entities.FilesGetResult{}, &entities.FrameError{Code: "not_found", Message: abs}
 		}
-		return guest.FilesGetResult{}, asRPC(err)
+		return entities.FilesGetResult{}, asRPC(err)
 	}
-	out := guest.FilesGetResult{Path: abs, Size: st.Size(), IsDir: st.IsDir(), Offset: req.Offset}
+	out := entities.FilesGetResult{Path: abs, Size: st.Size(), IsDir: st.IsDir(), Offset: req.Offset}
 	if req.Stat || st.IsDir() {
 		out.EOF = true
 		return out, nil
 	}
-	if st.Size() > guest.FileMaxBytes {
-		return guest.FilesGetResult{}, &guest.FrameError{Code: "too_large", Message: "file exceeds 512MB"}
+	if st.Size() > entities.FileMaxBytes {
+		return entities.FilesGetResult{}, &entities.FrameError{Code: "too_large", Message: "file exceeds 512MB"}
 	}
 	length := req.Length
 	if length <= 0 {
-		length = guest.FileChunk
+		length = entities.FileChunk
 	}
 	f, err := os.Open(abs)
 	if err != nil {
-		return guest.FilesGetResult{}, asRPC(err)
+		return entities.FilesGetResult{}, asRPC(err)
 	}
 	defer f.Close()
 	if req.Offset > 0 {
 		if _, err := f.Seek(req.Offset, io.SeekStart); err != nil {
-			return guest.FilesGetResult{}, asRPC(err)
+			return entities.FilesGetResult{}, asRPC(err)
 		}
 	}
 	buf := make([]byte, length)
@@ -165,79 +165,79 @@ func filesGet(params json.RawMessage) (guest.FilesGetResult, *guest.FrameError) 
 		err = nil
 	}
 	if err != nil {
-		return guest.FilesGetResult{}, asRPC(err)
+		return entities.FilesGetResult{}, asRPC(err)
 	}
 	out.Data = buf[:n]
 	out.EOF = req.Offset+int64(n) >= st.Size()
 	if out.EOF {
 		sum, herr := hashFile(abs)
 		if herr != nil {
-			return guest.FilesGetResult{}, asRPC(herr)
+			return entities.FilesGetResult{}, asRPC(herr)
 		}
 		out.SHA256 = sum
 	}
 	return out, nil
 }
 
-func filesPut(params json.RawMessage) (guest.FilesPutResult, *guest.FrameError) {
-	var req guest.FilesPutRequest
+func filesPut(params json.RawMessage) (entities.FilesPutResult, *entities.FrameError) {
+	var req entities.FilesPutRequest
 	if err := json.Unmarshal(params, &req); err != nil || strings.TrimSpace(req.Path) == "" {
-		return guest.FilesPutResult{}, bad("path required")
+		return entities.FilesPutResult{}, bad("path required")
 	}
 	abs, ferr := resolveGuestPath(req.Path)
 	if ferr != nil {
-		return guest.FilesPutResult{}, ferr
+		return entities.FilesPutResult{}, ferr
 	}
-	if req.Offset+int64(len(req.Data)) > guest.FileMaxBytes {
-		return guest.FilesPutResult{}, &guest.FrameError{Code: "too_large", Message: "upload exceeds 512MB"}
+	if req.Offset+int64(len(req.Data)) > entities.FileMaxBytes {
+		return entities.FilesPutResult{}, &entities.FrameError{Code: "too_large", Message: "upload exceeds 512MB"}
 	}
 	part := abs + ".part"
 	if req.Offset == 0 {
 		if st, err := os.Stat(abs); err == nil {
 			if st.IsDir() {
-				return guest.FilesPutResult{}, bad("path is a directory")
+				return entities.FilesPutResult{}, bad("path is a directory")
 			}
 			if !req.Confirm {
-				return guest.FilesPutResult{}, &guest.FrameError{Code: "confirm_required", Message: "overwrite requires confirm"}
+				return entities.FilesPutResult{}, &entities.FrameError{Code: "confirm_required", Message: "overwrite requires confirm"}
 			}
 		} else if !os.IsNotExist(err) {
-			return guest.FilesPutResult{}, asRPC(err)
+			return entities.FilesPutResult{}, asRPC(err)
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			return guest.FilesPutResult{}, asRPC(err)
+			return entities.FilesPutResult{}, asRPC(err)
 		}
 		if err := os.WriteFile(part, req.Data, 0o644); err != nil {
-			return guest.FilesPutResult{}, asRPC(err)
+			return entities.FilesPutResult{}, asRPC(err)
 		}
 	} else {
 		f, err := os.OpenFile(part, os.O_WRONLY, 0o600)
 		if err != nil {
-			return guest.FilesPutResult{}, asRPC(err)
+			return entities.FilesPutResult{}, asRPC(err)
 		}
 		_, err = f.WriteAt(req.Data, req.Offset)
 		_ = f.Close()
 		if err != nil {
-			return guest.FilesPutResult{}, asRPC(err)
+			return entities.FilesPutResult{}, asRPC(err)
 		}
 	}
 	st, err := os.Stat(part)
 	if err != nil {
-		return guest.FilesPutResult{}, asRPC(err)
+		return entities.FilesPutResult{}, asRPC(err)
 	}
-	out := guest.FilesPutResult{OK: true, Path: abs, Offset: req.Offset + int64(len(req.Data)), Size: st.Size()}
+	out := entities.FilesPutResult{OK: true, Path: abs, Offset: req.Offset + int64(len(req.Data)), Size: st.Size()}
 	if !req.EOF {
 		return out, nil
 	}
 	sum, err := hashFile(part)
 	if err != nil {
-		return guest.FilesPutResult{}, asRPC(err)
+		return entities.FilesPutResult{}, asRPC(err)
 	}
 	if req.SHA256 != "" && !strings.EqualFold(req.SHA256, sum) {
 		_ = os.Remove(part)
-		return guest.FilesPutResult{}, bad("sha256 mismatch")
+		return entities.FilesPutResult{}, bad("sha256 mismatch")
 	}
 	if err := os.Rename(part, abs); err != nil {
-		return guest.FilesPutResult{}, asRPC(err)
+		return entities.FilesPutResult{}, asRPC(err)
 	}
 	out.SHA256 = sum
 	out.Size = st.Size()

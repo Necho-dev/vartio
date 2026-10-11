@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -15,7 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/release"
+	"vartio/internal/entities"
+	"vartio/internal/release"
 )
 
 func writeRelease(t *testing.T, dir, ver string, key ed25519.PrivateKey, body []byte) {
@@ -80,17 +81,17 @@ func TestAgentLatestAndDownload(t *testing.T) {
 		t.Cleanup(func() { resp.Body.Close() })
 		return resp
 	}
-	if r := get(PathAgentLatest+"?os=linux&arch=amd64&current=1.9.0", false); r.StatusCode != 401 {
+	if r := get(entities.PathAgentLatest+"?os=linux&arch=amd64&current=1.9.0", false); r.StatusCode != 401 {
 		t.Fatalf("no token: %d", r.StatusCode)
 	}
-	if r := get(PathAgentLatest+"?os=linux&arch=amd64&current=1.9.1", true); r.StatusCode != 204 {
+	if r := get(entities.PathAgentLatest+"?os=linux&arch=amd64&current=1.9.1", true); r.StatusCode != 204 {
 		t.Fatalf("current: %d", r.StatusCode)
 	}
-	if r := get(PathAgentLatest+"?os=windows&arch=amd64&current=1.9.0", true); r.StatusCode != 204 {
+	if r := get(entities.PathAgentLatest+"?os=windows&arch=amd64&current=1.9.0", true); r.StatusCode != 204 {
 		t.Fatalf("other platform: %d", r.StatusCode)
 	}
-	r := get(PathAgentLatest+"?os=linux&arch=amd64&current=1.9.0", true)
-	var l AgentLatest
+	r := get(entities.PathAgentLatest+"?os=linux&arch=amd64&current=1.9.0", true)
+	var l entities.AgentLatest
 	if r.StatusCode != 200 || json.NewDecoder(r.Body).Decode(&l) != nil || l.Version != "1.9.1" {
 		t.Fatalf("latest: %d %+v", r.StatusCode, l)
 	}
@@ -113,39 +114,39 @@ func TestUpgradeProgress(t *testing.T) {
 	h.Releases = &Releases{Dir: dir}
 	srv := httptest.NewServer(h.DevHandler())
 	defer srv.Close()
-	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + PathConnect + "?token=tok"
-	old := Hello{BiosUUID: "up-1", Version: "1.9.0", OS: "linux", Arch: "amd64", Caps: []string{CapUpgrade}}
+	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + entities.PathConnect + "?token=tok"
+	old := entities.Hello{BiosUUID: "up-1", Version: "1.9.0", OS: "linux", Arch: "amd64", Caps: []string{entities.CapUpgrade}}
 	conn := dialHello(t, ws, old)
 	sawDownload := make(chan struct{})
 	go func() {
 		for {
-			var fr Frame
+			var fr entities.Frame
 			if err := conn.ReadJSON(&fr); err != nil {
 				return
 			}
-			if fr.Method != MethodUpgrade {
+			if fr.Method != entities.MethodUpgrade {
 				continue
 			}
-			b, _ := json.Marshal(UpgradeStep{Stage: UpgradeDownload, Done: 4, Total: 9})
-			_ = conn.WriteJSON(Frame{ID: fr.ID, Stream: StreamUpgrade, Data: b})
+			b, _ := json.Marshal(entities.UpgradeStep{Stage: entities.UpgradeDownload, Done: 4, Total: 9})
+			_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Stream: entities.StreamUpgrade, Data: b})
 			<-sawDownload
-			res, _ := json.Marshal(UpgradeResult{OK: true, From: "1.9.0", To: "1.9.1"})
-			_ = conn.WriteJSON(Frame{ID: fr.ID, Result: res})
+			res, _ := json.Marshal(entities.UpgradeResult{OK: true, From: "1.9.0", To: "1.9.1"})
+			_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: res})
 		}
 	}()
 	waitOnline(t, h, "up-1")
 	id := h.Resolve("up-1")
 	done := make(chan error, 1)
 	go func() { _, err := h.Upgrade(context.Background(), id, ""); done <- err }()
-	stage := func() UpgradeProgress {
+	stage := func() entities.UpgradeProgress {
 		for _, p := range h.Upgrades() {
 			if p.ID == id {
 				return p
 			}
 		}
-		return UpgradeProgress{}
+		return entities.UpgradeProgress{}
 	}
-	waitFor := func(want string) UpgradeProgress {
+	waitFor := func(want string) entities.UpgradeProgress {
 		t.Helper()
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
@@ -155,22 +156,22 @@ func TestUpgradeProgress(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		t.Fatalf("stage %q never reached, at %+v", want, stage())
-		return UpgradeProgress{}
+		return entities.UpgradeProgress{}
 	}
-	if p := waitFor(UpgradeDownload); p.Done != 4 || p.Total != 9 || p.To != "1.9.1" {
+	if p := waitFor(entities.UpgradeDownload); p.Done != 4 || p.Total != 9 || p.To != "1.9.1" {
 		t.Fatalf("download progress %+v", p)
 	}
 	close(sawDownload)
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	waitFor(UpgradeRestart)
+	waitFor(entities.UpgradeRestart)
 	if _, err := h.Upgrade(context.Background(), id, ""); err == nil {
 		t.Fatal("second upgrade accepted while restarting")
 	}
 	conn.Close()
 	next := old
-	next.Version, next.Upgrade = "1.9.1", &UpgradeReport{From: "1.9.0", To: "1.9.1", OK: true}
+	next.Version, next.Upgrade = "1.9.1", &entities.UpgradeReport{From: "1.9.0", To: "1.9.1", OK: true}
 	dialHello(t, ws, next)
-	waitFor(UpgradeDone)
+	waitFor(entities.UpgradeDone)
 }

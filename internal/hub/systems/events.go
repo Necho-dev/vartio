@@ -1,4 +1,4 @@
-package monitor
+package systems
 
 import (
 	"fmt"
@@ -6,8 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // rebootSlack absorbs boot-time jitter: agents derive it from uptime, which drifts
@@ -17,7 +16,7 @@ const rebootSlack = 2 * time.Minute
 // diff compares two consecutive samples and reports reboots and configuration
 // changes. The previous side may be empty (first sample after hub start for a
 // system with no stored history), in which case nothing is reported.
-func diff(pi guest.SysInfo, ps *Sample, ni guest.SysInfo, ns *Sample) []Event {
+func diff(pi entities.SysInfo, ps *Sample, ni entities.SysInfo, ns *Sample) []Event {
 	var out []Event
 	add := func(cat, kind, detail string) {
 		out = append(out, Event{Kind: kind, Category: cat, Level: LevelInfo, Detail: detail})
@@ -85,7 +84,7 @@ func containerEvents(prev, cur *DockerSample) []Event {
 		}
 	}
 	// A full list cannot tell a removed container from one cut off by MaxContainers.
-	if len(cur.Containers) < guest.MaxContainers {
+	if len(cur.Containers) < entities.MaxContainers {
 		for _, c := range prev.Containers {
 			if !seen[c.Name] && c.State == "running" {
 				stopped = append(stopped, c.Name+"（已删除）")
@@ -113,7 +112,7 @@ func containerEvents(prev, cur *DockerSample) []Event {
 
 func changed(a, b string) bool { return a != "" && b != "" && a != b }
 
-func osLine(i guest.SysInfo) string {
+func osLine(i entities.SysInfo) string {
 	return strings.TrimSpace(i.Platform + " " + i.PlatformVersion)
 }
 
@@ -125,7 +124,7 @@ func moved(a, b uint64) bool {
 	return math.Abs(float64(b)-float64(a))/float64(a) > 0.02
 }
 
-func diskChanges(prev, cur []guest.DiskUsage) string {
+func diskChanges(prev, cur []entities.DiskUsage) string {
 	pm := map[string]uint64{}
 	for _, d := range prev {
 		pm[d.Mount] = d.Total
@@ -155,8 +154,8 @@ func diskChanges(prev, cur []guest.DiskUsage) string {
 // non-virtual NICs count as configuration.
 var transientNIC = []string{"veth", "docker", "br-", "cali", "flannel", "cni", "vnet", "virbr", "kube", "tun", "tap", "utun", "zt", "tailscale", "wg"}
 
-func stableNICs(list []guest.NICInfo) map[string]guest.NICInfo {
-	out := map[string]guest.NICInfo{}
+func stableNICs(list []entities.NICInfo) map[string]entities.NICInfo {
+	out := map[string]entities.NICInfo{}
 	for _, n := range list {
 		if n.IPv4 == "" || strings.HasPrefix(n.IPv4, "127.") {
 			continue
@@ -176,7 +175,7 @@ func stableNICs(list []guest.NICInfo) map[string]guest.NICInfo {
 	return out
 }
 
-func nicChanges(prev, cur []guest.NICInfo) string {
+func nicChanges(prev, cur []entities.NICInfo) string {
 	pm, cm := stableNICs(prev), stableNICs(cur)
 	var parts []string
 	for name, n := range cm {

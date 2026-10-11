@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // GUEST_SPAWN=off withdraws proc.spawn; exec stays governed by its own rules.
 func spawnEnabled() bool {
-	return !strings.EqualFold(strings.TrimSpace(os.Getenv("GUEST_SPAWN")), "off")
+	return !strings.EqualFold(strings.TrimSpace(getenv("VARTIO_AGENT_SPAWN", "GUEST_SPAWN")), "off")
 }
 
 var winVar = regexp.MustCompile(`%([A-Za-z0-9_()]+)%`)
@@ -62,8 +62,8 @@ func expandArg(s string) string {
 	})
 }
 
-func which(req guest.WhichRequest) guest.WhichResult {
-	out := guest.WhichResult{Hits: []guest.WhichHit{}}
+func which(req entities.WhichRequest) entities.WhichResult {
+	out := entities.WhichResult{Hits: []entities.WhichHit{}}
 	seen := map[string]bool{}
 	add := func(q, p string) {
 		st, err := os.Stat(p)
@@ -71,7 +71,7 @@ func which(req guest.WhichRequest) guest.WhichResult {
 			return
 		}
 		seen[p] = true
-		out.Hits = append(out.Hits, guest.WhichHit{Query: q, Path: p, Size: st.Size(), MtimeUTC: st.ModTime().UTC().Format(time.RFC3339)})
+		out.Hits = append(out.Hits, entities.WhichHit{Query: q, Path: p, Size: st.Size(), MtimeUTC: st.ModTime().UTC().Format(time.RFC3339)})
 	}
 	for _, q := range req.Paths {
 		add(q, expandPath(q))
@@ -87,13 +87,13 @@ func which(req guest.WhichRequest) guest.WhichResult {
 	return out
 }
 
-func readFiles(req guest.ReadRequest) guest.ReadResult {
+func readFiles(req entities.ReadRequest) entities.ReadResult {
 	limit := req.Limit
 	if limit <= 0 {
 		limit = 64 << 10
 	}
-	limit = min(limit, guest.ReadMax)
-	out := guest.ReadResult{Files: []guest.ReadFile{}}
+	limit = min(limit, entities.ReadMax)
+	out := entities.ReadResult{Files: []entities.ReadFile{}}
 	for _, q := range req.Paths {
 		p := expandPath(q)
 		f, err := os.Open(p)
@@ -108,30 +108,30 @@ func readFiles(req guest.ReadRequest) guest.ReadResult {
 		buf := make([]byte, limit+1)
 		n, _ := io.ReadFull(f, buf)
 		f.Close()
-		rf := guest.ReadFile{Query: q, Path: p, Size: st.Size(), MtimeUTC: st.ModTime().UTC().Format(time.RFC3339), Data: buf[:min(n, limit)]}
+		rf := entities.ReadFile{Query: q, Path: p, Size: st.Size(), MtimeUTC: st.ModTime().UTC().Format(time.RFC3339), Data: buf[:min(n, limit)]}
 		rf.Truncated = n > limit
 		out.Files = append(out.Files, rf)
 	}
 	return out
 }
 
-func spawnProc(req guest.SpawnRequest) (guest.SpawnResult, *guest.FrameError) {
+func spawnProc(req entities.SpawnRequest) (entities.SpawnResult, *entities.FrameError) {
 	if !spawnEnabled() {
-		return guest.SpawnResult{}, &guest.FrameError{Code: "agent_policy", Message: "proc.spawn is disabled by GUEST_SPAWN=off"}
+		return entities.SpawnResult{}, &entities.FrameError{Code: "agent_policy", Message: "proc.spawn is disabled by GUEST_SPAWN=off"}
 	}
 	path := expandPath(strings.TrimSpace(req.Path))
 	if path == "" {
-		return guest.SpawnResult{}, bad("path is required")
+		return entities.SpawnResult{}, bad("path is required")
 	}
 	if !filepath.IsAbs(path) {
 		p, err := exec.LookPath(path)
 		if err != nil {
-			return guest.SpawnResult{}, &guest.FrameError{Code: "not_found", Message: err.Error()}
+			return entities.SpawnResult{}, &entities.FrameError{Code: "not_found", Message: err.Error()}
 		}
 		path = p
 	}
 	if st, err := os.Stat(path); err != nil || st.IsDir() {
-		return guest.SpawnResult{}, &guest.FrameError{Code: "not_found", Message: path + " is not an executable file"}
+		return entities.SpawnResult{}, &entities.FrameError{Code: "not_found", Message: path + " is not an executable file"}
 	}
 	args := make([]string, len(req.Args))
 	for i, a := range req.Args {
@@ -154,21 +154,21 @@ func spawnProc(req guest.SpawnRequest) (guest.SpawnResult, *guest.FrameError) {
 	}
 	detach(cmd)
 	if err := cmd.Start(); err != nil {
-		return guest.SpawnResult{}, &guest.FrameError{Code: "spawn_failed", Message: err.Error()}
+		return entities.SpawnResult{}, &entities.FrameError{Code: "spawn_failed", Message: err.Error()}
 	}
 	pid := cmd.Process.Pid
 	go func() { _ = cmd.Wait() }()
-	return guest.SpawnResult{PID: pid, Path: path, Args: args}, nil
+	return entities.SpawnResult{PID: pid, Path: path, Args: args}, nil
 }
 
 // listeners keeps only processes whose name contains one of req.Names.
-func listeners(ctx context.Context, req guest.ListenersRequest) ([]guest.Listener, error) {
+func listeners(ctx context.Context, req entities.ListenersRequest) ([]entities.Listener, error) {
 	all, err := listenSockets(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := []guest.Listener{}
-	seen := map[guest.Listener]bool{}
+	out := []entities.Listener{}
+	seen := map[entities.Listener]bool{}
 	for _, l := range all {
 		if seen[l] || !nameMatches(l.Name, req.Names) {
 			continue

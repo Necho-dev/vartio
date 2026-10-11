@@ -1,6 +1,6 @@
 //go:build darwin
 
-package main
+package agent
 
 /*
 #cgo CFLAGS: -x objective-c -fobjc-arc
@@ -138,7 +138,7 @@ import (
 	"strconv"
 	"sync"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 func interactiveSession() error {
@@ -155,10 +155,10 @@ var (
 
 // listScreens keeps CoreGraphics' order (main display first), which is also
 // the numbering screencapture -D uses.
-func listScreens() []guest.Screen {
+func listScreens() []entities.Screen {
 	var ids [16]C.CGDirectDisplayID
 	n := int(C.screens(&ids[0], C.int(len(ids))))
-	out := make([]guest.Screen, 0, n)
+	out := make([]entities.Screen, 0, n)
 	for i := range n {
 		id := ids[i]
 		b := C.CGDisplayBounds(id)
@@ -166,7 +166,7 @@ func listScreens() []guest.Screen {
 		if C.CGDisplayIsBuiltin(id) != 0 {
 			name = "内建显示器"
 		}
-		out = append(out, guest.Screen{Index: i, Name: name,
+		out = append(out, entities.Screen{Index: i, Name: name,
 			X: int(b.origin.x), Y: int(b.origin.y), Width: int(b.size.width), Height: int(b.size.height),
 			Primary: C.CGDisplayIsMain(id) != 0})
 	}
@@ -177,7 +177,7 @@ func listScreens() []guest.Screen {
 	return out
 }
 
-func captureFrame(sc guest.Screen, p displayProfile) ([]byte, error) {
+func captureFrame(sc entities.Screen, p displayProfile) ([]byte, error) {
 	dispMu.Lock()
 	off := sckOff
 	id := C.CGMainDisplayID()
@@ -207,7 +207,7 @@ func sckFrame(id C.CGDirectDisplayID, p displayProfile) ([]byte, error) {
 	return C.GoBytes(ptr, n), nil
 }
 
-func screencaptureFrame(sc guest.Screen, p displayProfile) ([]byte, error) {
+func screencaptureFrame(sc entities.Screen, p displayProfile) ([]byte, error) {
 	f, err := os.CreateTemp("", "probe-display-*.jpg")
 	if err != nil {
 		return nil, err
@@ -219,13 +219,13 @@ func screencaptureFrame(sc guest.Screen, p displayProfile) ([]byte, error) {
 	cmd := exec.Command("screencapture", "-x", "-D", strconv.Itoa(sc.Index+1), "-t", "jpg", name)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if C.screenAccess() == 0 {
-			return nil, &guest.FrameError{Code: "no_user_session", Message: "probe-agent 未获得屏幕录制权限：在「系统设置 → 隐私与安全性 → 录屏与系统录音」中开启 probe-agent（如已开启，先用 − 移除旧条目再重新添加），然后重启 probe-agent"}
+			return nil, &entities.FrameError{Code: "no_user_session", Message: "Vartio 未获得屏幕录制权限：在「系统设置 → 隐私与安全性 → 录屏与系统录音」中开启 probe-agent（隐私列表里的名称；如已开启，先用 − 移除旧条目再重新添加），然后重启"}
 		}
 		msg := string(out)
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, &guest.FrameError{Code: "no_user_session", Message: "screen capture failed: " + msg}
+		return nil, &entities.FrameError{Code: "no_user_session", Message: "screen capture failed: " + msg}
 	}
 	rf, err := os.Open(name)
 	if err != nil {

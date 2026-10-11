@@ -1,0 +1,15 @@
+.git
+.cursor
+bin
+dist
+**/*.env
+probe-hub.plugins.json
+probe-hub.forwards.json
+probe-hub.key
+probe-hub.agents.json
+vartio.plugins.json
+vartio.forwards.json
+vartio.key
+vartio.agents.json
+**/.DS_Store
+**/node_modules

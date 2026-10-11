@@ -1,9 +1,10 @@
-// probe-release manages the Ed25519 key that signs probe-agent builds.
+// vartio-release manages the Ed25519 key that signs vartio-agent builds.
 //
-//	probe-release keygen            create the private key and add its public half to internal/release/release.pub
-//	probe-release sign <version dir> write <dir>/manifest.json with a signature per platform binary
+//	vartio-release keygen            create the private key and add its public half to internal/release/release.pub
+//	vartio-release sign <version dir> write <dir>/manifest.json with a signature per platform binary
 //
-// The private key lives outside the repo: $PROBE_RELEASE_KEY or ~/.config/probe-agent/release.key.
+// The private key lives outside the repo: $VARTIO_RELEASE_KEY, $PROBE_RELEASE_KEY,
+// or ~/.config/probe-agent/release.key when that file is already there.
 package main
 
 import (
@@ -22,14 +23,14 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/release"
+	"vartio/internal/release"
 )
 
 const pubFile = "internal/release/release.pub"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: probe-release keygen | sign <dist/probe-agent/VERSION>")
+		fmt.Fprintln(os.Stderr, "usage: vartio-release keygen | sign <dist/vartio-agent/VERSION>")
 		os.Exit(2)
 	}
 	var err error
@@ -38,7 +39,7 @@ func main() {
 		err = keygen()
 	case "sign":
 		if len(os.Args) != 3 {
-			err = errors.New("usage: probe-release sign <dist/probe-agent/VERSION>")
+			err = errors.New("usage: vartio-release sign <dist/vartio-agent/VERSION>")
 		} else {
 			err = sign(os.Args[2])
 		}
@@ -46,17 +47,24 @@ func main() {
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "probe-release:", err)
+		fmt.Fprintln(os.Stderr, "vartio-release:", err)
 		os.Exit(1)
 	}
 }
 
 func keyPath() string {
+	if p := strings.TrimSpace(os.Getenv("VARTIO_RELEASE_KEY")); p != "" {
+		return p
+	}
 	if p := strings.TrimSpace(os.Getenv("PROBE_RELEASE_KEY")); p != "" {
 		return p
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "probe-agent", "release.key")
+	legacy := filepath.Join(home, ".config", "probe-agent", "release.key")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return filepath.Join(home, ".config", "vartio", "release.key")
 }
 
 func keygen() error {
@@ -99,30 +107,53 @@ func loadKey() (ed25519.PrivateKey, error) {
 	return ed25519.NewKeyFromSeed(seed), nil
 }
 
-// sign expects the dist layout probe-agent-<ver>-<os>-<arch>/probe-agent[.exe].
+// sign expects vartio-agent-<ver>-<os>-<arch>/vartio-agent[.exe]
+// and still accepts the previous probe-agent directory layout.
 func sign(dir string) error {
 	key, err := loadKey()
 	if err != nil {
 		return err
 	}
 	ver := filepath.Base(filepath.Clean(dir))
-	prefix := "probe-agent-" + ver + "-"
+	prefixes := []string{"vartio-agent-" + ver + "-", "probe-agent-" + ver + "-"}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	m := release.Manifest{Version: ver, Created: time.Now().UTC().Truncate(time.Second)}
 	for _, e := range ents {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+		if !e.IsDir() {
 			continue
 		}
-		goos, arch, ok := strings.Cut(strings.TrimPrefix(e.Name(), prefix), "-")
+		rest := ""
+		matched := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(e.Name(), prefix) {
+				rest = strings.TrimPrefix(e.Name(), prefix)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		goos, arch, ok := strings.Cut(rest, "-")
 		if !ok {
 			continue
 		}
-		bin := "probe-agent"
-		if goos == "windows" {
-			bin += ".exe"
+		bin := ""
+		for _, name := range []string{"vartio-agent", "probe-agent"} {
+			candidate := name
+			if goos == "windows" {
+				candidate += ".exe"
+			}
+			if _, err := os.Stat(filepath.Join(dir, e.Name(), candidate)); err == nil {
+				bin = candidate
+				break
+			}
+		}
+		if bin == "" {
+			return fmt.Errorf("%s: no agent binary", e.Name())
 		}
 		rel := filepath.ToSlash(filepath.Join(e.Name(), bin))
 		size, sum, err := digest(filepath.Join(dir, rel))
@@ -134,7 +165,7 @@ func sign(dir string) error {
 		m.Artifacts = append(m.Artifacts, a)
 	}
 	if len(m.Artifacts) == 0 {
-		return fmt.Errorf("no %s*/ builds in %s", prefix, dir)
+		return fmt.Errorf("no vartio-agent-%s-*/ builds in %s", ver, dir)
 	}
 	sort.Slice(m.Artifacts, func(i, j int) bool { return m.Artifacts[i].File < m.Artifacts[j].File })
 	keys := []ed25519.PublicKey{key.Public().(ed25519.PublicKey)}

@@ -1,11 +1,11 @@
-package main
+package agent
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 func TestProcTCP(t *testing.T) {
@@ -20,7 +20,7 @@ func TestProcTCP(t *testing.T) {
 		"   0: 00000000:0016 00000000:0000 0A x\n"+
 		"   1: 0100007F:1F90 0100007F:D431 01 x\n"+
 		"   2: 0100007F:1F90 0100007F:D432 06 x\n"), 0o644)
-	var st guest.TCPStats
+	var st entities.TCPStats
 	if err := countTCPStates(tcp, &st); err != nil || st.Listen != 1 || st.Established != 1 || st.TimeWait != 1 || st.Total != 3 {
 		t.Fatalf("states %+v %v", st, err)
 	}

@@ -1,4 +1,4 @@
-package plugin
+package plugins
 
 import (
 	"context"
@@ -13,8 +13,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/hub"
 )
 
 func TestTargetAllowed(t *testing.T) {
@@ -33,7 +34,7 @@ func TestTargetAllowed(t *testing.T) {
 }
 
 func TestScopedHostEnforcesManifest(t *testing.T) {
-	h := &scopedHost{hub: guest.NewHub(""), m: Manifest{Name: "x", Primitives: []string{guest.CapTunnelTCP}, Targets: []string{"127.0.0.1:1"}}}
+	h := &scopedHost{hub: hub.NewHub(""), m: Manifest{Name: "x", Primitives: []string{entities.CapTunnelTCP}, Targets: []string{"127.0.0.1:1"}}}
 	_, err := h.DialTCP(context.Background(), "a", "127.0.0.1:2")
 	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "plugin_forbidden" {
@@ -73,9 +74,9 @@ func get(t *testing.T, mux http.Handler, method, path string) *httptest.Response
 }
 
 func TestRegistry(t *testing.T) {
-	r := NewRegistry(guest.NewHub(""))
+	r := NewRegistry(hub.NewHub(""))
 	stopped := false
-	if err := r.Add(context.Background(), stub{m: Manifest{Name: "a", Primitives: []string{guest.CapTunnelTCP}}, stopped: &stopped}); err != nil {
+	if err := r.Add(context.Background(), stub{m: Manifest{Name: "a", Primitives: []string{entities.CapTunnelTCP}}, stopped: &stopped}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Add(context.Background(), stub{m: Manifest{Name: "a"}}); err == nil {
@@ -128,7 +129,7 @@ func TestRegistry(t *testing.T) {
 	}
 
 	// A fresh registry picks the saved state up.
-	r2 := NewRegistry(guest.NewHub(""))
+	r2 := NewRegistry(hub.NewHub(""))
 	_ = r2.Add(context.Background(), stub{m: Manifest{Name: "a"}})
 	if err := r2.Load(state, []string{"a"}); err != nil {
 		t.Fatal(err)
@@ -139,12 +140,12 @@ func TestRegistry(t *testing.T) {
 }
 
 func TestScopedHostCall(t *testing.T) {
-	h := &scopedHost{hub: guest.NewHub(""), m: Manifest{Name: "x", Primitives: []string{guest.CapFsWhich}}}
+	h := &scopedHost{hub: hub.NewHub(""), m: Manifest{Name: "x", Primitives: []string{entities.CapFsWhich}}}
 	var api *common.Error
-	if _, err := h.Call(context.Background(), "a", guest.CapProcSpawn, nil); !errors.As(err, &api) || api.Code != "plugin_forbidden" {
+	if _, err := h.Call(context.Background(), "a", entities.CapProcSpawn, nil); !errors.As(err, &api) || api.Code != "plugin_forbidden" {
 		t.Fatalf("undeclared primitive: %v", err)
 	}
-	if _, err := h.Call(context.Background(), "a", guest.CapFsWhich, nil); !errors.As(err, &api) || api.Code != "guest_offline" {
+	if _, err := h.Call(context.Background(), "a", entities.CapFsWhich, nil); !errors.As(err, &api) || api.Code != "guest_offline" {
 		t.Fatalf("offline agent: %v", err)
 	}
 }
@@ -161,11 +162,11 @@ func TestTickets(t *testing.T) {
 }
 
 func TestReadiness(t *testing.T) {
-	m := Manifest{Primitives: []string{guest.CapTunnelTCP}}
-	if a := readiness(m, guest.SessionInfo{DeviceID: "d", Primitives: map[string]int{guest.CapTunnelTCP: 1}}); !a.Ready {
+	m := Manifest{Primitives: []string{entities.CapTunnelTCP}}
+	if a := readiness(m, entities.SessionInfo{DeviceID: "d", Primitives: map[string]int{entities.CapTunnelTCP: 1}}); !a.Ready {
 		t.Fatalf("%+v", a)
 	}
-	if a := readiness(m, guest.SessionInfo{DeviceID: "d"}); a.Ready || len(a.Missing) != 1 {
+	if a := readiness(m, entities.SessionInfo{DeviceID: "d"}); a.Ready || len(a.Missing) != 1 {
 		t.Fatalf("%+v", a)
 	}
 }

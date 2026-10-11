@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -14,8 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/release"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/release"
 )
 
 // Releases serves signed agent builds from the dist layout
@@ -83,7 +84,7 @@ func (rs *Releases) Latest() *release.Manifest {
 }
 
 func downloadPath(version, goos, arch string) string {
-	return PathAgentDownload + "/" + version + "/" + goos + "/" + arch
+	return entities.PathAgentDownload + "/" + version + "/" + goos + "/" + arch
 }
 
 func (h *Hub) agentAuthed(w http.ResponseWriter, r *http.Request) bool {
@@ -110,7 +111,7 @@ func (h *Hub) handleAgentLatest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	_ = writeJSON(w, AgentLatest{Version: m.Version, Artifact: *a, URL: downloadPath(m.Version, a.OS, a.Arch)})
+	_ = writeJSON(w, entities.AgentLatest{Version: m.Version, Artifact: *a, URL: downloadPath(m.Version, a.OS, a.Arch)})
 }
 
 func (h *Hub) handleAgentDownload(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +161,7 @@ func (h *Hub) handleReleases(w http.ResponseWriter, r *http.Request) error {
 const upgradeKeep = 30 * time.Minute
 
 // progress updates the device's in-flight upgrade, if any.
-func (h *Hub) progress(key string, fn func(*UpgradeProgress)) {
+func (h *Hub) progress(key string, fn func(*entities.UpgradeProgress)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if p := h.upgrades[key]; p != nil && !upgradeFinal(p.Stage) {
@@ -170,29 +171,29 @@ func (h *Hub) progress(key string, fn func(*UpgradeProgress)) {
 }
 
 func upgradeFinal(stage string) bool {
-	return stage == UpgradeDone || stage == UpgradeFailed || stage == UpgradeRolledBack
+	return stage == entities.UpgradeDone || stage == entities.UpgradeFailed || stage == entities.UpgradeRolledBack
 }
 
 // settleUpgrade closes an upgrade waiting for the restart once the agent says hello again.
-func (h *Hub) settleUpgrade(key string, hello Hello) {
-	h.progress(key, func(p *UpgradeProgress) {
-		if p.Stage != UpgradeRestart {
+func (h *Hub) settleUpgrade(key string, hello entities.Hello) {
+	h.progress(key, func(p *entities.UpgradeProgress) {
+		if p.Stage != entities.UpgradeRestart {
 			return
 		}
 		switch r := hello.Upgrade; {
 		case r != nil && !r.OK:
-			p.Stage, p.Message = UpgradeRolledBack, r.Error
+			p.Stage, p.Message = entities.UpgradeRolledBack, r.Error
 		case hello.Version == p.To:
-			p.Stage = UpgradeDone
+			p.Stage = entities.UpgradeDone
 		}
 	})
 }
 
 // Upgrades lists recent upgrades, newest first.
-func (h *Hub) Upgrades() []UpgradeProgress {
+func (h *Hub) Upgrades() []entities.UpgradeProgress {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	out := make([]UpgradeProgress, 0, len(h.upgrades))
+	out := make([]entities.UpgradeProgress, 0, len(h.upgrades))
 	for k, p := range h.upgrades {
 		if time.Since(p.Updated) > upgradeKeep {
 			delete(h.upgrades, k)
@@ -209,73 +210,75 @@ func (h *Hub) handleUpgrades(w http.ResponseWriter, r *http.Request) error {
 }
 
 // Upgrade asks one agent to install version ("" = latest) and tracks it in Upgrades.
-func (h *Hub) Upgrade(ctx context.Context, key, version string) (UpgradeResult, error) {
+func (h *Hub) Upgrade(ctx context.Context, key, version string) (entities.UpgradeResult, error) {
 	s, err := h.lookup(key)
 	if err != nil {
-		return UpgradeResult{}, err
+		return entities.UpgradeResult{}, err
 	}
 	if s == nil {
-		return UpgradeResult{}, common.ErrOffline()
+		return entities.UpgradeResult{}, common.ErrOffline()
 	}
 	id := s.hello.Key()
 	now := time.Now()
 	h.mu.Lock()
 	if p := h.upgrades[id]; p != nil && !upgradeFinal(p.Stage) && time.Since(p.Updated) < 5*time.Minute {
 		h.mu.Unlock()
-		return UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "upgrade_busy", Message: "该主机已有升级在进行"}
+		return entities.UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "upgrade_busy", Message: "该主机已有升级在进行"}
 	}
-	h.upgrades[id] = &UpgradeProgress{ID: id, From: s.hello.Version, To: version, Stage: UpgradeQueued, Started: now, Updated: now}
+	h.upgrades[id] = &entities.UpgradeProgress{ID: id, From: s.hello.Version, To: version, Stage: entities.UpgradeQueued, Started: now, Updated: now}
 	h.mu.Unlock()
 	res, err := h.upgrade(ctx, s, version)
-	h.progress(id, func(p *UpgradeProgress) {
+	h.progress(id, func(p *entities.UpgradeProgress) {
 		if res.To != "" {
 			p.To = res.To
 		}
 		if err != nil {
-			p.Stage, p.Message = UpgradeFailed, err.Error()
+			p.Stage, p.Message = entities.UpgradeFailed, err.Error()
 			var api *common.Error
 			if errors.As(err, &api) {
 				p.Message = api.Message
 			}
 			return
 		}
-		p.Stage, p.Done = UpgradeRestart, p.Total
+		p.Stage, p.Done = entities.UpgradeRestart, p.Total
 	})
 	return res, err
 }
 
-func (h *Hub) upgrade(ctx context.Context, s *session, version string) (UpgradeResult, error) {
+func (h *Hub) upgrade(ctx context.Context, s *session, version string) (entities.UpgradeResult, error) {
 	key := s.hello.Key()
 	hello := s.hello
-	if !hello.Has(CapUpgrade) {
-		return UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "upgrade_unsupported",
+	if !hello.Has(entities.CapUpgrade) {
+		return entities.UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "upgrade_unsupported",
 			Message: fmt.Sprintf("agent %s 不支持远程升级，需手动更新一次到支持远程升级的版本", hello.Version)}
 	}
 	var m *release.Manifest
 	var err error
 	if version == "" {
 		if m = h.Releases.Latest(); m == nil {
-			return UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: "hub 上没有已签名的 agent 版本"}
+			return entities.UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: "hub 上没有已签名的 agent 版本"}
 		}
 	} else if m, err = h.Releases.Get(version); err != nil {
-		return UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()}
+		return entities.UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()}
 	}
 	if m.Version == hello.Version {
-		return UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "already_current", Message: "已是 " + m.Version}
+		return entities.UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "already_current", Message: "已是 " + m.Version}
 	}
 	a := m.Find(hello.OS, hello.Arch)
 	if a == nil {
-		return UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found",
+		return entities.UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found",
 			Message: fmt.Sprintf("%s 没有 %s/%s 的构建", m.Version, hello.OS, hello.Arch)}
 	}
-	h.progress(key, func(p *UpgradeProgress) { p.To, p.Stage, p.Total = m.Version, UpgradeDownload, a.Size })
-	raw, err := h.Call(ctx, key, MethodUpgrade, UpgradeRequest{Version: m.Version, Artifact: *a, URL: downloadPath(m.Version, a.OS, a.Arch), Mode: "push"})
+	h.progress(key, func(p *entities.UpgradeProgress) {
+		p.To, p.Stage, p.Total = m.Version, entities.UpgradeDownload, a.Size
+	})
+	raw, err := h.Call(ctx, key, entities.MethodUpgrade, entities.UpgradeRequest{Version: m.Version, Artifact: *a, URL: downloadPath(m.Version, a.OS, a.Arch), Mode: "push"})
 	if err != nil {
-		return UpgradeResult{}, err
+		return entities.UpgradeResult{}, err
 	}
-	var res UpgradeResult
+	var res entities.UpgradeResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		return UpgradeResult{}, err
+		return entities.UpgradeResult{}, err
 	}
 	if !res.OK {
 		return res, &common.Error{Status: http.StatusBadGateway, Code: "upgrade_failed", Message: res.Message}
@@ -331,7 +334,7 @@ func (h *Hub) handleUpgradeBatch(w http.ResponseWriter, r *http.Request) error {
 			}
 		}
 		for _, s := range h.List() {
-			if hasCap(s.Caps, CapUpgrade) && target != "" && release.Compare(s.Version, target) < 0 {
+			if hasCap(s.Caps, entities.CapUpgrade) && target != "" && release.Compare(s.Version, target) < 0 {
 				ids = append(ids, s.DeviceID)
 			}
 		}

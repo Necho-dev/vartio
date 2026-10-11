@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bufio"
@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // Docker Engine API over the engine's socket. Podman, OrbStack, colima and
@@ -38,7 +38,7 @@ const (
 // rw (adds a shell inside containers). Socket access is root-equivalent on the
 // host, so the shell is opt-in.
 func dockerMode() string {
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("GUEST_DOCKER"))); v {
+	switch v := strings.ToLower(strings.TrimSpace(getenv("VARTIO_AGENT_DOCKER", "GUEST_DOCKER"))); v {
 	case dockerOff, dockerRW:
 		return v
 	}
@@ -199,7 +199,7 @@ func engineErr(resp *http.Response) error {
 	case http.StatusConflict:
 		code = "conflict"
 	}
-	return &guest.FrameError{Code: code, Message: m.Message}
+	return &entities.FrameError{Code: code, Message: m.Message}
 }
 
 // identity is the engine product, version and quirks, refreshed every 10 minutes.
@@ -273,7 +273,7 @@ type apiPort struct {
 // ("buildx_*,*-tmp"). Excluded containers are not listed, sampled, tailed or entered.
 func dockerExcluded(name string) bool {
 	name = strings.TrimPrefix(name, "/")
-	for _, p := range splitCSV(os.Getenv("GUEST_DOCKER_EXCLUDE")) {
+	for _, p := range splitCSV(getenv("VARTIO_AGENT_DOCKER_EXCLUDE", "GUEST_DOCKER_EXCLUDE")) {
 		if ok, _ := path.Match(p, name); ok {
 			return true
 		}
@@ -282,12 +282,12 @@ func dockerExcluded(name string) bool {
 }
 
 // dockerMetrics lists every container (running first) with stats for the running ones.
-func dockerMetrics(ctx context.Context) *guest.DockerInfo {
+func dockerMetrics(ctx context.Context) *entities.DockerInfo {
 	e := docker()
 	if e == nil {
 		return nil
 	}
-	out := &guest.DockerInfo{Containers: []guest.ContainerStat{}}
+	out := &entities.DockerInfo{Containers: []entities.ContainerStat{}}
 	id := e.identity(ctx)
 	out.Engine, out.Version = id.name, id.ver
 	var list []apiContainer
@@ -319,11 +319,11 @@ func dockerMetrics(ctx context.Context) *guest.DockerInfo {
 		}
 		return a.Name < b.Name
 	})
-	if len(out.Containers) > guest.MaxContainers {
-		out.Containers = out.Containers[:guest.MaxContainers]
+	if len(out.Containers) > entities.MaxContainers {
+		out.Containers = out.Containers[:entities.MaxContainers]
 	}
 	out.Images = e.listImages(ctx, visible)
-	var running []*guest.ContainerStat
+	var running []*entities.ContainerStat
 	for i := range out.Containers[:min(len(out.Containers), out.Running, dockerStatsMax)] {
 		running = append(running, &out.Containers[i])
 	}
@@ -340,12 +340,12 @@ func dockerMetrics(ctx context.Context) *guest.DockerInfo {
 	return out
 }
 
-func (e *dockerEngine) sampleAll(ctx context.Context, cs []*guest.ContainerStat, workers int, id engineInfo) []*guest.ContainerStat {
+func (e *dockerEngine) sampleAll(ctx context.Context, cs []*entities.ContainerStat, workers int, id engineInfo) []*entities.ContainerStat {
 	sem := make(chan struct{}, max(workers, 1))
 	var (
 		wg     sync.WaitGroup
 		mu     sync.Mutex
-		failed []*guest.ContainerStat
+		failed []*entities.ContainerStat
 	)
 	for _, c := range cs {
 		wg.Add(1)
@@ -364,8 +364,8 @@ func (e *dockerEngine) sampleAll(ctx context.Context, cs []*guest.ContainerStat,
 	return failed
 }
 
-func containerStat(c apiContainer) guest.ContainerStat {
-	s := guest.ContainerStat{ID: shortID(c.ID), Image: c.Image, State: c.State, Status: c.Status, Created: c.Created,
+func containerStat(c apiContainer) entities.ContainerStat {
+	s := entities.ContainerStat{ID: shortID(c.ID), Image: c.Image, State: c.State, Status: c.Status, Created: c.Created,
 		Project: c.Labels["com.docker.compose.project"], Service: c.Labels["com.docker.compose.service"],
 		Compose: firstComposeFile(c.Labels["com.docker.compose.project.config_files"]),
 		Health:  healthOf(c.Status), Ports: formatPorts(c.Ports)}
@@ -473,7 +473,7 @@ type apiStats struct {
 
 // stats takes one sample without the engine's built-in one-second wait; the
 // hub turns consecutive samples into rates.
-func (e *dockerEngine) stats(ctx context.Context, c *guest.ContainerStat, id engineInfo) error {
+func (e *dockerEngine) stats(ctx context.Context, c *entities.ContainerStat, id engineInfo) error {
 	var st apiStats
 	if err := e.call(ctx, http.MethodGet, "/containers/"+c.ID+"/stats?stream=false&one-shot=true", nil, &st); err != nil {
 		return err
@@ -502,7 +502,7 @@ func (e *dockerEngine) inspectHealth(ctx context.Context, id string) string {
 	return normHealth(info.State.Healthcheck.Status)
 }
 
-func applyStats(c *guest.ContainerStat, st apiStats, id engineInfo) {
+func applyStats(c *entities.ContainerStat, st apiStats, id engineInfo) {
 	c.Stats = true
 	c.CPUNs, c.SysNs = st.CPU.Usage.Total, st.CPU.System
 	c.CPUs = st.CPU.Online
@@ -553,7 +553,7 @@ func applyStats(c *guest.ContainerStat, st apiStats, id engineInfo) {
 	c.Pids = st.Pids.Current
 }
 
-var errNoDocker = &guest.FrameError{Code: "not_found", Message: "未找到 Docker 引擎（检查 docker.sock 或 DOCKER_HOST）"}
+var errNoDocker = &entities.FrameError{Code: "not_found", Message: "未找到 Docker 引擎（检查 docker.sock 或 DOCKER_HOST）"}
 
 func containerPath(name string) string { return "/containers/" + url.PathEscape(name) }
 
@@ -562,7 +562,7 @@ type containerBrief struct {
 	Config struct{ Tty bool }
 }
 
-var errExcluded = &guest.FrameError{Code: "agent_policy", Message: "该容器已被探针排除（GUEST_DOCKER_EXCLUDE）"}
+var errExcluded = &entities.FrameError{Code: "agent_policy", Message: "该容器已被探针排除（GUEST_DOCKER_EXCLUDE）"}
 
 // inspectAllowed resolves a container name or id, refusing excluded ones.
 func (e *dockerEngine) inspectAllowed(ctx context.Context, name string) (containerBrief, error) {
@@ -608,7 +608,7 @@ func sanitizeInspect(r io.Reader) (map[string]any, error) {
 }
 
 // startDockerLogs follows a container's output; input is ignored.
-func startDockerLogs(req guest.TermOpenRequest, onOut func([]byte), onExit func()) (io.WriteCloser, func(), func(int, int), error) {
+func startDockerLogs(req entities.TermOpenRequest, onOut func([]byte), onExit func()) (io.WriteCloser, func(), func(int, int), error) {
 	e := docker()
 	if e == nil {
 		return nil, nil, nil, errNoDocker
@@ -699,9 +699,9 @@ const execReap = `m="PROBE_EXEC=$0"; p=""; for d in /proc/[0-9]*; do tr '\0' '\n
 	`[ -z "$p" ] && exit 0; kill -HUP $p 2>/dev/null; sleep 1; kill -KILL $p 2>/dev/null; exit 0`
 
 // startDockerExec runs an interactive shell in a container on a hijacked engine connection.
-func startDockerExec(req guest.TermOpenRequest, cols, rows int, onOut func([]byte), onExit func()) (io.WriteCloser, func(), func(int, int), error) {
+func startDockerExec(req entities.TermOpenRequest, cols, rows int, onOut func([]byte), onExit func()) (io.WriteCloser, func(), func(int, int), error) {
 	if dockerMode() != dockerRW {
-		return nil, nil, nil, &guest.FrameError{Code: "agent_policy", Message: "探针未开放容器终端（需 GUEST_DOCKER=rw）"}
+		return nil, nil, nil, &entities.FrameError{Code: "agent_policy", Message: "探针未开放容器终端（需 GUEST_DOCKER=rw）"}
 	}
 	e := docker()
 	if e == nil {
@@ -867,7 +867,7 @@ type apiImage struct {
 	Containers int      `json:"Containers"`
 }
 
-func (e *dockerEngine) listImages(ctx context.Context, cs []apiContainer) []guest.DockerImage {
+func (e *dockerEngine) listImages(ctx context.Context, cs []apiContainer) []entities.DockerImage {
 	var list []apiImage
 	if err := e.call(ctx, http.MethodGet, "/images/json", nil, &list); err != nil {
 		return nil
@@ -881,14 +881,14 @@ func (e *dockerEngine) listImages(ctx context.Context, cs []apiContainer) []gues
 			used[c.Image]++
 		}
 	}
-	out := make([]guest.DockerImage, 0, min(len(list), maxImages))
+	out := make([]entities.DockerImage, 0, min(len(list), maxImages))
 	for _, img := range list {
 		n := imageName(img)
 		inUse := img.Containers
 		if inUse < 0 {
 			inUse = used[img.ID] + used[n]
 		}
-		out = append(out, guest.DockerImage{ID: shortID(strings.TrimPrefix(img.ID, "sha256:")), Name: n, Tags: namedTags(img.RepoTags),
+		out = append(out, entities.DockerImage{ID: shortID(strings.TrimPrefix(img.ID, "sha256:")), Name: n, Tags: namedTags(img.RepoTags),
 			Size: img.Size, Created: img.Created, InUse: inUse})
 		if len(out) >= maxImages {
 			break
@@ -933,14 +933,14 @@ func firstComposeFile(v string) string {
 	return ""
 }
 
-func dockerLogs(ctx context.Context, req guest.DockerLogsRequest) (guest.DockerLogsResult, error) {
+func dockerLogs(ctx context.Context, req entities.DockerLogsRequest) (entities.DockerLogsResult, error) {
 	e := docker()
 	if e == nil {
-		return guest.DockerLogsResult{}, errNoDocker
+		return entities.DockerLogsResult{}, errNoDocker
 	}
 	info, err := e.inspectAllowed(ctx, req.Container)
 	if err != nil {
-		return guest.DockerLogsResult{}, err
+		return entities.DockerLogsResult{}, err
 	}
 	tail := req.Tail
 	if tail <= 0 {
@@ -956,17 +956,17 @@ func dockerLogs(ctx context.Context, req guest.DockerLogsRequest) (guest.DockerL
 	}
 	resp, err := e.do(ctx, http.MethodGet, q, nil)
 	if err != nil {
-		return guest.DockerLogsResult{}, err
+		return entities.DockerLogsResult{}, err
 	}
 	defer resp.Body.Close()
 	text, err := readLogBody(io.LimitReader(resp.Body, maxLogBytes+1), info.Config.Tty)
 	if err != nil && err != io.EOF {
-		return guest.DockerLogsResult{}, err
+		return entities.DockerLogsResult{}, err
 	}
 	if len(text) > maxLogBytes {
 		text = text[len(text)-maxLogBytes:]
 	}
-	return guest.DockerLogsResult{Text: text}, nil
+	return entities.DockerLogsResult{Text: text}, nil
 }
 
 func readLogBody(r io.Reader, tty bool) (string, error) {
@@ -980,20 +980,20 @@ func readLogBody(r io.Reader, tty bool) (string, error) {
 	return buf.String(), err
 }
 
-func dockerCompose(ctx context.Context, project string) (guest.DockerComposeResult, error) {
+func dockerCompose(ctx context.Context, project string) (entities.DockerComposeResult, error) {
 	e := docker()
 	if e == nil {
-		return guest.DockerComposeResult{}, errNoDocker
+		return entities.DockerComposeResult{}, errNoDocker
 	}
 	project = strings.TrimSpace(project)
 	if project == "" {
-		return guest.DockerComposeResult{}, &guest.FrameError{Code: "bad_request", Message: "project required"}
+		return entities.DockerComposeResult{}, &entities.FrameError{Code: "bad_request", Message: "project required"}
 	}
 	var list []apiContainer
 	if err := e.call(ctx, http.MethodGet, "/containers/json?all=1", nil, &list); err != nil {
-		return guest.DockerComposeResult{}, err
+		return entities.DockerComposeResult{}, err
 	}
-	out := guest.DockerComposeResult{Project: project}
+	out := entities.DockerComposeResult{Project: project}
 	seen := map[string]bool{}
 	var files []string
 	for _, c := range list {

@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bytes"
@@ -22,8 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"govmomi-wmks/internal/guest"
-	"govmomi-wmks/internal/release"
+	"vartio/internal/entities"
+	"vartio/internal/release"
 )
 
 // Upgrade flow: stage (download, checksum, signature, self-test) -> reply ->
@@ -53,7 +53,7 @@ type upgradeState struct {
 // upgradeEnabled is on unless GUEST_UPGRADE=off. A container keeps the binary
 // in its image unless the edge image (or GUEST_UPGRADE=on) opts into replacement.
 func upgradeEnabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("GUEST_UPGRADE")))
+	v := strings.ToLower(strings.TrimSpace(getenv("VARTIO_AGENT_UPGRADE", "GUEST_UPGRADE")))
 	if inContainer() {
 		return v == "on"
 	}
@@ -61,7 +61,7 @@ func upgradeEnabled() bool {
 }
 
 func probation() time.Duration {
-	if d, err := time.ParseDuration(os.Getenv("GUEST_UPGRADE_PROBATION")); err == nil && d >= 30*time.Second {
+	if d, err := time.ParseDuration(getenv("VARTIO_AGENT_UPGRADE_PROBATION", "GUEST_UPGRADE_PROBATION")); err == nil && d >= 30*time.Second {
 		return d
 	}
 	return 2 * time.Minute
@@ -100,7 +100,7 @@ func writeState(path string, st *upgradeState) error {
 
 // startupReport looks at a leftover state file: either we are the new version on
 // probation, or the watchdog rolled back to us. Anything else is stale.
-func startupReport() *guest.UpgradeReport {
+func startupReport() *entities.UpgradeReport {
 	exe, err := selfExe()
 	if err != nil {
 		return nil
@@ -114,10 +114,10 @@ func startupReport() *guest.UpgradeReport {
 	case st.Phase == "pending" && st.To == agentVersion:
 		log.Printf("upgrade: running %s on probation (from %s)", st.To, st.From)
 		setLink(func(s *linkState) { s.Probation = st.To })
-		return &guest.UpgradeReport{From: st.From, To: st.To, Mode: st.Mode, OK: true}
+		return &entities.UpgradeReport{From: st.From, To: st.To, Mode: st.Mode, OK: true}
 	case st.Phase == "rolled_back" && st.From == agentVersion:
 		log.Printf("upgrade: rolled back from %s: %s", st.To, st.Error)
-		return &guest.UpgradeReport{From: st.From, To: st.To, Mode: st.Mode, OK: false, Error: st.Error}
+		return &entities.UpgradeReport{From: st.From, To: st.To, Mode: st.Mode, OK: false, Error: st.Error}
 	}
 	_ = os.Remove(statePath(exe))
 	return nil
@@ -125,10 +125,10 @@ func startupReport() *guest.UpgradeReport {
 
 var report struct {
 	once sync.Once
-	r    *guest.UpgradeReport
+	r    *entities.UpgradeReport
 }
 
-func pendingReport() *guest.UpgradeReport {
+func pendingReport() *entities.UpgradeReport {
 	report.once.Do(func() { report.r = startupReport() })
 	return report.r
 }
@@ -201,12 +201,12 @@ func (cfg config) hubGet(ctx context.Context, path string, q url.Values) (*http.
 
 // upgrade stages req and, if that succeeds, restarts into it shortly after the
 // caller has had time to send the reply. step (may be nil) receives progress.
-func upgrade(ctx context.Context, cfg config, req guest.UpgradeRequest, step func(guest.UpgradeStep)) guest.UpgradeResult {
+func upgrade(ctx context.Context, cfg config, req entities.UpgradeRequest, step func(entities.UpgradeStep)) entities.UpgradeResult {
 	if step == nil {
-		step = func(guest.UpgradeStep) {}
+		step = func(entities.UpgradeStep) {}
 	}
-	res := guest.UpgradeResult{From: agentVersion, To: req.Version}
-	fail := func(format string, args ...any) guest.UpgradeResult {
+	res := entities.UpgradeResult{From: agentVersion, To: req.Version}
+	fail := func(format string, args ...any) entities.UpgradeResult {
 		res.Message = fmt.Sprintf(format, args...)
 		log.Printf("upgrade %s -> %s: %s", agentVersion, req.Version, res.Message)
 		return res
@@ -258,19 +258,19 @@ func upgrade(ctx context.Context, cfg config, req guest.UpgradeRequest, step fun
 type progressWriter struct {
 	n, total int64
 	last     time.Time
-	step     func(guest.UpgradeStep)
+	step     func(entities.UpgradeStep)
 }
 
 func (w *progressWriter) Write(p []byte) (int, error) {
 	w.n += int64(len(p))
 	if time.Since(w.last) >= 300*time.Millisecond {
 		w.last = time.Now()
-		w.step(guest.UpgradeStep{Stage: guest.UpgradeDownload, Done: w.n, Total: w.total})
+		w.step(entities.UpgradeStep{Stage: entities.UpgradeDownload, Done: w.n, Total: w.total})
 	}
 	return len(p), nil
 }
 
-func stage(ctx context.Context, cfg config, req guest.UpgradeRequest, dst string, step func(guest.UpgradeStep)) error {
+func stage(ctx context.Context, cfg config, req entities.UpgradeRequest, dst string, step func(entities.UpgradeStep)) error {
 	a := req.Artifact
 	if a.Size <= 0 || a.Size > maxArtifact {
 		return fmt.Errorf("构建大小 %d 不合理", a.Size)
@@ -295,7 +295,7 @@ func stage(ctx context.Context, cfg config, req guest.UpgradeRequest, dst string
 	}
 	h := sha256.New()
 	pw := &progressWriter{total: a.Size, step: step}
-	step(guest.UpgradeStep{Stage: guest.UpgradeDownload, Total: a.Size})
+	step(entities.UpgradeStep{Stage: entities.UpgradeDownload, Total: a.Size})
 	n, err := io.Copy(io.MultiWriter(f, h, pw), io.LimitReader(resp.Body, maxArtifact+1))
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -303,11 +303,11 @@ func stage(ctx context.Context, cfg config, req guest.UpgradeRequest, dst string
 	if err != nil {
 		return fmt.Errorf("下载中断：%v", err)
 	}
-	step(guest.UpgradeStep{Stage: guest.UpgradeVerify, Done: n, Total: a.Size})
+	step(entities.UpgradeStep{Stage: entities.UpgradeVerify, Done: n, Total: a.Size})
 	if err := release.Verify(keys, req.Version, a, n, hex.EncodeToString(h.Sum(nil))); err != nil {
 		return fmt.Errorf("校验失败：%v", err)
 	}
-	step(guest.UpgradeStep{Stage: guest.UpgradeSelfTest, Done: n, Total: a.Size})
+	step(entities.UpgradeStep{Stage: entities.UpgradeSelfTest, Done: n, Total: a.Size})
 	return selfTest(ctx, dst, req.Version)
 }
 
@@ -320,10 +320,22 @@ func selfTest(ctx context.Context, bin, want string) error {
 	if err != nil {
 		return fmt.Errorf("自检失败：%v %s", err, bytes.TrimSpace(out))
 	}
-	if got := strings.Fields(string(out)); len(got) < 2 || got[0] != "probe-agent" || got[1] != want {
+	if !versionBannerOK(out, want) {
 		return fmt.Errorf("自检失败：新程序报告 %q", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// versionBannerOK accepts the name already-deployed agents print (probe-agent)
+// and the Vartio name. The version must be the one this upgrade asked for.
+func versionBannerOK(out []byte, want string) bool {
+	fields := strings.Fields(string(out))
+	for i := 0; i+1 < len(fields); i++ {
+		if (fields[i] == "probe-agent" || fields[i] == "vartio-agent") && fields[i+1] == want {
+			return true
+		}
+	}
+	return false
 }
 
 // swapIn moves exe aside to exe.old and staged into place, undoing on failure.
@@ -355,11 +367,11 @@ func swapBack(exe string) error {
 
 // autoUpdate polls the hub for a newer build when GUEST_AUTO_UPDATE=on.
 func autoUpdate(ctx context.Context, cfg config) {
-	if !upgradeEnabled() || !strings.EqualFold(strings.TrimSpace(os.Getenv("GUEST_AUTO_UPDATE")), "on") {
+	if !upgradeEnabled() || !strings.EqualFold(strings.TrimSpace(getenv("VARTIO_AGENT_AUTO_UPDATE", "GUEST_AUTO_UPDATE")), "on") {
 		return
 	}
 	every := 6 * time.Hour
-	if d, err := time.ParseDuration(os.Getenv("GUEST_UPDATE_INTERVAL")); err == nil && d >= time.Minute {
+	if d, err := time.ParseDuration(getenv("VARTIO_AGENT_UPDATE_INTERVAL", "GUEST_UPDATE_INTERVAL")); err == nil && d >= time.Minute {
 		every = d
 	}
 	log.Printf("auto update: checking every %s", every)
@@ -384,7 +396,7 @@ func autoUpdate(ctx context.Context, cfg config) {
 func checkLatest(ctx context.Context, cfg config) error {
 	c, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	resp, err := cfg.hubGet(c, guest.PathAgentLatest, url.Values{"os": {runtime.GOOS}, "arch": {runtime.GOARCH}, "current": {agentVersion}})
+	resp, err := cfg.hubGet(c, entities.PathAgentLatest, url.Values{"os": {runtime.GOOS}, "arch": {runtime.GOARCH}, "current": {agentVersion}})
 	if err != nil {
 		return err
 	}
@@ -395,7 +407,7 @@ func checkLatest(ctx context.Context, cfg config) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("latest: HTTP %d", resp.StatusCode)
 	}
-	var l guest.AgentLatest
+	var l entities.AgentLatest
 	if err := json.NewDecoder(resp.Body).Decode(&l); err != nil {
 		return err
 	}
@@ -403,7 +415,7 @@ func checkLatest(ctx context.Context, cfg config) error {
 		return nil
 	}
 	log.Printf("auto update: %s available", l.Version)
-	if res := upgrade(ctx, cfg, guest.UpgradeRequest{Version: l.Version, Artifact: l.Artifact, URL: l.URL, Mode: "auto"}, nil); !res.OK {
+	if res := upgrade(ctx, cfg, entities.UpgradeRequest{Version: l.Version, Artifact: l.Artifact, URL: l.URL, Mode: "auto"}, nil); !res.OK {
 		return errors.New(res.Message)
 	}
 	return nil
@@ -424,7 +436,7 @@ func runWatch(path string) int {
 		fmt.Fprintln(os.Stderr, "upgrade-watch:", err)
 		return 1
 	}
-	if f, err := os.OpenFile(filepath.Join(filepath.Dir(st.Exe), "probe-agent.upgrade.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+	if f, err := os.OpenFile(st.Exe+".upgrade.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 		log.SetOutput(f)
 		defer f.Close()
 	}

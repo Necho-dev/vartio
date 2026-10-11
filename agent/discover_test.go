@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/hub"
 )
 
 func TestExpandPath(t *testing.T) {
@@ -43,7 +44,7 @@ func TestExpandPath(t *testing.T) {
 	}
 }
 
-func call[T any](t *testing.T, h *guest.Hub, key, prim string, params any) (T, error) {
+func call[T any](t *testing.T, h *hub.Hub, key, prim string, params any) (T, error) {
 	t.Helper()
 	var v T
 	raw, err := h.CallPrimitive(context.Background(), key, prim, params)
@@ -59,13 +60,13 @@ func TestLivePrimitives(t *testing.T) {
 	}
 	h, _ := startLiveAgent(t, "live-prims")
 	info, _ := h.Info("live-prims")
-	for _, c := range []string{guest.CapFsWhich, guest.CapFsRead, guest.CapProcSpawn, guest.CapNetListeners} {
+	for _, c := range []string{entities.CapFsWhich, entities.CapFsRead, entities.CapProcSpawn, entities.CapNetListeners} {
 		if info.Primitives[c] != 1 {
 			t.Fatalf("primitive %s not declared: %+v", c, info.Primitives)
 		}
 	}
 
-	w, err := call[guest.WhichResult](t, h, "live-prims", guest.CapFsWhich, guest.WhichRequest{Paths: []string{"/bin/sh", "/no/such/browser"}, Names: []string{"sh", "ls"}})
+	w, err := call[entities.WhichResult](t, h, "live-prims", entities.CapFsWhich, entities.WhichRequest{Paths: []string{"/bin/sh", "/no/such/browser"}, Names: []string{"sh", "ls"}})
 	// PATH "sh" is /bin/sh again and is reported once.
 	if err != nil || len(w.Hits) != 2 || w.Hits[0].Path != "/bin/sh" || w.Hits[1].Query != "ls" {
 		t.Fatalf("which %+v %v", w, err)
@@ -73,13 +74,13 @@ func TestLivePrimitives(t *testing.T) {
 
 	small := filepath.Join(t.TempDir(), "DevToolsActivePort")
 	_ = os.WriteFile(small, []byte("9222\n/devtools/browser/x\n"), 0o644)
-	rd, err := call[guest.ReadResult](t, h, "live-prims", guest.CapFsRead, guest.ReadRequest{Paths: []string{small, "/no/such/file"}, Limit: 4})
+	rd, err := call[entities.ReadResult](t, h, "live-prims", entities.CapFsRead, entities.ReadRequest{Paths: []string{small, "/no/such/file"}, Limit: 4})
 	if err != nil || len(rd.Files) != 1 || string(rd.Files[0].Data) != "9222" || !rd.Files[0].Truncated || rd.Files[0].Size != 25 {
 		t.Fatalf("read %+v %v", rd, err)
 	}
 
 	mark := filepath.Join(t.TempDir(), "spawned")
-	sp, err := call[guest.SpawnResult](t, h, "live-prims", guest.CapProcSpawn, guest.SpawnRequest{Path: "sh", Args: []string{"-c", `echo "$PROBE_SPAWN" > "$0"`, mark}, Env: map[string]string{"PROBE_SPAWN": "ok"}})
+	sp, err := call[entities.SpawnResult](t, h, "live-prims", entities.CapProcSpawn, entities.SpawnRequest{Path: "sh", Args: []string{"-c", `echo "$PROBE_SPAWN" > "$0"`, mark}, Env: map[string]string{"PROBE_SPAWN": "ok"}})
 	if err != nil || sp.PID <= 0 || !strings.HasSuffix(sp.Path, "/sh") {
 		t.Fatalf("spawn %+v %v", sp, err)
 	}
@@ -94,7 +95,7 @@ func TestLivePrimitives(t *testing.T) {
 	if strings.TrimSpace(string(got)) != "ok" {
 		t.Fatalf("spawned process did not run: %q", got)
 	}
-	_, err = call[guest.SpawnResult](t, h, "live-prims", guest.CapProcSpawn, guest.SpawnRequest{Path: "/no/such/program"})
+	_, err = call[entities.SpawnResult](t, h, "live-prims", entities.CapProcSpawn, entities.SpawnRequest{Path: "/no/such/program"})
 	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "not_found" {
 		t.Fatalf("missing program: %v", err)
@@ -107,7 +108,7 @@ func TestLivePrimitives(t *testing.T) {
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 	exe, _ := os.Executable()
-	ls, err := call[[]guest.Listener](t, h, "live-prims", guest.CapNetListeners, guest.ListenersRequest{Names: []string{filepath.Base(exe)}})
+	ls, err := call[[]entities.Listener](t, h, "live-prims", entities.CapNetListeners, entities.ListenersRequest{Names: []string{filepath.Base(exe)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +121,7 @@ func TestLivePrimitives(t *testing.T) {
 	if !found {
 		t.Fatalf("own listener on %d not reported: %+v", port, ls)
 	}
-	if ls, _ := call[[]guest.Listener](t, h, "live-prims", guest.CapNetListeners, guest.ListenersRequest{Names: []string{"no-such-process-name"}}); len(ls) != 0 {
+	if ls, _ := call[[]entities.Listener](t, h, "live-prims", entities.CapNetListeners, entities.ListenersRequest{Names: []string{"no-such-process-name"}}); len(ls) != 0 {
 		t.Fatalf("name filter ignored: %+v", ls)
 	}
 }
@@ -128,7 +129,7 @@ func TestLivePrimitives(t *testing.T) {
 func TestLiveSpawnDisabled(t *testing.T) {
 	t.Setenv("GUEST_SPAWN", "off")
 	h, _ := startLiveAgent(t, "live-spawn-off")
-	_, err := h.CallPrimitive(context.Background(), "live-spawn-off", guest.CapProcSpawn, guest.SpawnRequest{Path: "sh"})
+	_, err := h.CallPrimitive(context.Background(), "live-spawn-off", entities.CapProcSpawn, entities.SpawnRequest{Path: "sh"})
 	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "cap_missing" {
 		t.Fatalf("want cap_missing, got %v", err)

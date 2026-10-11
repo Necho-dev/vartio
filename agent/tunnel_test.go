@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bytes"
@@ -18,8 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/hub"
 )
 
 func TestTunnelPolicy(t *testing.T) {
@@ -48,9 +49,9 @@ func TestTunnelPolicy(t *testing.T) {
 	}
 }
 
-func startLiveAgent(t *testing.T, bios string) (*guest.Hub, *httptest.Server) {
+func startLiveAgent(t *testing.T, bios string) (*hub.Hub, *httptest.Server) {
 	t.Helper()
-	h := guest.NewHub("dev")
+	h := hub.NewHub("dev")
 	srv := httptest.NewServer(h.DevHandler())
 	t.Cleanup(srv.Close)
 	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/probe/connect"
@@ -67,7 +68,7 @@ func startLiveAgent(t *testing.T, bios string) (*guest.Hub, *httptest.Server) {
 	return h, srv
 }
 
-func tunnelClient(h *guest.Hub, key, target string) *http.Client {
+func tunnelClient(h *hub.Hub, key, target string) *http.Client {
 	return &http.Client{Transport: &http.Transport{
 		DialContext:       func(ctx context.Context, _, _ string) (net.Conn, error) { return h.DialTCP(ctx, key, target, "test") },
 		DisableKeepAlives: true,
@@ -95,7 +96,7 @@ func TestLiveTunnelHTTP(t *testing.T) {
 
 	h, _ := startLiveAgent(t, "live-tunnel")
 	info, _ := h.Info("live-tunnel")
-	if info.Primitives[guest.CapTunnelTCP] != 1 {
+	if info.Primitives[entities.CapTunnelTCP] != 1 {
 		t.Fatalf("primitives %+v", info.Primitives)
 	}
 	c := tunnelClient(h, "live-tunnel", target)

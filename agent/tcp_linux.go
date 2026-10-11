@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bufio"
@@ -8,13 +8,13 @@ import (
 	"strconv"
 	"strings"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // tcpStats reads /proc directly; gopsutil's connection list walks every
 // process's fds, which is far too slow for a 10s sample.
-func tcpStats(context.Context) (*guest.TCPStats, error) {
-	out := &guest.TCPStats{}
+func tcpStats(context.Context) (*entities.TCPStats, error) {
+	out := &entities.TCPStats{}
 	ok := false
 	for _, p := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
 		if countTCPStates(p, out) == nil {
@@ -30,7 +30,7 @@ func tcpStats(context.Context) (*guest.TCPStats, error) {
 	return out, nil
 }
 
-func countTCPStates(path string, out *guest.TCPStats) error {
+func countTCPStates(path string, out *entities.TCPStats) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err

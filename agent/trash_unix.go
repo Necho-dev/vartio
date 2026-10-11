@@ -1,6 +1,6 @@
 //go:build !windows
 
-package main
+package agent
 
 import (
 	"bufio"
@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 const trashInfoTime = "2006-01-02T15:04:05"
@@ -41,7 +41,7 @@ func trashDirs() (files, info string, err error) {
 // moveToTrash moves abs into the agent user's Trash: ~/.Trash on macOS, the
 // freedesktop.org home trash elsewhere. Items on another filesystem are
 // refused rather than copied.
-func moveToTrash(abs string) *guest.FrameError {
+func moveToTrash(abs string) *entities.FrameError {
 	files, info, err := trashDirs()
 	if err != nil {
 		return asRPC(err)
@@ -85,26 +85,26 @@ func moveToTrash(abs string) *guest.FrameError {
 	return nil
 }
 
-func trashRename(src, dst string) *guest.FrameError {
+func trashRename(src, dst string) *entities.FrameError {
 	if err := os.Rename(src, dst); err != nil {
 		if errors.Is(err, syscall.EXDEV) {
-			return &guest.FrameError{Code: "not_supported", Message: "not on the same disk as the Trash"}
+			return &entities.FrameError{Code: "not_supported", Message: "not on the same disk as the Trash"}
 		}
 		return asRPC(err)
 	}
 	return nil
 }
 
-func trashItems() ([]guest.TrashItem, string, *guest.FrameError) {
+func trashItems() ([]entities.TrashItem, string, *entities.FrameError) {
 	files, info, err := trashDirs()
 	if err != nil {
 		return nil, "", asRPC(err)
 	}
-	items := []guest.TrashItem{}
+	items := []entities.TrashItem{}
 	ents, err := os.ReadDir(files)
 	if err != nil && !os.IsNotExist(err) {
 		if os.IsPermission(err) {
-			return nil, files, &guest.FrameError{Code: "not_supported", Message: "no permission to read " + files + " (macOS needs Full Disk Access for the agent)"}
+			return nil, files, &entities.FrameError{Code: "not_supported", Message: "no permission to read " + files + " (macOS needs Full Disk Access for the agent)"}
 		}
 		return nil, files, asRPC(err)
 	}
@@ -204,7 +204,7 @@ func macIndexPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, "probe-agent", "trash-index.json")
+	return existingFile(filepath.Join(dir, "vartio", "trash-index.json"), filepath.Join(dir, "probe-agent", "trash-index.json"))
 }
 
 func macIndexLoad() map[string]macTrashRecord {

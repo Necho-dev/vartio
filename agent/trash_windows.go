@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package agent
 
 import (
 	"encoding/binary"
@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 var procSHFileOperationW = windows.NewLazySystemDLL("shell32.dll").NewProc("SHFileOperationW")
@@ -41,13 +41,13 @@ const (
 // moveToTrash sends abs to the Recycle Bin of the account the agent runs as.
 // Only fixed drives have one: elsewhere SHFileOperation would silently delete
 // for good, so those are refused.
-func moveToTrash(abs string) *guest.FrameError {
+func moveToTrash(abs string) *entities.FrameError {
 	root, err := windows.UTF16PtrFromString(filepath.VolumeName(abs) + `\`)
 	if err != nil {
 		return bad("invalid path")
 	}
 	if windows.GetDriveType(root) != windows.DRIVE_FIXED {
-		return &guest.FrameError{Code: "not_supported", Message: "this drive has no Recycle Bin"}
+		return &entities.FrameError{Code: "not_supported", Message: "this drive has no Recycle Bin"}
 	}
 	from, err := windows.UTF16FromString(abs)
 	if err != nil {
@@ -61,10 +61,10 @@ func moveToTrash(abs string) *guest.FrameError {
 	}
 	rc, _, _ := procSHFileOperationW.Call(uintptr(unsafe.Pointer(&op)))
 	if rc != 0 || op.fAnyOperationsAborted != 0 {
-		return &guest.FrameError{Code: "io_error", Message: "recycle failed: " + windows.Errno(rc).Error()}
+		return &entities.FrameError{Code: "io_error", Message: "recycle failed: " + windows.Errno(rc).Error()}
 	}
 	if _, err := os.Lstat(abs); err == nil {
-		return &guest.FrameError{Code: "io_error", Message: "recycle failed: file still exists"}
+		return &entities.FrameError{Code: "io_error", Message: "recycle failed: file still exists"}
 	}
 	return nil
 }
@@ -129,12 +129,12 @@ func infoFor(id string) string {
 	return filepath.Join(filepath.Dir(id), "$I"+strings.TrimPrefix(filepath.Base(id), "$R"))
 }
 
-func trashItems() ([]guest.TrashItem, string, *guest.FrameError) {
+func trashItems() ([]entities.TrashItem, string, *entities.FrameError) {
 	bins, sid, err := recycleBins()
 	if err != nil {
 		return nil, "", asRPC(err)
 	}
-	items := []guest.TrashItem{}
+	items := []entities.TrashItem{}
 	for _, bin := range bins {
 		ents, err := os.ReadDir(bin)
 		if err != nil {

@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/process"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 const procSampleGap = 700 * time.Millisecond
@@ -30,7 +30,7 @@ func cpuSeconds(p *process.Process) (float64, bool) {
 
 // listProcs samples CPU time twice so cpuPct is the current share of all cores,
 // not the lifetime average gopsutil reports.
-func listProcs() ([]guest.ProcInfo, error) {
+func listProcs() ([]entities.ProcInfo, error) {
 	ps, err := process.Processes()
 	if err != nil {
 		return nil, err
@@ -46,9 +46,9 @@ func listProcs() ([]guest.ProcInfo, error) {
 	time.Sleep(procSampleGap)
 	dt := time.Since(t0).Seconds() * float64(runtime.NumCPU())
 
-	out := make([]guest.ProcInfo, 0, len(ps))
+	out := make([]entities.ProcInfo, 0, len(ps))
 	for _, p := range ps {
-		info := guest.ProcInfo{PID: p.Pid, Name: procName(p, names)}
+		info := entities.ProcInfo{PID: p.Pid, Name: procName(p, names)}
 		if s, ok := cpuSeconds(p); ok {
 			if b, had := before[p.Pid]; had && s >= b && dt > 0 {
 				info.CPUPct = (s - b) / dt * 100
@@ -97,20 +97,20 @@ func procAlive(name string) (bool, string) {
 	return true, fmt.Sprintf("pid=%d", hits[0].Pid)
 }
 
-func procAction(req guest.ActionRequest) (guest.ActionResult, *guest.FrameError) {
+func procAction(req entities.ActionRequest) (entities.ActionResult, *entities.FrameError) {
 	switch req.Action {
 	case "start":
-		return guest.ActionResult{}, &guest.FrameError{Code: "not_supported", Message: "start a process by path via exec, not procs.action"}
+		return entities.ActionResult{}, &entities.FrameError{Code: "not_supported", Message: "start a process by path via exec, not procs.action"}
 	case "stop", "kill":
 	default:
-		return guest.ActionResult{}, bad("action must be start, stop, or kill")
+		return entities.ActionResult{}, bad("action must be start, stop, or kill")
 	}
 	hits, err := matchProcs(req.Name)
 	if err != nil {
-		return guest.ActionResult{}, asRPC(err)
+		return entities.ActionResult{}, asRPC(err)
 	}
 	if len(hits) == 0 {
-		return guest.ActionResult{OK: false, Name: req.Name, Action: req.Action, Message: "not found"}, nil
+		return entities.ActionResult{OK: false, Name: req.Name, Action: req.Action, Message: "not found"}, nil
 	}
 	var last error
 	for _, p := range hits {
@@ -121,7 +121,7 @@ func procAction(req guest.ActionRequest) (guest.ActionResult, *guest.FrameError)
 		}
 	}
 	if last != nil {
-		return guest.ActionResult{}, asRPC(last)
+		return entities.ActionResult{}, asRPC(last)
 	}
-	return guest.ActionResult{OK: true, Name: req.Name, Action: req.Action}, nil
+	return entities.ActionResult{OK: true, Name: req.Name, Action: req.Action}, nil
 }

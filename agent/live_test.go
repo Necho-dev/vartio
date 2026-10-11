@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -10,11 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
+	"vartio/internal/hub"
 )
 
 func TestLiveAgentHealthExecServices(t *testing.T) {
-	h := guest.NewHub("dev")
+	h := hub.NewHub("dev")
 	srv := httptest.NewServer(h.DevHandler())
 	t.Cleanup(srv.Close)
 
@@ -42,7 +43,7 @@ func TestLiveAgentHealthExecServices(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("health %d %s", resp.StatusCode, b)
 	}
-	var health guest.Health
+	var health entities.Health
 	if err := json.Unmarshal(b, &health); err != nil {
 		t.Fatal(err)
 	}
@@ -50,14 +51,14 @@ func TestLiveAgentHealthExecServices(t *testing.T) {
 		t.Fatalf("health snapshot %+v", health)
 	}
 
-	body, _ := json.Marshal(guest.ExecRequest{Command: "uname", Args: []string{"-s"}, Shell: "sh"})
+	body, _ := json.Marshal(entities.ExecRequest{Command: "uname", Args: []string{"-s"}, Shell: "sh"})
 	resp, err = http.Post(srv.URL+"/v1/probe/sessions/live-macos/exec", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	var ex guest.ExecResult
+	var ex entities.ExecResult
 	if err := json.Unmarshal(b, &ex); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +75,7 @@ func TestLiveAgentHealthExecServices(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("services %d %s", resp.StatusCode, b)
 	}
-	var svcs []guest.ServiceInfo
+	var svcs []entities.ServiceInfo
 	if err := json.Unmarshal(b, &svcs); err != nil {
 		t.Fatal(err)
 	}

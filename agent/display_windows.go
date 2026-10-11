@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package agent
 
 import (
 	"fmt"
@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 var (
@@ -87,7 +87,7 @@ func currentSessionID() uint32 {
 
 func interactiveSession() error {
 	if currentSessionID() == 0 {
-		return &guest.FrameError{Code: "no_user_session", Message: "probe-agent is not in an interactive session (Session 0 cannot see the user desktop)"}
+		return &entities.FrameError{Code: "no_user_session", Message: "probe-agent is not in an interactive session (Session 0 cannot see the user desktop)"}
 	}
 	return nil
 }
@@ -108,12 +108,12 @@ func dpiAware(fn func()) {
 
 var (
 	monMu  sync.Mutex
-	monOut []guest.Screen
+	monOut []entities.Screen
 	monCB  = windows.NewCallback(func(h, _, _, _ uintptr) uintptr {
 		mi := monitorInfoEx{Size: uint32(unsafe.Sizeof(monitorInfoEx{}))}
 		if r, _, _ := procGetMonitorInfoW.Call(h, uintptr(unsafe.Pointer(&mi))); r != 0 {
 			name := strings.TrimPrefix(windows.UTF16ToString(mi.Device[:]), `\\.\`)
-			monOut = append(monOut, guest.Screen{Name: name,
+			monOut = append(monOut, entities.Screen{Name: name,
 				X: int(mi.Monitor.Left), Y: int(mi.Monitor.Top),
 				Width: int(mi.Monitor.Right - mi.Monitor.Left), Height: int(mi.Monitor.Bottom - mi.Monitor.Top),
 				Primary: mi.Flags&monitorInfoPrimary != 0})
@@ -123,7 +123,7 @@ var (
 )
 
 // listScreens returns the monitors with the primary first, then left to right.
-func listScreens() []guest.Screen {
+func listScreens() []entities.Screen {
 	monMu.Lock()
 	defer monMu.Unlock()
 	monOut = nil
@@ -145,12 +145,12 @@ func listScreens() []guest.Screen {
 	return out
 }
 
-func captureFrame(sc guest.Screen, p displayProfile) (b []byte, err error) {
+func captureFrame(sc entities.Screen, p displayProfile) (b []byte, err error) {
 	dpiAware(func() { b, err = captureRect(sc, p) })
 	return b, err
 }
 
-func captureRect(sc guest.Screen, p displayProfile) ([]byte, error) {
+func captureRect(sc entities.Screen, p displayProfile) ([]byte, error) {
 	x, y, w, h := uintptr(sc.X), uintptr(sc.Y), uintptr(sc.Width), uintptr(sc.Height)
 	if sc.Width <= 0 || sc.Height <= 0 {
 		x, y = 0, 0
@@ -158,7 +158,7 @@ func captureRect(sc guest.Screen, p displayProfile) ([]byte, error) {
 		h, _, _ = procGetSystemMetrics.Call(smCYScreen)
 	}
 	if w == 0 || h == 0 {
-		return nil, &guest.FrameError{Code: "no_user_session", Message: "no desktop metrics"}
+		return nil, &entities.FrameError{Code: "no_user_session", Message: "no desktop metrics"}
 	}
 	hdc, _, _ := procGetDC.Call(0)
 	if hdc == 0 {
@@ -180,7 +180,7 @@ func captureRect(sc guest.Screen, p displayProfile) ([]byte, error) {
 	procSelectObject.Call(mem, bmp)
 	r, _, _ := procBitBlt.Call(mem, 0, 0, w, h, hdc, x, y, srcCopy)
 	if r == 0 {
-		return nil, &guest.FrameError{Code: "no_user_session", Message: "BitBlt failed (no user desktop)"}
+		return nil, &entities.FrameError{Code: "no_user_session", Message: "BitBlt failed (no user desktop)"}
 	}
 
 	hdr := bitmapInfoHeader{

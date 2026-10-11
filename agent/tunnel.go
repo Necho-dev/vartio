@@ -1,16 +1,15 @@
-package main
+package agent
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 const (
@@ -30,7 +29,7 @@ type tunnelPolicy struct {
 }
 
 func loadTunnelPolicy() tunnelPolicy {
-	return parseTunnelPolicy(os.Getenv("GUEST_TUNNEL_ALLOW"))
+	return parseTunnelPolicy(getenv("VARTIO_AGENT_TUNNEL_ALLOW", "GUEST_TUNNEL_ALLOW"))
 }
 
 func parseTunnelPolicy(v string) tunnelPolicy {
@@ -133,8 +132,8 @@ func newTunnelHub() *tunnelHub {
 	return &tunnelHub{policy: loadTunnelPolicy(), m: map[string]*agentTunnel{}}
 }
 
-func (a *agent) tunnelOpen(params json.RawMessage) (any, *guest.FrameError) {
-	var req guest.TunnelOpenRequest
+func (a *agent) tunnelOpen(params json.RawMessage) (any, *entities.FrameError) {
+	var req entities.TunnelOpenRequest
 	if err := json.Unmarshal(params, &req); err != nil || req.ID == "" {
 		return nil, bad("invalid params")
 	}
@@ -144,26 +143,26 @@ func (a *agent) tunnelOpen(params json.RawMessage) (any, *guest.FrameError) {
 	th := a.tun
 	addr, err := th.policy.resolve(req.Target)
 	if err != nil {
-		return nil, &guest.FrameError{Code: "agent_policy", Message: err.Error()}
+		return nil, &entities.FrameError{Code: "agent_policy", Message: err.Error()}
 	}
 	th.mu.Lock()
 	n := len(th.m)
 	th.mu.Unlock()
-	if n >= guest.MaxTunnels {
-		return nil, &guest.FrameError{Code: "too_many_tunnels", Message: fmt.Sprintf("at most %d tunnels", guest.MaxTunnels)}
+	if n >= entities.MaxTunnels {
+		return nil, &entities.FrameError{Code: "too_many_tunnels", Message: fmt.Sprintf("at most %d tunnels", entities.MaxTunnels)}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tunnelDialTimeout)
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	cancel()
 	if err != nil {
-		return nil, &guest.FrameError{Code: "dial_failed", Message: err.Error()}
+		return nil, &entities.FrameError{Code: "dial_failed", Message: err.Error()}
 	}
 	t := &agentTunnel{conn: conn, in: make(chan []byte, 256), done: make(chan struct{})}
 	th.mu.Lock()
 	th.m[req.ID] = t
 	th.mu.Unlock()
 	go a.tunnelPump(req.ID, t)
-	return guest.TunnelOpenResult{OK: true, Remote: addr}, nil
+	return entities.TunnelOpenResult{OK: true, Remote: addr}, nil
 }
 
 // tunnelPump relays local bytes to the hub and hub bytes to the local peer.
@@ -181,18 +180,18 @@ func (a *agent) tunnelPump(id string, t *agentTunnel) {
 			}
 		}
 	}()
-	buf := make([]byte, guest.TunnelChunk)
+	buf := make([]byte, entities.TunnelChunk)
 	for {
 		n, err := t.conn.Read(buf)
 		if n > 0 {
-			a.send(guest.Frame{ID: id, Stream: guest.StreamTunnel, Data: append([]byte(nil), buf[:n]...)})
+			a.send(entities.Frame{ID: id, Stream: entities.StreamTunnel, Data: append([]byte(nil), buf[:n]...)})
 		}
 		if err != nil {
 			break
 		}
 	}
 	if a.tun.remove(id, t) {
-		a.send(guest.Frame{ID: id, Stream: guest.StreamTunnelClose})
+		a.send(entities.Frame{ID: id, Stream: entities.StreamTunnelClose})
 	}
 	t.stop()
 }

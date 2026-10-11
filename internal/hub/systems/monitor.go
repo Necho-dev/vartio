@@ -1,6 +1,6 @@
 // Package monitor keeps probe-hub's fleet view: it polls online agents for metrics,
 // derives rates from cumulative counters and persists history in PostgreSQL.
-package monitor
+package systems
 
 import (
 	"context"
@@ -13,27 +13,28 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/hub"
 )
 
 // System is one monitored machine, keyed by the agent's device fingerprint (ID).
 // Agents before 1.8 have no fingerprint and use their BIOS UUID as ID.
 type System struct {
-	ID          string             `json:"id"`
-	BiosUUID    string             `json:"biosUuid"`
-	Device      *guest.DeviceFacts `json:"device,omitempty"`
-	Name        string             `json:"name"`
-	HostName    string             `json:"hostname"`
-	Version     string             `json:"version"`
-	RemoteAddr  string             `json:"remoteAddr"`
-	Tags        []string           `json:"tags"`
-	Online      bool               `json:"online"`
-	FirstSeen   time.Time          `json:"firstSeen"`
-	LastSeen    time.Time          `json:"lastSeen"`
-	ConnectedAt time.Time          `json:"connectedAt"`
-	Info        guest.SysInfo      `json:"info"`
-	Latest      *Sample            `json:"latest,omitempty"`
+	ID          string                `json:"id"`
+	BiosUUID    string                `json:"biosUuid"`
+	Device      *entities.DeviceFacts `json:"device,omitempty"`
+	Name        string                `json:"name"`
+	HostName    string                `json:"hostname"`
+	Version     string                `json:"version"`
+	RemoteAddr  string                `json:"remoteAddr"`
+	Tags        []string              `json:"tags"`
+	Online      bool                  `json:"online"`
+	FirstSeen   time.Time             `json:"firstSeen"`
+	LastSeen    time.Time             `json:"lastSeen"`
+	ConnectedAt time.Time             `json:"connectedAt"`
+	Info        entities.SysInfo      `json:"info"`
+	Latest      *Sample               `json:"latest,omitempty"`
 	// Caps and Runner come from the live session only.
 	Caps   []string `json:"caps,omitempty"`
 	Runner string   `json:"runner,omitempty"`
@@ -63,23 +64,23 @@ type Sample struct {
 	NetTxBytes uint64 `json:"netTxBytes,omitempty"`
 	// The rest need agent >= 1.14.0; nil when unknown. NetErrs/NetDrops are
 	// counts since the previous sample.
-	NetRxPps   *float64        `json:"netRxPps,omitempty"`
-	NetTxPps   *float64        `json:"netTxPps,omitempty"`
-	NetErrs    *uint64         `json:"netErrs,omitempty"`
-	NetDrops   *uint64         `json:"netDrops,omitempty"`
-	TCP        *guest.TCPStats `json:"tcp,omitempty"`
-	RetransPct *float64        `json:"retransPct,omitempty"`
+	NetRxPps   *float64           `json:"netRxPps,omitempty"`
+	NetTxPps   *float64           `json:"netTxPps,omitempty"`
+	NetErrs    *uint64            `json:"netErrs,omitempty"`
+	NetDrops   *uint64            `json:"netDrops,omitempty"`
+	TCP        *entities.TCPStats `json:"tcp,omitempty"`
+	RetransPct *float64           `json:"retransPct,omitempty"`
 	// Segments (bytes on macOS) sent / retransmitted since the previous sample,
 	// so history can weight the ratio over longer windows.
-	TCPOutSegs     *uint64            `json:"tcpOutSegs,omitempty"`
-	TCPRetransSegs *uint64            `json:"tcpRetransSegs,omitempty"`
-	Load           [3]float64         `json:"load"`
-	TempMax        float64            `json:"tempMax,omitempty"`
-	Procs          int                `json:"procs"`
-	LatencyMs      float64            `json:"latencyMs"`
-	Disks          []guest.DiskUsage  `json:"disks,omitempty"`
-	Temps          []guest.TempSensor `json:"temps,omitempty"`
-	NICs           []guest.NICInfo    `json:"nics,omitempty"`
+	TCPOutSegs     *uint64               `json:"tcpOutSegs,omitempty"`
+	TCPRetransSegs *uint64               `json:"tcpRetransSegs,omitempty"`
+	Load           [3]float64            `json:"load"`
+	TempMax        float64               `json:"tempMax,omitempty"`
+	Procs          int                   `json:"procs"`
+	LatencyMs      float64               `json:"latencyMs"`
+	Disks          []entities.DiskUsage  `json:"disks,omitempty"`
+	Temps          []entities.TempSensor `json:"temps,omitempty"`
+	NICs           []entities.NICInfo    `json:"nics,omitempty"`
 	// NetNICs is per-interface throughput (nil until two samples land).
 	NetNICs []NICNet      `json:"netNics,omitempty"`
 	Docker  *DockerSample `json:"docker,omitempty"`
@@ -95,13 +96,13 @@ type NICNet struct {
 }
 
 type DockerSample struct {
-	Engine     string              `json:"engine,omitempty"`
-	Version    string              `json:"version,omitempty"`
-	Running    int                 `json:"running"`
-	Total      int                 `json:"total"`
-	Error      string              `json:"error,omitempty"`
-	Containers []ContainerSample   `json:"containers"`
-	Images     []guest.DockerImage `json:"images,omitempty"`
+	Engine     string                 `json:"engine,omitempty"`
+	Version    string                 `json:"version,omitempty"`
+	Running    int                    `json:"running"`
+	Total      int                    `json:"total"`
+	Error      string                 `json:"error,omitempty"`
+	Containers []ContainerSample      `json:"containers"`
+	Images     []entities.DockerImage `json:"images,omitempty"`
 }
 
 // ContainerSample rates are nil until a container has two samples in a row.
@@ -156,9 +157,9 @@ type Event struct {
 type counters struct {
 	at                  time.Time
 	read, write, rx, tx uint64
-	pk                  *guest.NetPackets
-	tcp                 *guest.TCPStats
-	ctr                 map[string]guest.ContainerStat
+	pk                  *entities.NetPackets
+	tcp                 *entities.TCPStats
+	ctr                 map[string]entities.ContainerStat
 	nic                 map[string][2]uint64
 }
 
@@ -170,7 +171,7 @@ const netErrEvery = time.Hour
 const minRetransBase = 200
 
 type Monitor struct {
-	Hub       *guest.Hub
+	Hub       *hub.Hub
 	Store     *Store // nil: live view only, no history
 	Interval  time.Duration
 	Retention time.Duration // raw samples
@@ -186,7 +187,7 @@ type Monitor struct {
 	netErrAt map[string]time.Time
 }
 
-func New(hub *guest.Hub, store *Store, interval, retention time.Duration) *Monitor {
+func New(hub *hub.Hub, store *Store, interval, retention time.Duration) *Monitor {
 	if interval < 2*time.Second {
 		interval = 10 * time.Second
 	}
@@ -302,7 +303,7 @@ func (m *Monitor) prune(ctx context.Context) {
 	}
 }
 
-func (m *Monitor) onConnect(info guest.SessionInfo) {
+func (m *Monitor) onConnect(info entities.SessionInfo) {
 	at := parseTime(info.ConnectedAt)
 	key := info.DeviceID
 	var events []Event
@@ -391,7 +392,7 @@ func (m *Monitor) onConnect(info guest.SessionInfo) {
 // pre-fingerprint row (keyed by BIOS UUID), or a row whose fingerprint inputs still
 // match on two of three (e.g. only the NIC changed). Ambiguity adopts nothing. An
 // online candidate is returned too; the caller checks it is really gone.
-func (m *Monitor) adoptLocked(info guest.SessionInfo) (*System, string) {
+func (m *Monitor) adoptLocked(info entities.SessionInfo) (*System, string) {
 	var hit *System
 	why := ""
 	n := 0
@@ -412,7 +413,7 @@ func (m *Monitor) adoptLocked(info guest.SessionInfo) (*System, string) {
 	return hit, why
 }
 
-func changedPart(a, b *guest.DeviceFacts) string {
+func changedPart(a, b *entities.DeviceFacts) string {
 	switch {
 	case a.MAC != b.MAC:
 		return "主网卡 MAC 变化"
@@ -423,7 +424,7 @@ func changedPart(a, b *guest.DeviceFacts) string {
 	}
 }
 
-func (m *Monitor) onDisconnect(info guest.SessionInfo) {
+func (m *Monitor) onDisconnect(info entities.SessionInfo) {
 	now := time.Now()
 	key := info.DeviceID
 	detail := ""
@@ -451,7 +452,7 @@ func (m *Monitor) onDisconnect(info guest.SessionInfo) {
 
 // onReject logs a fingerprint collision, at most every 10 minutes per device, since
 // the refused agent keeps retrying.
-func (m *Monitor) onReject(hello guest.Hello, remote, code, _ string) {
+func (m *Monitor) onReject(hello entities.Hello, remote, code, _ string) {
 	key := hello.Key()
 	now := time.Now()
 	m.mu.Lock()
@@ -478,7 +479,7 @@ func (m *Monitor) onReject(hello guest.Hello, remote, code, _ string) {
 	m.emit(key, now, e)
 }
 
-func (m *Monitor) onAudit(a guest.Audit) {
+func (m *Monitor) onAudit(a hub.Audit) {
 	e := Event{Kind: a.Kind, Category: CatAudit, Level: LevelInfo, Actor: a.Actor, Detail: a.Detail}
 	if a.Err != "" {
 		e.Level = LevelWarn
@@ -528,7 +529,7 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 		m.mu.Unlock()
 	}()
 
-	c, cancel := context.WithTimeout(ctx, guest.ListTimeout)
+	c, cancel := context.WithTimeout(ctx, entities.ListTimeout)
 	defer cancel()
 	start := time.Now()
 	met, err := m.Hub.Metrics(c, id)
@@ -572,7 +573,7 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 	m.emit(id, smp.TS, events...)
 }
 
-func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sample {
+func (m *Monitor) derive(id string, met entities.Metrics, latency time.Duration) Sample {
 	now := time.Now()
 	smp := Sample{
 		TS: now.UTC().Truncate(time.Second), CPUPct: met.CPUPct,
@@ -584,12 +585,12 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 	}
 	// RootMount only labels the system disk. The headline percentage is every
 	// partition after shared pools (APFS, one device mounted twice) are collapsed.
-	smp.RootMount = guest.CapacityMount(met.Disks, met.RootMount)
+	smp.RootMount = entities.CapacityMount(met.Disks, met.RootMount)
 	smp.Disks = dedupePools(met.Disks, smp.RootMount)
 	if met.MemTotal > 0 {
 		smp.MemPct = float64(met.MemUsed) / float64(met.MemTotal) * 100
 	}
-	smp.DiskUsed, smp.DiskTotal = guest.DiskSum(smp.Disks)
+	smp.DiskUsed, smp.DiskTotal = entities.DiskSum(smp.Disks)
 	if smp.DiskTotal > 0 {
 		smp.DiskPct = float64(smp.DiskUsed) / float64(smp.DiskTotal) * 100
 	}
@@ -601,7 +602,7 @@ func (m *Monitor) derive(id string, met guest.Metrics, latency time.Duration) Sa
 	smp.TCP = met.TCP
 	cur := counters{at: now, read: met.DiskRead, write: met.DiskWrite, rx: met.NetRx, tx: met.NetTx, pk: met.NetPkts, tcp: met.TCP, nic: nicCounters(met.NICs)}
 	if d := met.Docker; d != nil {
-		cur.ctr = make(map[string]guest.ContainerStat, len(d.Containers))
+		cur.ctr = make(map[string]entities.ContainerStat, len(d.Containers))
 		for _, c := range d.Containers {
 			if c.Stats {
 				cur.ctr[c.ID] = c
@@ -651,7 +652,7 @@ const maxContainerBps = 12.5e9
 
 // dockerSample derives per-container rates from the previous sample's counters
 // (dt == 0: no usable previous sample).
-func dockerSample(d *guest.DockerInfo, prev map[string]guest.ContainerStat, dt float64) *DockerSample {
+func dockerSample(d *entities.DockerInfo, prev map[string]entities.ContainerStat, dt float64) *DockerSample {
 	if d == nil {
 		return nil
 	}
@@ -684,7 +685,7 @@ func dockerSample(d *guest.DockerInfo, prev map[string]guest.ContainerStat, dt f
 	return out
 }
 
-func nicCounters(nics []guest.NICInfo) map[string][2]uint64 {
+func nicCounters(nics []entities.NICInfo) map[string][2]uint64 {
 	if len(nics) == 0 {
 		return nil
 	}
@@ -723,20 +724,20 @@ func delta(a, b uint64) uint64 {
 }
 
 // legacy maps a pre-1.2 agent's health reply onto Metrics so old agents still show up.
-func (m *Monitor) legacy(ctx context.Context, id string) (guest.Metrics, error) {
+func (m *Monitor) legacy(ctx context.Context, id string) (entities.Metrics, error) {
 	h, err := m.Hub.Health(ctx, id)
 	if err != nil {
-		return guest.Metrics{}, err
+		return entities.Metrics{}, err
 	}
-	out := guest.Metrics{
-		Info:     guest.SysInfo{CPUModel: h.CPU.Model, Threads: h.CPU.LogicalCPUs},
+	out := entities.Metrics{
+		Info:     entities.SysInfo{CPUModel: h.CPU.Model, Threads: h.CPU.LogicalCPUs},
 		CPUPct:   h.CPU.Pct,
 		MemTotal: uint64(h.Memory.TotalMB) << 20,
 		MemUsed:  uint64(h.Memory.TotalMB-h.Memory.AvailMB) << 20,
 		NICs:     h.NICs,
 	}
 	for _, d := range h.Disks {
-		out.Disks = append(out.Disks, guest.DiskUsage{Mount: d.Name, Total: uint64(d.TotalGB * 1e9), Used: uint64(d.UsedGB * 1e9)})
+		out.Disks = append(out.Disks, entities.DiskUsage{Mount: d.Name, Total: uint64(d.TotalGB * 1e9), Used: uint64(d.UsedGB * 1e9)})
 	}
 	if len(out.Disks) > 0 {
 		out.RootMount = out.Disks[0].Mount

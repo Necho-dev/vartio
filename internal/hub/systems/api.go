@@ -1,4 +1,4 @@
-package monitor
+package systems
 
 import (
 	"crypto/subtle"
@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 const (
-	PathMonitor = guest.PathPrefix + "/monitor"
+	PathMonitor = entities.PathPrefix + "/monitor"
 	PathConfig  = PathMonitor + "/config"
 	PathSystems = PathMonitor + "/systems"
 )
@@ -166,7 +166,7 @@ func RequireToken(token string, next http.Handler) http.Handler {
 	want := []byte(token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		protected := strings.HasPrefix(p, guest.PathPrefix+"/") && !guest.IsPublicProbePath(p) && p != PathConfig
+		protected := strings.HasPrefix(p, entities.PathPrefix+"/") && !entities.IsPublicProbePath(p) && p != PathConfig
 		if protected {
 			got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 			if got == "" {

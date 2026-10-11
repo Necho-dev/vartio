@@ -1,88 +1,88 @@
-package main
+package agent
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
+func (a *agent) dispatch(fr entities.Frame) (any, *entities.FrameError) {
 	switch fr.Method {
-	case guest.MethodHealth:
+	case entities.MethodHealth:
 		h, err := collectHealth(a.cfg.Watches)
 		return h, asRPC(err)
-	case guest.MethodMetrics:
+	case entities.MethodMetrics:
 		return collectMetrics(), nil
-	case guest.MethodUpgrade:
-		var req guest.UpgradeRequest
+	case entities.MethodUpgrade:
+		var req entities.UpgradeRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
-		return upgrade(context.Background(), a.cfg, req, func(st guest.UpgradeStep) { a.streamUpgrade(fr.ID, st) }), nil
-	case guest.MethodProcsList:
+		return upgrade(context.Background(), a.cfg, req, func(st entities.UpgradeStep) { a.streamUpgrade(fr.ID, st) }), nil
+	case entities.MethodProcsList:
 		list, err := listProcs()
 		return list, asRPC(err)
-	case guest.MethodProcsAction:
-		var req guest.ActionRequest
+	case entities.MethodProcsAction:
+		var req entities.ActionRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return procAction(req)
-	case guest.MethodServicesList:
+	case entities.MethodServicesList:
 		list, err := listServices()
 		return list, asRPC(err)
-	case guest.MethodServicesAction:
-		var req guest.ActionRequest
+	case entities.MethodServicesAction:
+		var req entities.ActionRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return serviceAction(req)
-	case guest.MethodExec:
-		var req guest.ExecRequest
+	case entities.MethodExec:
+		var req entities.ExecRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return runExec(req), nil
-	case guest.MethodTermOpen:
-		var req guest.TermOpenRequest
+	case entities.MethodTermOpen:
+		var req entities.TermOpenRequest
 		_ = json.Unmarshal(fr.Params, &req)
 		id := fr.ID
 		if err := a.term.open(id, req, func(p []byte) { a.streamOut(id, p) }, func() { a.streamExit(id) }); err != nil {
 			return nil, asRPC(err)
 		}
-		return guest.TermOpenResult{OK: true}, nil
-	case guest.MethodTermResize:
-		var req guest.TermOpenRequest
+		return entities.TermOpenResult{OK: true}, nil
+	case entities.MethodTermResize:
+		var req entities.TermOpenRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		a.term.setSize(req.ID, req.Cols, req.Rows)
 		return map[string]bool{"ok": true}, nil
-	case guest.MethodTermClose:
+	case entities.MethodTermClose:
 		var req struct {
 			ID string `json:"id"`
 		}
 		_ = json.Unmarshal(fr.Params, &req)
 		a.term.close(req.ID)
 		return map[string]bool{"ok": true}, nil
-	case guest.MethodPower:
-		var req guest.PowerRequest
+	case entities.MethodPower:
+		var req entities.PowerRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return doPower(req.Action)
-	case guest.MethodDisplayOpen:
-		var req guest.DisplayOpenRequest
+	case entities.MethodDisplayOpen:
+		var req entities.DisplayOpenRequest
 		_ = json.Unmarshal(fr.Params, &req)
 		res, err := a.display.open(fr.ID, req, func(p []byte) { a.streamDisplay(fr.ID, p) })
 		if err != nil {
 			return nil, err
 		}
 		return res, nil
-	case guest.MethodDisplaySelect:
-		var req guest.DisplayOpenRequest
+	case entities.MethodDisplaySelect:
+		var req entities.DisplayOpenRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
@@ -90,97 +90,97 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 			return nil, err
 		}
 		return map[string]int{"screen": req.Screen}, nil
-	case guest.MethodDisplayQuality:
-		var req guest.DisplayOpenRequest
+	case entities.MethodDisplayQuality:
+		var req entities.DisplayOpenRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return map[string]string{"quality": a.display.setQuality(req.ID, req.Quality)}, nil
-	case guest.MethodDisplayClose:
-		var req guest.DisplayOpenRequest
+	case entities.MethodDisplayClose:
+		var req entities.DisplayOpenRequest
 		_ = json.Unmarshal(fr.Params, &req)
 		a.display.close(req.ID)
 		return map[string]bool{"ok": true}, nil
-	case guest.MethodFilesList:
+	case entities.MethodFilesList:
 		return filesList(fr.Params)
-	case guest.MethodFilesGet:
+	case entities.MethodFilesGet:
 		return filesGet(fr.Params)
-	case guest.MethodFilesPut:
+	case entities.MethodFilesPut:
 		return filesPut(fr.Params)
-	case guest.MethodFilesOp:
+	case entities.MethodFilesOp:
 		return filesOp(fr.Params)
-	case guest.MethodTrash:
+	case entities.MethodTrash:
 		return trashOp(fr.Params)
-	case guest.MethodTunnelOpen:
+	case entities.MethodTunnelOpen:
 		return a.tunnelOpen(fr.Params)
-	case guest.MethodFsWhich:
-		var req guest.WhichRequest
+	case entities.MethodFsWhich:
+		var req entities.WhichRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return which(req), nil
-	case guest.MethodFsRead:
-		var req guest.ReadRequest
+	case entities.MethodFsRead:
+		var req entities.ReadRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return readFiles(req), nil
-	case guest.MethodProcSpawn:
-		var req guest.SpawnRequest
+	case entities.MethodProcSpawn:
+		var req entities.SpawnRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
 		return spawnProc(req)
-	case guest.MethodNetListeners:
-		var req guest.ListenersRequest
+	case entities.MethodNetListeners:
+		var req entities.ListenersRequest
 		_ = json.Unmarshal(fr.Params, &req)
-		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodNetListeners, 0))
+		ctx, cancel := context.WithTimeout(context.Background(), entities.TimeoutFor(entities.MethodNetListeners, 0))
 		defer cancel()
 		list, err := listeners(ctx, req)
 		return list, asRPC(err)
-	case guest.MethodDockerInspect:
-		var req guest.DockerInspectRequest
+	case entities.MethodDockerInspect:
+		var req entities.DockerInspectRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil || req.Container == "" {
 			return nil, bad("container required")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodDockerInspect, 0))
+		ctx, cancel := context.WithTimeout(context.Background(), entities.TimeoutFor(entities.MethodDockerInspect, 0))
 		defer cancel()
 		doc, err := dockerInspect(ctx, req.Container)
 		return doc, asRPC(err)
-	case guest.MethodDockerLogs:
-		var req guest.DockerLogsRequest
+	case entities.MethodDockerLogs:
+		var req entities.DockerLogsRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil || req.Container == "" {
 			return nil, bad("container required")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodDockerLogs, 0))
+		ctx, cancel := context.WithTimeout(context.Background(), entities.TimeoutFor(entities.MethodDockerLogs, 0))
 		defer cancel()
 		out, err := dockerLogs(ctx, req)
 		return out, asRPC(err)
-	case guest.MethodDockerCompose:
-		var req guest.DockerComposeRequest
+	case entities.MethodDockerCompose:
+		var req entities.DockerComposeRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil || req.Project == "" {
 			return nil, bad("project required")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), guest.TimeoutFor(guest.MethodDockerCompose, 0))
+		ctx, cancel := context.WithTimeout(context.Background(), entities.TimeoutFor(entities.MethodDockerCompose, 0))
 		defer cancel()
 		out, err := dockerCompose(ctx, req.Project)
 		return out, asRPC(err)
 	default:
-		return nil, &guest.FrameError{Code: "not_implemented", Message: fr.Method}
+		return nil, &entities.FrameError{Code: "not_implemented", Message: fr.Method}
 	}
 }
 
-func asRPC(err error) *guest.FrameError {
+func asRPC(err error) *entities.FrameError {
 	if err == nil {
 		return nil
 	}
-	var fe *guest.FrameError
+	var fe *entities.FrameError
 	if errors.As(err, &fe) {
 		return fe
 	}
-	return &guest.FrameError{Code: "error", Message: err.Error()}
+	return &entities.FrameError{Code: "error", Message: err.Error()}
 }
 
-func bad(msg string) *guest.FrameError {
-	return &guest.FrameError{Code: "bad_request", Message: msg}
+func bad(msg string) *entities.FrameError {
+	return &entities.FrameError{Code: "bad_request", Message: msg}
 }

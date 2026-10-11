@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"bytes"
@@ -14,41 +14,42 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 // tunnelAgent answers tunnel.open, echoes bytes upper-cased, closes the tunnel
 // when it receives "bye", and reports hub-side closes on closed.
 func tunnelAgent(conn *websocket.Conn, closed chan<- string) {
 	var mu sync.Mutex
-	write := func(fr Frame) {
+	write := func(fr entities.Frame) {
 		mu.Lock()
 		_ = conn.WriteJSON(fr)
 		mu.Unlock()
 	}
 	for {
-		var fr Frame
+		var fr entities.Frame
 		if err := conn.ReadJSON(&fr); err != nil {
 			return
 		}
 		switch {
-		case fr.Method == MethodTunnelOpen:
-			var req TunnelOpenRequest
+		case fr.Method == entities.MethodTunnelOpen:
+			var req entities.TunnelOpenRequest
 			_ = json.Unmarshal(fr.Params, &req)
 			if req.Target == "10.0.0.1:80" {
-				write(Frame{ID: fr.ID, Error: &FrameError{Code: "agent_policy", Message: "refused"}})
+				write(entities.Frame{ID: fr.ID, Error: &entities.FrameError{Code: "agent_policy", Message: "refused"}})
 				continue
 			}
-			b, _ := json.Marshal(TunnelOpenResult{OK: true})
-			write(Frame{ID: fr.ID, Result: b})
-		case fr.Stream == StreamTunnel:
+			b, _ := json.Marshal(entities.TunnelOpenResult{OK: true})
+			write(entities.Frame{ID: fr.ID, Result: b})
+		case fr.Stream == entities.StreamTunnel:
 			if string(fr.Data) == "bye" {
-				write(Frame{ID: fr.ID, Stream: StreamTunnel, Data: []byte("BYE")})
-				write(Frame{ID: fr.ID, Stream: StreamTunnelClose})
+				write(entities.Frame{ID: fr.ID, Stream: entities.StreamTunnel, Data: []byte("BYE")})
+				write(entities.Frame{ID: fr.ID, Stream: entities.StreamTunnelClose})
 				continue
 			}
-			write(Frame{ID: fr.ID, Stream: StreamTunnel, Data: bytes.ToUpper(fr.Data)})
-		case fr.Stream == StreamTunnelClose:
+			write(entities.Frame{ID: fr.ID, Stream: entities.StreamTunnel, Data: bytes.ToUpper(fr.Data)})
+		case fr.Stream == entities.StreamTunnelClose:
 			if closed != nil {
 				closed <- fr.ID
 			}
@@ -61,13 +62,13 @@ func tunnelHub(t *testing.T, bios string, caps []string) (*Hub, *websocket.Conn)
 	h := NewHub("")
 	srv := httptest.NewServer(h.DevHandler())
 	t.Cleanup(srv.Close)
-	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect", Hello{BiosUUID: bios, Caps: caps})
+	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect", entities.Hello{BiosUUID: bios, Caps: caps})
 	waitOnline(t, h, bios)
 	return h, conn
 }
 
 func TestTunnelEchoAndClose(t *testing.T) {
-	h, conn := tunnelHub(t, "tun-1", []string{CapTunnelTCP})
+	h, conn := tunnelHub(t, "tun-1", []string{entities.CapTunnelTCP})
 	closed := make(chan string, 4)
 	go tunnelAgent(conn, closed)
 
@@ -127,7 +128,7 @@ func TestTunnelErrors(t *testing.T) {
 		t.Fatalf("bad target: %v", err)
 	}
 
-	h2, conn2 := tunnelHub(t, "tun-2", []string{CapTunnelTCP})
+	h2, conn2 := tunnelHub(t, "tun-2", []string{entities.CapTunnelTCP})
 	go tunnelAgent(conn2, nil)
 	if _, err := h2.DialTCP(context.Background(), "tun-2", "10.0.0.1:80", "test"); !errors.As(err, &api) || api.Code != "agent_policy" || api.Status != 403 {
 		t.Fatalf("policy: %v", err)
@@ -136,7 +137,7 @@ func TestTunnelErrors(t *testing.T) {
 		t.Fatalf("refused tunnel still registered: %d", n)
 	}
 	var open []io.Closer
-	for i := 0; i < MaxTunnels; i++ {
+	for i := 0; i < entities.MaxTunnels; i++ {
 		c, err := h2.DialTCP(context.Background(), "tun-2", "127.0.0.1:9", "test")
 		if err != nil {
 			t.Fatal(err)
@@ -152,7 +153,7 @@ func TestTunnelErrors(t *testing.T) {
 }
 
 func TestTunnelSessionDrop(t *testing.T) {
-	h, conn := tunnelHub(t, "tun-drop", []string{CapTunnelTCP})
+	h, conn := tunnelHub(t, "tun-drop", []string{entities.CapTunnelTCP})
 	go tunnelAgent(conn, nil)
 	c, err := h.DialTCP(context.Background(), "tun-drop", "127.0.0.1:9", "test")
 	if err != nil {

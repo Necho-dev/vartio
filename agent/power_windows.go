@@ -1,14 +1,14 @@
 //go:build windows
 
-package main
+package agent
 
 import (
 	"os/exec"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func doPower(action string) (guest.PowerResult, *guest.FrameError) {
+func doPower(action string) (entities.PowerResult, *entities.FrameError) {
 	var args []string
 	switch action {
 	case "shutdown":
@@ -16,11 +16,11 @@ func doPower(action string) (guest.PowerResult, *guest.FrameError) {
 	case "reboot":
 		args = []string{"/r", "/t", "0", "/f"}
 	default:
-		return guest.PowerResult{}, bad("action must be shutdown or reboot")
+		return entities.PowerResult{}, bad("action must be shutdown or reboot")
 	}
 	cmd := exec.Command("shutdown.exe", args...)
 	if err := cmd.Start(); err != nil {
-		return guest.PowerResult{}, asRPC(err)
+		return entities.PowerResult{}, asRPC(err)
 	}
-	return guest.PowerResult{Accepted: true, Action: action}, nil
+	return entities.PowerResult{Accepted: true, Action: action}, nil
 }

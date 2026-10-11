@@ -1,6 +1,6 @@
 //go:build !darwin
 
-package main
+package agent
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 	psnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func listenSockets(ctx context.Context) ([]guest.Listener, error) {
+func listenSockets(ctx context.Context) ([]entities.Listener, error) {
 	conns, err := psnet.ConnectionsWithContext(ctx, "tcp")
 	if err != nil {
 		return nil, err
@@ -31,12 +31,12 @@ func listenSockets(ctx context.Context) ([]guest.Listener, error) {
 		cache[pid] = n
 		return n
 	}
-	var out []guest.Listener
+	var out []entities.Listener
 	for _, c := range conns {
 		if c.Status != "LISTEN" {
 			continue
 		}
-		l := guest.Listener{IP: c.Laddr.IP, Port: int(c.Laddr.Port), PID: c.Pid}
+		l := entities.Listener{IP: c.Laddr.IP, Port: int(c.Laddr.Port), PID: c.Pid}
 		if c.Pid > 0 {
 			l.Name = nameOf(c.Pid)
 		}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the probe-agent tray / menu bar icons into cmd/probe-agent/trayicons/.
+"""Render the probe-agent tray / menu bar icons into agent/trayicons/.
 
   python3 scripts/probe-agent-icons.py          # fetch lucide-static via npm pack
   python3 scripts/probe-agent-icons.py DIR      # use an extracted package/icons dir
@@ -16,7 +16,7 @@ import sys
 import tarfile
 import tempfile
 
-OUT = pathlib.Path(__file__).resolve().parent.parent / "cmd/probe-agent/trayicons"
+OUT = pathlib.Path(__file__).resolve().parents[2] / "agent/trayicons"
 
 # state -> (glyph, Windows tile color, macOS glyph opacity)
 STATES = {

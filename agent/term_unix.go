@@ -1,6 +1,6 @@
 //go:build !windows
 
-package main
+package agent
 
 import (
 	"io"
@@ -11,7 +11,7 @@ import (
 )
 
 func startPTY(cols, rows int, onOut func([]byte), onExit func()) (io.WriteCloser, func(), func(int, int), error) {
-	shell := os.Getenv("GUEST_TERM_SHELL")
+	shell := getenv("VARTIO_AGENT_TERM_SHELL", "GUEST_TERM_SHELL")
 	if shell == "" {
 		shell = os.Getenv("SHELL")
 	}

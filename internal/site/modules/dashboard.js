@@ -144,7 +144,7 @@ export function renderTable() {
   const wrap = $("#tableWrap");
   if (!wrap) return;
   if (!state.systems.length) {
-    wrap.innerHTML = `<div class="empty">还没有探针接入。<br><br>在目标机器上配置 <code>GUEST_CONTROL_URL=ws://${esc(location.host)}${API}/connect</code> 与 <code>GUEST_TOKEN</code> 后运行 <code>probe-agent</code>。</div>`;
+    wrap.innerHTML = `<div class="empty">还没有探针接入。<br><br>在目标机器上配置 <code>VARTIO_AGENT_CONTROL_URL=ws://${esc(location.host)}${API}/connect</code>（或 <code>GUEST_CONTROL_URL</code>）与 <code>VARTIO_AGENT_TOKEN</code> 后运行 <code>vartio-agent</code>。</div>`;
     return;
   }
   const rows = filtered();

@@ -1,9 +1,8 @@
-package monitor
+package systems
 
 import (
 	"time"
-
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // Series is columnar so a week of buckets stays a small JSON payload.
@@ -139,6 +138,6 @@ func stepFor(span, interval time.Duration) time.Duration {
 	return step.Round(time.Second)
 }
 
-func dedupePools(disks []guest.DiskUsage, root string) []guest.DiskUsage {
-	return guest.DedupePools(disks, root)
+func dedupePools(disks []entities.DiskUsage, root string) []entities.DiskUsage {
+	return entities.DedupePools(disks, root)
 }

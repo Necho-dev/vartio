@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bufio"
@@ -9,12 +9,12 @@ import (
 	"strconv"
 	"strings"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // listenSockets asks lsof for listening TCP sockets only, which is much
 // cheaper than gopsutil's full connection list. +c 0 keeps full command names.
-func listenSockets(ctx context.Context) ([]guest.Listener, error) {
+func listenSockets(ctx context.Context) ([]entities.Listener, error) {
 	b, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "+c", "0", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn").Output()
 	if err != nil && len(b) == 0 {
 		// lsof exits 1 when nothing matches.
@@ -26,8 +26,8 @@ func listenSockets(ctx context.Context) ([]guest.Listener, error) {
 	return parseLsof(b), nil
 }
 
-func parseLsof(b []byte) []guest.Listener {
-	var out []guest.Listener
+func parseLsof(b []byte) []entities.Listener {
+	var out []entities.Listener
 	var pid int32
 	var name string
 	sc := bufio.NewScanner(bytes.NewReader(b))
@@ -55,7 +55,7 @@ func parseLsof(b []byte) []guest.Listener {
 			if host == "*" {
 				host = "0.0.0.0"
 			}
-			out = append(out, guest.Listener{IP: host, Port: p, PID: pid, Name: name})
+			out = append(out, entities.Listener{IP: host, Port: p, PID: pid, Name: name})
 		}
 	}
 	return out

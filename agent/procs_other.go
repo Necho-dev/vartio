@@ -1,5 +1,5 @@
 //go:build !windows
 
-package main
+package agent
 
 func procNames() map[int32]string { return nil }

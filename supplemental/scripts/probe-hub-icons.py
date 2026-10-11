@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate cmd/probe-hub/web/modules/icons.js from lucide-static (https://lucide.dev, ISC).
+"""Generate internal/site/modules/icons.js from lucide-static (https://lucide.dev, ISC).
 
   python3 scripts/probe-hub-icons.py              # fetch lucide-static via npm pack
   python3 scripts/probe-hub-icons.py DIR          # use an extracted package/icons dir
@@ -50,7 +50,7 @@ const PATHS = {
 export const icon = (name, cls = "") => `<svg class="i${cls ? " " + cls : ""}" viewBox="0 0 24 24" aria-hidden="true">${PATHS[name]}</svg>`;
 """
 
-OUT = pathlib.Path(__file__).resolve().parent.parent / "cmd/probe-hub/web/modules/icons.js"
+OUT = pathlib.Path(__file__).resolve().parents[2] / "internal/site/modules/icons.js"
 
 
 def fetch():

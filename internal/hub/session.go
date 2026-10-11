@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -8,19 +8,20 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"vartio/internal/entities"
 
 	"github.com/gorilla/websocket"
 )
 
 type session struct {
-	hello     Hello
+	hello     entities.Hello
 	conn      *websocket.Conn
 	mu        sync.Mutex
-	pending   map[string]chan Frame
+	pending   map[string]chan entities.Frame
 	terms     map[string]*termSink
 	tunnels   map[string]*tunnelSink
 	displays  map[string]*displaySink
-	onUpgrade func(UpgradeStep)
+	onUpgrade func(entities.UpgradeStep)
 	pings     map[string]chan struct{}
 	seen      time.Time
 	remote    string
@@ -29,12 +30,12 @@ type session struct {
 	closeOnce sync.Once
 }
 
-func newSession(conn *websocket.Conn, hello Hello, remote string) *session {
+func newSession(conn *websocket.Conn, hello entities.Hello, remote string) *session {
 	now := time.Now()
 	return &session{
 		hello:    hello,
 		conn:     conn,
-		pending:  map[string]chan Frame{},
+		pending:  map[string]chan entities.Frame{},
 		terms:    map[string]*termSink{},
 		tunnels:  map[string]*tunnelSink{},
 		displays: map[string]*displaySink{},
@@ -104,8 +105,8 @@ func (s *session) attachDisplay(id string) (*displaySink, error) {
 	d := &displaySink{id: id, out: make(chan []byte, 2), done: make(chan struct{})}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.displays) >= MaxDisplays {
-		return nil, &RPCError{Code: "too_many", Message: fmt.Sprintf("同一台机器最多 %d 路实时画面", MaxDisplays)}
+	if len(s.displays) >= entities.MaxDisplays {
+		return nil, &RPCError{Code: "too_many", Message: fmt.Sprintf("同一台机器最多 %d 路实时画面", entities.MaxDisplays)}
 	}
 	if old := s.displays[id]; old != nil {
 		old.stop()
@@ -135,10 +136,10 @@ func (s *session) attachTerm(id string) (*termSink, error) {
 	t := &termSink{id: id, out: make(chan []byte, 256), done: make(chan struct{})}
 	var evicted []*termSink
 	s.mu.Lock()
-	if s.hello.Has(CapMultiTerm) {
-		if len(s.terms) >= MaxTerms {
+	if s.hello.Has(entities.CapMultiTerm) {
+		if len(s.terms) >= entities.MaxTerms {
 			s.mu.Unlock()
-			return nil, &RPCError{Code: "too_many_terms", Message: fmt.Sprintf("at most %d terminals per guest", MaxTerms)}
+			return nil, &RPCError{Code: "too_many_terms", Message: fmt.Sprintf("at most %d terminals per guest", entities.MaxTerms)}
 		}
 	} else {
 		for k, v := range s.terms {
@@ -173,10 +174,10 @@ func (s *session) termFor(id string) *termSink {
 	return s.terms[id]
 }
 
-func (s *session) info() SessionInfo {
+func (s *session) info() entities.SessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return SessionInfo{
+	return entities.SessionInfo{
 		Online:      true,
 		LastSeenUTC: s.seen.UTC().Format(time.RFC3339),
 		Version:     s.hello.Version,
@@ -313,7 +314,7 @@ func (s *session) call(ctx context.Context, id, method string, params any) (json
 		}
 		raw = b
 	}
-	ch := make(chan Frame, 1)
+	ch := make(chan entities.Frame, 1)
 	s.mu.Lock()
 	s.pending[id] = ch
 	s.mu.Unlock()
@@ -323,7 +324,7 @@ func (s *session) call(ctx context.Context, id, method string, params any) (json
 		s.mu.Unlock()
 	}()
 
-	if err := s.write(Frame{ID: id, Method: method, Params: raw}); err != nil {
+	if err := s.write(entities.Frame{ID: id, Method: method, Params: raw}); err != nil {
 		return nil, err
 	}
 	select {
@@ -342,20 +343,20 @@ func (s *session) call(ctx context.Context, id, method string, params any) (json
 	}
 }
 
-func (s *session) deliver(fr Frame) {
+func (s *session) deliver(fr entities.Frame) {
 	s.touch()
 	if fr.Stream != "" {
 		switch fr.Stream {
-		case StreamTunnel:
+		case entities.StreamTunnel:
 			if t := s.tunnelFor(fr.ID); t != nil && len(fr.Data) > 0 {
 				t.push(fr.Data)
 			}
-		case StreamTunnelClose:
+		case entities.StreamTunnelClose:
 			if t := s.tunnelFor(fr.ID); t != nil {
 				t.peerClosed.Store(true)
 				t.stop()
 			}
-		case StreamTermExit:
+		case entities.StreamTermExit:
 			if t := s.termFor(fr.ID); t != nil {
 				s.mu.Lock()
 				delete(s.terms, fr.ID)
@@ -375,8 +376,8 @@ func (s *session) deliver(fr Frame) {
 			case <-t.done:
 			case <-time.After(termStall):
 			}
-		case StreamUpgrade:
-			var st UpgradeStep
+		case entities.StreamUpgrade:
+			var st entities.UpgradeStep
 			if s.onUpgrade != nil && json.Unmarshal(fr.Data, &st) == nil {
 				s.onUpgrade(st)
 			}
@@ -405,23 +406,23 @@ func (s *session) deliver(fr Frame) {
 func (s *session) readLoop() {
 	defer s.close()
 	s.conn.SetReadLimit(8 << 20)
-	_ = s.conn.SetReadDeadline(time.Now().Add(PongWait))
+	_ = s.conn.SetReadDeadline(time.Now().Add(entities.PongWait))
 	s.conn.SetPongHandler(func(data string) error {
 		s.pong(data)
-		return s.conn.SetReadDeadline(time.Now().Add(PongWait))
+		return s.conn.SetReadDeadline(time.Now().Add(entities.PongWait))
 	})
 	for {
-		var fr Frame
+		var fr entities.Frame
 		if err := s.conn.ReadJSON(&fr); err != nil {
 			return
 		}
-		_ = s.conn.SetReadDeadline(time.Now().Add(PongWait))
+		_ = s.conn.SetReadDeadline(time.Now().Add(entities.PongWait))
 		s.deliver(fr)
 	}
 }
 
 func (s *session) pingLoop() {
-	t := time.NewTicker(PingEvery)
+	t := time.NewTicker(entities.PingEvery)
 	defer t.Stop()
 	for {
 		select {

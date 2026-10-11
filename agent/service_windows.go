@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package agent
 
 import (
 	"context"
@@ -13,11 +13,12 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
+// serviceName stays probe-agent so an upgraded Windows service is the same service.
 const serviceName = "probe-agent"
 
 func runServiceCommand(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: probe-agent service install|remove|run")
+		fmt.Fprintln(os.Stderr, "usage: vartio-agent service install|remove|run")
 		return 2
 	}
 	switch args[0] {
@@ -38,7 +39,7 @@ func runServiceCommand(args []string) int {
 	case "run":
 		return runAsService()
 	default:
-		fmt.Fprintln(os.Stderr, "usage: probe-agent service install|remove|run")
+		fmt.Fprintln(os.Stderr, "usage: vartio-agent service install|remove|run")
 		return 2
 	}
 }
@@ -66,7 +67,7 @@ func installService() error {
 		return fmt.Errorf("%s already installed", serviceName)
 	}
 	s, err = m.CreateService(serviceName, exe, mgr.Config{
-		DisplayName: "probe-agent",
+		DisplayName: "Vartio Agent",
 		StartType:   mgr.StartAutomatic,
 		Description: "Outbound guest probe for probe-hub / vm-server",
 	}, "service", "run")

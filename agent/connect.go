@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 func serve(ctx context.Context, cfg config) error {
@@ -85,7 +85,7 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 	}
 	defer conn.Close()
 
-	hello := guest.Hello{
+	hello := entities.Hello{
 		BiosUUID:   cfg.BiosUUID,
 		DeviceID:   cfg.DeviceID,
 		Device:     cfg.Device,
@@ -103,7 +103,7 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 	if err := conn.WriteJSON(hello); err != nil {
 		return false, err
 	}
-	var ack guest.HelloOK
+	var ack entities.HelloOK
 	if err := conn.ReadJSON(&ack); err != nil {
 		return false, err
 	}
@@ -141,21 +141,21 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 var errHello = errors.New("hello rejected")
 
 func caps() []string {
-	c := []string{guest.CapMultiTerm}
+	c := []string{entities.CapMultiTerm}
 	if upgradeEnabled() {
-		c = append(c, guest.CapUpgrade)
+		c = append(c, entities.CapUpgrade)
 	}
 	if !loadTunnelPolicy().off {
-		c = append(c, guest.CapTunnelTCP)
+		c = append(c, entities.CapTunnelTCP)
 	}
-	c = append(c, guest.CapFsWhich, guest.CapFsRead, guest.CapNetListeners)
+	c = append(c, entities.CapFsWhich, entities.CapFsRead, entities.CapNetListeners)
 	if spawnEnabled() {
-		c = append(c, guest.CapProcSpawn)
+		c = append(c, entities.CapProcSpawn)
 	}
 	if docker() != nil {
-		c = append(c, guest.CapDocker, guest.CapDockerInspect)
+		c = append(c, entities.CapDocker, entities.CapDockerInspect)
 		if dockerMode() == dockerRW {
-			c = append(c, guest.CapDockerExec)
+			c = append(c, entities.CapDockerExec)
 		}
 	}
 	return c
@@ -164,7 +164,7 @@ func caps() []string {
 func primitives() map[string]int {
 	out := map[string]int{}
 	for _, c := range caps() {
-		if v, ok := guest.PrimitiveVersions[c]; ok {
+		if v, ok := entities.PrimitiveVersions[c]; ok {
 			out[c] = v
 		}
 	}
@@ -180,7 +180,7 @@ type agent struct {
 	writeMu sync.Mutex
 }
 
-func (a *agent) send(fr guest.Frame) {
+func (a *agent) send(fr entities.Frame) {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
 	_ = a.conn.WriteJSON(fr)
@@ -193,7 +193,7 @@ func (a *agent) loop(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
-		var fr guest.Frame
+		var fr entities.Frame
 		if err := a.conn.ReadJSON(&fr); err != nil {
 			return err
 		}
@@ -201,10 +201,10 @@ func (a *agent) loop(ctx context.Context) error {
 		case "in":
 			a.term.write(fr.ID, fr.Data)
 			continue
-		case guest.StreamTunnel:
+		case entities.StreamTunnel:
 			a.tun.write(fr.ID, fr.Data)
 			continue
-		case guest.StreamTunnelClose:
+		case entities.StreamTunnelClose:
 			a.tun.close(fr.ID)
 			continue
 		}
@@ -215,9 +215,9 @@ func (a *agent) loop(ctx context.Context) error {
 	}
 }
 
-func (a *agent) handle(fr guest.Frame) {
+func (a *agent) handle(fr entities.Frame) {
 	res, rpcErr := a.dispatch(fr)
-	out := guest.Frame{ID: fr.ID}
+	out := entities.Frame{ID: fr.ID}
 	if rpcErr != nil {
 		out.Error = rpcErr
 	} else if res != nil {
@@ -235,30 +235,30 @@ func (a *agent) handle(fr guest.Frame) {
 func (a *agent) streamOut(id string, p []byte) {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
-	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: "out", Data: p})
+	_ = a.conn.WriteJSON(entities.Frame{ID: id, Stream: "out", Data: p})
 }
 
 func (a *agent) streamExit(id string) {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
-	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: guest.StreamTermExit})
+	_ = a.conn.WriteJSON(entities.Frame{ID: id, Stream: entities.StreamTermExit})
 }
 
 func (a *agent) streamDisplay(id string, p []byte) {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
-	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: "display", Data: p})
+	_ = a.conn.WriteJSON(entities.Frame{ID: id, Stream: "display", Data: p})
 }
 
-func (a *agent) streamUpgrade(id string, st guest.UpgradeStep) {
+func (a *agent) streamUpgrade(id string, st entities.UpgradeStep) {
 	b, _ := json.Marshal(st)
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
-	_ = a.conn.WriteJSON(guest.Frame{ID: id, Stream: guest.StreamUpgrade, Data: b})
+	_ = a.conn.WriteJSON(entities.Frame{ID: id, Stream: entities.StreamUpgrade, Data: b})
 }
 
 func hostname() string {
-	if h := strings.TrimSpace(os.Getenv("GUEST_HOSTNAME")); h != "" {
+	if h := strings.TrimSpace(getenv("VARTIO_AGENT_HOSTNAME", "GUEST_HOSTNAME")); h != "" {
 		return h
 	}
 	if inContainer() && hostRoot() != "" {

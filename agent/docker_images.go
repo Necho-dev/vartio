@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +36,7 @@ type imageStatus struct {
 }
 
 func imageCheckOff() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("GUEST_DOCKER_IMAGE_CHECK")), "off")
+	return strings.EqualFold(strings.TrimSpace(getenv("VARTIO_AGENT_DOCKER_IMAGE_CHECK", "GUEST_DOCKER_IMAGE_CHECK")), "off")
 }
 
 // imageKey ties the verdict to the tag and the image the container actually runs:

@@ -20,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
-	"govmomi-wmks/internal/plugin"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/hub/plugins"
 )
 
 const (
@@ -50,7 +50,7 @@ type Operation struct {
 }
 
 type Plugin struct {
-	host   plugin.Host
+	host   plugins.Host
 	target string
 	apiKey string
 	ops    map[string]*Operation
@@ -68,18 +68,18 @@ func New() *Plugin {
 	return &Plugin{target: target, apiKey: strings.TrimSpace(os.Getenv("BITBROWSER_API_KEY"))}
 }
 
-func (p *Plugin) Manifest() plugin.Manifest {
-	return plugin.Manifest{
+func (p *Plugin) Manifest() plugins.Manifest {
+	return plugins.Manifest{
 		Name:        "bitbrowser",
 		Title:       "比特浏览器",
 		Version:     "1.0.0",
 		Description: "经探针 TCP 隧道调用远端机器上的比特浏览器本地 API（" + p.target + "）",
-		Primitives:  []string{guest.CapTunnelTCP},
+		Primitives:  []string{entities.CapTunnelTCP},
 		Targets:     []string{p.target},
 	}
 }
 
-func (p *Plugin) Init(_ context.Context, host plugin.Host) error {
+func (p *Plugin) Init(_ context.Context, host plugins.Host) error {
 	p.host = host
 	ops, err := parseOperations(spec)
 	if err != nil {
@@ -125,7 +125,7 @@ type Status struct {
 func (p *Plugin) handleStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := p.host.Agent(id); !ok {
-		plugin.WriteError(w, common.ErrOffline())
+		plugins.WriteError(w, common.ErrOffline())
 		return
 	}
 	st := Status{Agent: id, Target: p.target}
@@ -134,7 +134,7 @@ func (p *Plugin) handleStatus(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err != nil:
 		if api := asAPI(err); api != nil && (api.Code == "cap_missing" || api.Code == "guest_offline" || api.Code == "guest_unbound") {
-			plugin.WriteError(w, api)
+			plugins.WriteError(w, api)
 			return
 		}
 		st.Message = errMessage(err)
@@ -161,12 +161,12 @@ func (p *Plugin) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 	op := p.ops[r.PathValue("op")]
 	if op == nil {
-		plugin.WriteError(w, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: "unknown operation " + r.PathValue("op")})
+		plugins.WriteError(w, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: "unknown operation " + r.PathValue("op")})
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
-		plugin.WriteError(w, common.ErrBad("read body: %v", err))
+		plugins.WriteError(w, common.ErrBad("read body: %v", err))
 		return
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
@@ -174,7 +174,7 @@ func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	var params map[string]any
 	if err := json.Unmarshal(body, &params); err != nil {
-		plugin.WriteError(w, common.ErrBad("body must be a JSON object"))
+		plugins.WriteError(w, common.ErrBad("body must be a JSON object"))
 		return
 	}
 	var missing []string
@@ -184,7 +184,7 @@ func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(missing) > 0 {
-		plugin.WriteError(w, common.ErrBad("%s requires %s", op.ID, strings.Join(missing, ", ")))
+		plugins.WriteError(w, common.ErrBad("%s requires %s", op.ID, strings.Join(missing, ", ")))
 		return
 	}
 	p.forward(w, r, op, http.MethodPost, op.Path, "", body)
@@ -193,7 +193,7 @@ func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
-		plugin.WriteError(w, common.ErrBad("read body: %v", err))
+		plugins.WriteError(w, common.ErrBad("read body: %v", err))
 		return
 	}
 	path := "/" + r.PathValue("path")
@@ -204,7 +204,7 @@ func (p *Plugin) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) forward(w http.ResponseWriter, r *http.Request, op *Operation, method, path, query string, body []byte) {
 	id := r.PathValue("id")
 	if op != nil && op.Confirm && !confirmed(r) {
-		plugin.WriteError(w, common.RequireConfirm(false))
+		plugins.WriteError(w, common.RequireConfirm(false))
 		return
 	}
 	key := strings.TrimSpace(r.Header.Get("X-Api-Key"))
@@ -224,7 +224,7 @@ func (p *Plugin) forward(w http.ResponseWriter, r *http.Request, op *Operation, 
 		p.host.Audit(r, id, op.ID, detail, auditErr)
 	}
 	if err != nil {
-		plugin.WriteError(w, err)
+		plugins.WriteError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

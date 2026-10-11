@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -17,19 +17,19 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 	"github.com/shirou/gopsutil/v4/sensors"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 const maxTemps = 12
 
 var sysInfoOnce struct {
 	sync.Once
-	v guest.SysInfo
+	v entities.SysInfo
 }
 
-func staticInfo() guest.SysInfo {
+func staticInfo() entities.SysInfo {
 	sysInfoOnce.Do(func() {
-		v := guest.SysInfo{HostName: hostname(), OS: runtime.GOOS, Arch: runtime.GOARCH}
+		v := entities.SysInfo{HostName: hostname(), OS: runtime.GOOS, Arch: runtime.GOARCH}
 		if hi, err := host.Info(); err == nil {
 			v.Platform = hi.Platform
 			v.PlatformVersion = hi.PlatformVersion
@@ -54,13 +54,13 @@ func staticInfo() guest.SysInfo {
 	return v
 }
 
-func collectMetrics() guest.Metrics {
+func collectMetrics() entities.Metrics {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	out := guest.Metrics{TimeMs: time.Now().UnixMilli(), Info: staticInfo()}
-	var containers chan *guest.DockerInfo
+	out := entities.Metrics{TimeMs: time.Now().UnixMilli(), Info: staticInfo()}
+	var containers chan *entities.DockerInfo
 	if docker() != nil {
-		containers = make(chan *guest.DockerInfo, 1)
+		containers = make(chan *entities.DockerInfo, 1)
 		go func() {
 			c, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
 			defer cancel()
@@ -97,10 +97,10 @@ func collectMetrics() guest.Metrics {
 	return out
 }
 
-func diskUsages(ctx context.Context) ([]guest.DiskUsage, string) {
+func diskUsages(ctx context.Context) ([]entities.DiskUsage, string) {
 	parts, _ := disk.PartitionsWithContext(ctx, false)
 	seen := map[string]bool{}
-	var out []guest.DiskUsage
+	var out []entities.DiskUsage
 	for _, p := range parts {
 		if skipMount(p) || seen[p.Device] {
 			continue
@@ -110,18 +110,18 @@ func diskUsages(ctx context.Context) ([]guest.DiskUsage, string) {
 			continue
 		}
 		seen[p.Device] = true
-		out = append(out, guest.DiskUsage{Mount: p.Mountpoint, FS: p.Fstype, Total: u.Total, Used: u.Used})
+		out = append(out, entities.DiskUsage{Mount: p.Mountpoint, FS: p.Fstype, Total: u.Total, Used: u.Used})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mount < out[j].Mount })
 	root := pickRoot(out)
 	return dedupePools(out, root), root
 }
 
-func dedupePools(disks []guest.DiskUsage, root string) []guest.DiskUsage {
-	return guest.DedupePools(disks, root)
+func dedupePools(disks []entities.DiskUsage, root string) []entities.DiskUsage {
+	return entities.DedupePools(disks, root)
 }
 
-func pickRoot(disks []guest.DiskUsage) string {
+func pickRoot(disks []entities.DiskUsage) string {
 	want := []string{"/"}
 	switch runtime.GOOS {
 	case "windows":
@@ -147,7 +147,7 @@ func pickRoot(disks []guest.DiskUsage) string {
 	}
 	// "/" is often an overlay or an initrd inside a container. Fall through to
 	// the largest writable disk (Docker Desktop: /var/lib, not /oldroot).
-	return guest.CapacityMount(disks, pref)
+	return entities.CapacityMount(disks, pref)
 }
 
 func skipMount(p disk.PartitionStat) bool {
@@ -216,12 +216,12 @@ func skipNIC(name string) bool {
 	return false
 }
 
-func netIO(ctx context.Context) (rx, tx uint64, pk *guest.NetPackets) {
+func netIO(ctx context.Context) (rx, tx uint64, pk *entities.NetPackets) {
 	cs, err := net.IOCountersWithContext(ctx, true)
 	if err != nil {
 		return 0, 0, nil
 	}
-	pk = &guest.NetPackets{}
+	pk = &entities.NetPackets{}
 	for _, c := range cs {
 		if skipNIC(c.Name) {
 			continue
@@ -239,17 +239,17 @@ func netIO(ctx context.Context) (rx, tx uint64, pk *guest.NetPackets) {
 	return rx, tx, pk
 }
 
-func nicList(ctx context.Context) []guest.NICInfo {
+func nicList(ctx context.Context) []entities.NICInfo {
 	ifaces, err := net.InterfacesWithContext(ctx)
 	if err != nil {
 		return nil
 	}
-	var out []guest.NICInfo
+	var out []entities.NICInfo
 	for _, iface := range ifaces {
 		if skipNIC(iface.Name) {
 			continue
 		}
-		n := guest.NICInfo{Name: iface.Name, MAC: iface.HardwareAddr, Up: hasFlag(iface.Flags, "up")}
+		n := entities.NICInfo{Name: iface.Name, MAC: iface.HardwareAddr, Up: hasFlag(iface.Flags, "up")}
 		for _, a := range iface.Addrs {
 			if strings.Contains(a.Addr, ".") && !strings.HasPrefix(a.Addr, "127.") && !strings.HasPrefix(a.Addr, "169.254.") {
 				n.IPv4 = strings.Split(a.Addr, "/")[0]
@@ -279,19 +279,19 @@ var tempsState struct {
 	sync.Mutex
 	off  bool
 	at   time.Time
-	last []guest.TempSensor
+	last []entities.TempSensor
 }
 
 // temps is best effort and cached for a minute. Windows reads WMI thermal zones (often
 // admin-only or empty), so the first failure disables it. On macOS gopsutil reaches IOKit
 // through purego and segfaults the process, so it is opt-in via GUEST_TEMPS=1.
-func temps(ctx context.Context) []guest.TempSensor {
+func temps(ctx context.Context) []entities.TempSensor {
 	tempsState.Lock()
 	defer tempsState.Unlock()
 	if tempsState.off {
 		return nil
 	}
-	if runtime.GOOS == "darwin" && os.Getenv("GUEST_TEMPS") != "1" {
+	if runtime.GOOS == "darwin" && getenv("VARTIO_AGENT_TEMPS", "GUEST_TEMPS") != "1" {
 		tempsState.off = true
 		return nil
 	}
@@ -309,12 +309,12 @@ func temps(ctx context.Context) []guest.TempSensor {
 		tempsState.last = nil
 		return nil
 	}
-	var out []guest.TempSensor
+	var out []entities.TempSensor
 	for _, t := range ts {
 		if t.Temperature <= 0 || t.Temperature > 150 {
 			continue
 		}
-		out = append(out, guest.TempSensor{Name: t.SensorKey, C: t.Temperature})
+		out = append(out, entities.TempSensor{Name: t.SensorKey, C: t.Temperature})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].C > out[j].C })
 	if len(out) > maxTemps {

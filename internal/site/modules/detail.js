@@ -378,8 +378,8 @@ function renderInfo(s) {
     ["运行方式", s.online && s.runner ? RUNNERS[s.runner] || s.runner : ""], ["首次接入", s.firstSeen && new Date(s.firstSeen).toLocaleString()],
     ["本次连接", s.online && s.connectedAt ? new Date(s.connectedAt).toLocaleString() : ""], ["最近采样", l.ts && new Date(l.ts).toLocaleString()]];
   const hint = !s.online || s.runner !== "console" ? ""
-    : i.os === "windows" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>以前台进程运行，重启或注销后不会自动启动。建议执行 <code>probe-agent.exe install</code> 设为登录自启的托盘模式；无人登录的服务器以管理员执行 <code>probe-agent.exe service install</code>。</span></p>`
-    : i.os === "darwin" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>在终端里前台运行，重启或注销后不会自动启动。建议执行 <code>./probe-agent install</code> 设为登录自启，在菜单栏后台运行。</span></p>` : "";
+    : i.os === "windows" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>以前台进程运行，重启或注销后不会自动启动。建议执行 <code>vartio-agent.exe install</code> 设为登录自启的托盘模式；无人登录的服务器以管理员执行 <code>vartio-agent.exe service install</code>。</span></p>`
+    : i.os === "darwin" ? `<p class="faint run-hint">${icon("triangle-alert")}<span>在终端里前台运行，重启或注销后不会自动启动。建议执行 <code>./vartio-agent install</code> 设为登录自启，在菜单栏后台运行。</span></p>` : "";
   const cred = s.credential && CREDS[s.credential];
   const credRow = !cred ? "" : `<tr><th>接入凭据</th><td><span class="pl-pill ${cred[1]}" title="${esc(cred[2])}">${cred[0]}</span>
     ${s.credential !== "none" ? `<button class="btn sm" id="credReset" title="作废该设备凭据：探针下次连接需凭 GUEST_TOKEN 重新登记">${icon("rotate-ccw")}重置</button>` : ""}</td></tr>`;

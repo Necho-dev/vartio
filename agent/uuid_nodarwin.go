@@ -1,5 +1,5 @@
-//go:build linux
+//go:build !windows && !darwin
 
-package main
+package agent
 
 func runIORegUUID() (string, error) { return "", errNoSMBIOS }

@@ -1,6 +1,6 @@
 //go:build darwin || windows
 
-package main
+package agent
 
 import (
 	"context"
@@ -20,7 +20,7 @@ func runTray(ctx context.Context, cfg config, logFile string) {
 func trayReady(ctx context.Context, cfg config, logFile string) {
 	beforeExit = trayBeforeExit
 	setTrayIcon("off")
-	systray.SetTooltip("probe-agent " + agentVersion)
+	systray.SetTooltip("Vartio " + agentVersion)
 
 	mStatus := systray.AddMenuItem("连接中…", "")
 	mStatus.Disable()
@@ -56,7 +56,7 @@ func trayReady(ctx context.Context, cfg config, logFile string) {
 			s := getLink()
 			text, state := trayText(s)
 			mStatus.SetTitle(text)
-			systray.SetTooltip("probe-agent " + agentVersion + " · " + text)
+			systray.SetTooltip("Vartio " + agentVersion + " · " + text)
 			if state != icon {
 				setTrayIcon(state)
 				icon = state

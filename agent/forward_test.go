@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -17,8 +17,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/common"
+	"vartio/internal/hub"
 )
 
 func TestLiveForward(t *testing.T) {
@@ -49,7 +49,7 @@ func TestLiveForward(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	f, err := h.AddForward(ctx, guest.ForwardRequest{Agent: "live-forward", Target: target, Note: "svc"})
+	f, err := h.AddForward(ctx, hub.ForwardRequest{Agent: "live-forward", Target: target, Note: "svc"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,34 +83,34 @@ func TestLiveForward(t *testing.T) {
 	}
 
 	var api *common.Error
-	_, err = h.AddForward(ctx, guest.ForwardRequest{Agent: "live-forward", Target: target, Port: f.Port})
+	_, err = h.AddForward(ctx, hub.ForwardRequest{Agent: "live-forward", Target: target, Port: f.Port})
 	if !errors.As(err, &api) || api.Code != "port_taken" || api.Status != http.StatusConflict {
 		t.Fatalf("duplicate port: %v", err)
 	}
-	_, err = h.AddForward(ctx, guest.ForwardRequest{Agent: "live-forward", Target: "127.0.0.1:1", Port: f.Port})
+	_, err = h.AddForward(ctx, hub.ForwardRequest{Agent: "live-forward", Target: "127.0.0.1:1", Port: f.Port})
 	if !errors.As(err, &api) || api.Code != "port_taken" {
 		t.Fatalf("duplicate port is reported before the target test dial: %v", err)
 	}
 	other, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer other.Close()
-	_, err = h.AddForward(ctx, guest.ForwardRequest{Agent: "live-forward", Target: target, Port: other.Addr().(*net.TCPAddr).Port, Bind: "0.0.0.0"})
+	_, err = h.AddForward(ctx, hub.ForwardRequest{Agent: "live-forward", Target: target, Port: other.Addr().(*net.TCPAddr).Port, Bind: "0.0.0.0"})
 	if !errors.As(err, &api) || api.Code != "port_taken" {
 		t.Fatalf("port held by another program: %v", err)
 	}
-	_, err = h.AddForward(ctx, guest.ForwardRequest{Agent: "live-forward", Target: "10.255.255.1:80"})
+	_, err = h.AddForward(ctx, hub.ForwardRequest{Agent: "live-forward", Target: "10.255.255.1:80"})
 	if !errors.As(err, &api) || api.Code != "agent_policy" {
 		t.Fatalf("policy: %v", err)
 	}
-	_, err = h.AddForward(ctx, guest.ForwardRequest{Agent: "live-forward", Target: target, Bind: "192.168.1.1"})
+	_, err = h.AddForward(ctx, hub.ForwardRequest{Agent: "live-forward", Target: target, Bind: "192.168.1.1"})
 	if !errors.As(err, &api) || api.Code != "bad_request" {
 		t.Fatalf("bind: %v", err)
 	}
-	_, err = h.AddForward(ctx, guest.ForwardRequest{Agent: "nobody", Target: target})
+	_, err = h.AddForward(ctx, hub.ForwardRequest{Agent: "nobody", Target: target})
 	if !errors.As(err, &api) || api.Code != "guest_offline" {
 		t.Fatalf("offline: %v", err)
 	}
 
-	var saved struct{ Forwards []guest.Forward }
+	var saved struct{ Forwards []hub.Forward }
 	raw, _ := os.ReadFile(state)
 	if json.Unmarshal(raw, &saved) != nil || len(saved.Forwards) != 1 || saved.Forwards[0].Port != f.Port || saved.Forwards[0].Target != target {
 		t.Fatalf("state file: %s", raw)
@@ -143,10 +143,10 @@ func TestForwardReload(t *testing.T) {
 	free.Close()
 	busy, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer busy.Close()
-	_ = os.WriteFile(state, []byte(fmt.Sprintf(`{"forwards":[
+	_ = os.WriteFile(state, fmt.Appendf(nil, `{"forwards":[
 		{"id":"a","agent":"x","bind":"127.0.0.1","port":%d,"target":"127.0.0.1:80"},
-		{"id":"b","agent":"x","bind":"127.0.0.1","port":%d,"target":"127.0.0.1:81"}]}`, port, busy.Addr().(*net.TCPAddr).Port)), 0o600)
-	h := guest.NewHub("dev")
+		{"id":"b","agent":"x","bind":"127.0.0.1","port":%d,"target":"127.0.0.1:81"}]}`, port, busy.Addr().(*net.TCPAddr).Port), 0o600)
+	h := hub.NewHub("dev")
 	if err := h.LoadForwards(state); err != nil {
 		t.Fatal(err)
 	}

@@ -1,16 +1,17 @@
-# Guest 探针
+# Vartio
 
 Guest 没有可达公网 IP。探针**只出站**连控制面，所有命令走这条 WSS 上的反向 RPC。控制面不拨 Guest、不扫内网、不走 VMware Tools。
 
-## 三个入口
+产品名是 Vartio，二进制是 `vartio` 和 `vartio-agent`。下面这些是已经部署的探针认的契约，没有改：`/v1/probe/*`、Hello 签名 `probe-hub-hello/v1`、发布包签名前缀 `probe-agent|`、请求头 `X-Guest-*`。环境变量新名前缀是 `VARTIO_` / `VARTIO_AGENT_`，原来的 `PROBE_HUB_*` 和 `GUEST_*` 仍然有效。
+
+## 两个入口
 
 | 项目 | 启动 | 用途 |
 |------|------|------|
-| **probe-hub** | `make probe-hub` / `go run ./cmd/probe-hub` | 探针服务端。不连 ESXi、不读 `.env`。`127.0.0.1:8766` |
-| **probe-agent** | `make probe-agent` / `go run ./cmd/probe-agent` | 探针客户端，出站连 hub |
-| **vm-server** | `make vm-server` / `go run ./cmd/vm-server` | ESXi 控制面。`0.0.0.0:8765`。也挂同一套 `/v1/probe/*` |
+| **vartio** | `make vartio` / `go run ./internal/cmd/hub` | 探针服务端。不连 ESXi、不读 `.env`。`127.0.0.1:8766` |
+| **vartio-agent** | `make vartio-agent` / `go run ./internal/cmd/agent` | 探针客户端，出站连 hub |
 
-协议同一份：[`internal/guest`](../internal/guest/)。探针 HTTP 全部在 `/v1/probe/*`，不挂在 `/v1/vms` 下。
+协议在 [`internal/entities`](../../internal/entities)，服务端在 [`internal/hub`](../../internal/hub)。探针 HTTP 全部在 `/v1/probe/*`。
 
 ## 本机调试
 
@@ -20,7 +21,7 @@ make probe-hub
 # PROBE_HUB_LISTEN=127.0.0.1:8766  GUEST_TOKEN=dev
 
 # 终端 2
-cp cmd/probe-agent/agent.env.example probe-agent.env
+cp agent/agent.env.example probe-agent.env
 make probe-agent
 ```
 
@@ -130,11 +131,11 @@ hub ≥ 1.18.0 在共享的 `GUEST_TOKEN` 之上加了两层，旧探针不受�
 
 删除主机时同时删除它的凭据。签名能防假冒 hub，但明文 `ws://` 上的主动中间人仍可转发篡改帧，公网请用 `wss://`。
 
-## 生产 REST
+## REST
 
-前缀 `/v1/probe/vms/{id}`。`GET /v1/vms` 只加 `guestAgent.online`，不向全部探针拉健康。旧路径 `/v1/vms/{id}/guest*`、`/v1/guest/*`、`/ws/guest-*` 已去掉。
+前缀 `/v1/probe/sessions/{id}`，`{id}` 是设备 ID（唯一时也可传 `biosUuid`）。
 
-- `GET /v1/probe/vms/{id}` — 在线摘要，不采集
+- `GET /v1/probe/sessions/{id}` — 在线摘要，不采集
 - `GET .../health` — 当场 RPC
 - `GET|POST .../procs` — 列表；`start|stop|kill` 要 `confirm`
 - `GET|POST .../services` — 列表；`start|stop|restart` 要 `confirm`
@@ -148,17 +149,15 @@ hub ≥ 1.18.0 在共享的 `GUEST_TOKEN` 之上加了两层，旧探针不受�
 
 离线：`409 guest_offline`。bios 撞车：`409 guest_unbound`。
 
-MCP：`esxi_guest_get` / `health` / `procs` / `services` / `exec` / `power` / `display` / `files`。
-
 ## 探针分发
 
 ```bash
 make probe-agent-dist      # 全平台：windows/darwin/linux × amd64/arm64
 make probe-agent-windows   # 只打 Windows
-# 或：scripts/probe-agent-dist.sh linux/amd64 windows/amd64
+# 或：supplemental/scripts/probe-agent-dist.sh linux/amd64 windows/amd64
 ```
 
-产物按版本、平台隔离（版本取 `cmd/probe-agent/main.go` 的 `agentVersion`），旧版本可并存回滚。打包后自动签名生成 `manifest.json`，`latest` 指向的版本就是 hub 对外提供的升级目标：
+产物按版本、平台隔离（版本取 `probe.go` 的 `Version`），旧版本可并存回滚。打包后自动签名生成 `manifest.json`，`latest` 指向的版本就是 hub 对外提供的升级目标：
 
 ```
 dist/probe-agent/
@@ -182,7 +181,7 @@ dist/probe-agent/
 | Windows 服务 | 管理员 `probe-agent.exe service install` | 无人登录的服务器；Session 0 看不到桌面，没有实时画面 | `service` |
 | macOS 菜单栏（推荐） | `./probe-agent install`（不要 sudo） | 登录用户的 LaunchAgent | `launchd` |
 | Linux | systemd unit | 服务器 | `systemd` |
-| Docker 容器 | `deploy/docker/compose.agent.yml`（见下文「Docker」） | 只想用镜像部署的 Linux 主机 | `docker` |
+| Docker 容器 | `supplemental/docker/agent/compose.agent.yml`（见下文「Docker」） | 只想用镜像部署的 Linux 主机 | `docker` |
 | 终端前台 | 直接运行 | 调试 | `console` |
 
 - **Windows 托盘**：`install` 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `ProbeAgent`，并立即在后台启动；`uninstall` 删除该项并结束本机的托盘探针。托盘与服务二选一，装了一种再装另一种会被拒绝。直接双击 exe 也会进入托盘模式，但不会开机自启
@@ -195,7 +194,7 @@ dist/probe-agent/
 
 打进 `RV0000_BASE`。控制面 `LISTEN` 必须是 Guest **能出站到达** 的地址（常见 `PG-IKUAI-LAN` 上的内网 IP），不要用 `127.0.0.1`。
 
-身份：Guest SMBIOS UUID = ESXi `config.uuid` / `biosUuid`，vm-server 用它把 VM 对到探针；本机可用 `GUEST_BIOS_UUID` 覆盖。probe-hub 内部按设备 ID（见上文）区分主机。
+身份：Guest SMBIOS UUID 与 ESXi `config.uuid` / `biosUuid` 相同；本机可用 `GUEST_BIOS_UUID` 覆盖。probe-hub 内部按设备 ID（见上文）区分主机。
 
 ## Docker
 
@@ -222,7 +221,7 @@ agent ≥ 1.17.0 支持两件事：任何平台上的探针都能监控本机的
 - 历史：表 `probe_container_metrics`，随 `PROBE_HUB_RETENTION` 清理，另有 5 分钟 / 1 小时汇总（见「监控页面」）。`GET /v1/probe/monitor/systems/{id}/containers/series?range=1h&top=8` 返回平均 CPU、平均内存各自前 N 名的并集（`top` 最大 50）
 - 日志：`GET /v1/probe/sessions/{id}/docker/logs?container=名称&tail=500&since=unix` 拉快照（带时间戳，最多约 2MB）；页面上可选时间范围、行数、模糊过滤、下载。追踪走终端票据 `mode=logs`
 - 编排：`GET /v1/probe/sessions/{id}/docker/compose?project=名称` 读 `com.docker.compose.project.config_files` 指向的 YAML。探针在容器里时，Docker Desktop（Mac）需要把 `$HOME` 挂进容器才能读到宿主机路径
-- 终端：复用终端票据。`POST /v1/probe/vms/{id}/term` 的请求体可带 `{"mode":"logs"|"exec", "container":"名称或 ID", "tail":500, "since":unix, "shell":"/bin/sh"}`，不带就是主机终端。`exec` 是 `docker exec` 进到容器内部（优先 bash，没有就 sh）。缺 `docker` 能力返回 `409`，exec 缺 `docker.exec` 返回 `403 agent_policy`
+- 终端：复用终端票据。`POST /v1/probe/sessions/{id}/term` 的请求体可带 `{"mode":"logs"|"exec", "container":"名称或 ID", "tail":500, "since":unix, "shell":"/bin/sh"}`，不带就是主机终端。`exec` 是 `docker exec` 进到容器内部（优先 bash，没有就 sh）。缺 `docker` 能力返回 `409`，exec 缺 `docker.exec` 返回 `403 agent_policy`
 - exec 关闭：Docker 在客户端断开后不会结束 TTY exec 里的 shell。每个会话带环境变量 `PROBE_EXEC=<随机值>`，关闭时探针再起一个 exec，找出环境里带这个标记的进程，先 HUP 再 KILL
 
 `docker.sock` 即使以只读方式挂载，也等同于宿主机 root。`ro` 只限制探针自己会调用的接口。
@@ -232,7 +231,7 @@ agent ≥ 1.17.0 支持两件事：任何平台上的探针都能监控本机的
 ```bash
 make docker-agent
 GUEST_CONTROL_URL=ws://hub:8766/v1/probe/connect GUEST_TOKEN=… \
-  docker compose -f deploy/docker/compose.agent.yml up -d
+  docker compose -f supplemental/docker/agent/compose.agent.yml up -d
 ```
 
 compose 用 `pid: host` 和 `network_mode: host` 看到宿主机的进程、网卡和连接，把宿主机 `/` 只读挂到 `/hostfs`。Docker Desktop（Mac）的 `/` 绑定看不到 virtiofs 里的 `/Users`，所以再把 `$HOME` 只读挂进去，才能读到 Compose 编排文件。容器内的行为：
@@ -248,7 +247,7 @@ compose 用 `pid: host` 和 `network_mode: host` 看到宿主机的进程、网�
 
 ```bash
 make docker-hub
-GUEST_TOKEN=… PROBE_HUB_ADMIN_TOKEN=… docker compose -f deploy/docker/compose.hub.yml up -d
+GUEST_TOKEN=… PROBE_HUB_ADMIN_TOKEN=… docker compose -f supplemental/docker/hub/compose.hub.yml up -d
 ```
 
 带一个 PostgreSQL 存历史。工作目录 `/data`（数据卷，hub 签名密钥 `probe-hub.key` 和设备凭据也在这里，重建容器时不要丢），远程升级用的签名产物挂到 `/data/dist/probe-agent`（compose 里有注释示例）。多架构镜像：`make docker-push REGISTRY=…`（buildx，默认 `linux/amd64,linux/arm64`）。agent 镜像打 `agentVersion`、`latest`（两者都是锁定版本的 release）和 `edge`。
@@ -284,7 +283,7 @@ agent ≥ 1.9.0 在 Hello 里声明 `caps: ["upgrade"]` 和 `runner`（见上文
 macOS 把「录屏与系统录音」授权绑定在二进制的 designated requirement 上。ad-hoc 签名的要求就是本次构建的 cdhash，每次升级都会失效，系统再次弹窗，设置里还会残留旧条目。打包脚本对 darwin 产物用固定证书和固定标识符 `probe-agent` 签名，要求变成 `identifier "probe-agent" and certificate leaf = H"…"`，以后升级授权不会丢：
 
 ```bash
-scripts/probe-agent-macos-sign-setup.sh   # 只需一次：在 ~/.config/probe-agent/signing.keychain-db 生成自签名代码签名证书
+supplemental/scripts/probe-agent-macos-sign-setup.sh   # 只需一次：在 ~/.config/probe-agent/signing.keychain-db 生成自签名代码签名证书
 ```
 
 证书放在独立 keychain，随机密码存在旁边的 `signing.pass`（0600），不碰登录 keychain；打包时临时加入 keychain 搜索列表，签完恢复。目录要备份，换证书意味着每台 Mac 再授权一次。没有证书时退回 ad-hoc 签名，脚本会告警。第一次换成证书签名的版本需要在设置里删掉旧的 `probe-agent` / `probe-agent.old` 条目，再给新版本授权一次。截屏失败且 `CGPreflightScreenCaptureAccess` 为假时，画面窗口会直接提示去开启权限。
@@ -292,9 +291,9 @@ scripts/probe-agent-macos-sign-setup.sh   # 只需一次：在 ~/.config/probe-a
 ### 发布
 
 ```bash
-go run ./cmd/probe-release keygen   # 只需一次：私钥写到 ~/.config/probe-agent/release.key，公钥追加到 internal/release/release.pub
+go run ./internal/cmd/release keygen   # 只需一次：私钥写到 ~/.config/probe-agent/release.key，公钥追加到 internal/release/release.pub
 make probe-agent-dist               # 构建并签名（私钥不存在时只告警，产物没有签名，agent 会拒绝）
-go run ./cmd/probe-release sign dist/probe-agent/1.9.0   # 单独重签
+go run ./internal/cmd/release sign dist/probe-agent/1.9.0   # 单独重签
 ```
 
 私钥不进仓库，请离线备份；丢失只能生成新密钥对，并让所有 agent 手动更新一次以信任新公钥。hub 从 `PROBE_HUB_AGENT_DIR`（默认 `./dist/probe-agent`，其次二进制旁的 `probe-agent/`）读取发布目录，不需要私钥。
@@ -341,7 +340,7 @@ agent ≥ 1.16.0 在 Hello 里声明 `caps` 和 `primitives`（原语 → 版本
 - 本地端口全局唯一：与已有规则重复，或已被本机其他程序占用，都返回 `409 port_taken`。不填端口时自动分配
 - 监听地址只能选 `127.0.0.1`（仅本机，默认）或 `0.0.0.0`（局域网）。选局域网时同网段的人不用登录 Hub 就能访问这个服务
 - 添加时先经探针试连一次目标，探针离线、目标不在白名单或连不上都直接报错。之后探针掉线时规则保留，连接会被接受后立即断开，并记下最近一次失败原因
-- 规则存在 `probe-hub.forwards.json`（工作目录下，`PROBE_HUB_FORWARDS_FILE` 可改），Hub 重启后恢复；端口被占用的规则会保留并标记监听失败。vm-server 的规则只在内存里
+- 规则存在 `probe-hub.forwards.json`（工作目录下，`PROBE_HUB_FORWARDS_FILE` 可改），Hub 重启后恢复；端口被占用的规则会保留并标记监听失败
 
 管理端（Bearer）：
 
@@ -351,9 +350,9 @@ agent ≥ 1.16.0 在 Hello 里声明 `caps` 和 `primitives`（原语 → 版本
 
 ### 插件
 
-插件用 Go 写，编译进 hub（`internal/plugin`），通过 `Host` 接口使用上面的原语，并在清单里声明用到的原语和目标地址，越界 `403 plugin_forbidden`。
+插件用 Go 写，编译进 hub（`internal/hub/plugins`），通过 `Host` 接口使用上面的原语，并在清单里声明用到的原语和目标地址，越界 `403 plugin_forbidden`。
 
-- 安装状态存在 `probe-hub.plugins.json`（工作目录下，`PROBE_HUB_PLUGINS_FILE` 可改）。文件不存在时按 `PROBE_HUB_PLUGINS`（逗号分隔）安装，默认都不装。vm-server 内置的插件全部安装且不落盘
+- 安装状态存在 `probe-hub.plugins.json`（工作目录下，`PROBE_HUB_PLUGINS_FILE` 可改）。文件不存在时按 `PROBE_HUB_PLUGINS`（逗号分隔）安装，默认都不装
 - 未安装的插件，接口返回 `404 plugin_not_installed`，页面返回 404。卸载时立即关闭它开的隧道（包括正在用的 WebSocket）
 
 管理端（Bearer）：

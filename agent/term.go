@@ -1,11 +1,11 @@
-package main
+package agent
 
 import (
 	"fmt"
 	"io"
 	"sync"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // termHub runs one PTY per hub stream id (one per browser tab).
@@ -23,7 +23,7 @@ type ptySession struct {
 func newTermHub() *termHub { return &termHub{terms: map[string]*ptySession{}} }
 
 // open starts a shell for id; onExit fires once if the shell ends on its own.
-func (t *termHub) open(id string, req guest.TermOpenRequest, onOut func([]byte), onExit func()) error {
+func (t *termHub) open(id string, req entities.TermOpenRequest, onOut func([]byte), onExit func()) error {
 	t.close(id)
 	ps := &ptySession{}
 	exited := func() {
@@ -41,8 +41,8 @@ func (t *termHub) open(id string, req guest.TermOpenRequest, onOut func([]byte),
 	// goroutines) still finds the session registered.
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.terms) >= guest.MaxTerms {
-		return fmt.Errorf("at most %d terminals", guest.MaxTerms)
+	if len(t.terms) >= entities.MaxTerms {
+		return fmt.Errorf("at most %d terminals", entities.MaxTerms)
 	}
 	cols, rows := clampSize(req.Cols, req.Rows)
 	var (
@@ -54,12 +54,12 @@ func (t *termHub) open(id string, req guest.TermOpenRequest, onOut func([]byte),
 	switch req.Mode {
 	case "":
 		stdin, closer, resize, err = startPTY(cols, rows, onOut, exited)
-	case guest.TermLogs:
+	case entities.TermLogs:
 		stdin, closer, resize, err = startDockerLogs(req, onOut, exited)
-	case guest.TermExec:
+	case entities.TermExec:
 		stdin, closer, resize, err = startDockerExec(req, cols, rows, onOut, exited)
 	default:
-		err = &guest.FrameError{Code: "bad_request", Message: "unknown terminal mode " + req.Mode}
+		err = &entities.FrameError{Code: "bad_request", Message: "unknown terminal mode " + req.Mode}
 	}
 	if err != nil {
 		return err

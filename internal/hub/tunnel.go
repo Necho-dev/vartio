@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"context"
@@ -11,7 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 // tunnelStall bounds how long a consumer that stopped reading may hold up the
@@ -64,8 +65,8 @@ func (s *session) attachTunnel(id, target, owner string, idle time.Duration) (*t
 	t.touch()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.tunnels) >= MaxTunnels {
-		return nil, &common.Error{Status: http.StatusConflict, Code: "too_many_tunnels", Message: fmt.Sprintf("at most %d tunnels per guest", MaxTunnels)}
+	if len(s.tunnels) >= entities.MaxTunnels {
+		return nil, &common.Error{Status: http.StatusConflict, Code: "too_many_tunnels", Message: fmt.Sprintf("at most %d tunnels per guest", entities.MaxTunnels)}
 	}
 	s.tunnels[id] = t
 	return t, nil
@@ -94,17 +95,17 @@ func (t *tunnelSink) run(s *session, p net.Conn) {
 	defer func() {
 		_ = p.Close()
 		if s.detachTunnel(t) && !t.peerClosed.Load() {
-			_ = s.write(Frame{ID: t.id, Stream: StreamTunnelClose})
+			_ = s.write(entities.Frame{ID: t.id, Stream: entities.StreamTunnelClose})
 		}
 	}()
 	go func() {
-		buf := make([]byte, TunnelChunk)
+		buf := make([]byte, entities.TunnelChunk)
 		for {
 			n, err := p.Read(buf)
 			if n > 0 {
 				t.touch()
 				t.tx.Add(int64(n))
-				if s.write(Frame{ID: t.id, Stream: StreamTunnel, Data: append([]byte(nil), buf[:n]...)}) != nil {
+				if s.write(entities.Frame{ID: t.id, Stream: entities.StreamTunnel, Data: append([]byte(nil), buf[:n]...)}) != nil {
 					t.stop()
 					return
 				}
@@ -118,7 +119,7 @@ func (t *tunnelSink) run(s *session, p net.Conn) {
 	write := func(b []byte) bool {
 		t.touch()
 		t.rx.Add(int64(len(b)))
-		_ = p.SetWriteDeadline(time.Now().Add(TunnelIdle))
+		_ = p.SetWriteDeadline(time.Now().Add(entities.TunnelIdle))
 		_, err := p.Write(b)
 		return err == nil
 	}
@@ -157,7 +158,7 @@ func errCapMissing(c string) error {
 // agent sees it). The agent's local policy decides which targets are allowed;
 // loopback only by default. owner labels the tunnel in listings and audit.
 func (h *Hub) DialTCP(ctx context.Context, key, target, owner string) (net.Conn, error) {
-	return h.dialTCP(ctx, key, target, owner, TunnelIdle)
+	return h.dialTCP(ctx, key, target, owner, entities.TunnelIdle)
 }
 
 func (h *Hub) dialTCP(ctx context.Context, key, target, owner string, idle time.Duration) (net.Conn, error) {
@@ -174,8 +175,8 @@ func (h *Hub) dialTCP(ctx context.Context, key, target, owner string, idle time.
 	if s == nil {
 		return nil, common.ErrOffline()
 	}
-	if !s.hello.Has(CapTunnelTCP) {
-		return nil, errCapMissing(CapTunnelTCP)
+	if !s.hello.Has(entities.CapTunnelTCP) {
+		return nil, errCapMissing(entities.CapTunnelTCP)
 	}
 	id, err := randomID()
 	if err != nil {
@@ -185,8 +186,8 @@ func (h *Hub) dialTCP(ctx context.Context, key, target, owner string, idle time.
 	if err != nil {
 		return nil, err
 	}
-	c, cancel := context.WithTimeout(ctx, TimeoutFor(MethodTunnelOpen, 0))
-	_, err = s.call(c, id, MethodTunnelOpen, TunnelOpenRequest{ID: id, Mode: "tcp", Target: target})
+	c, cancel := context.WithTimeout(ctx, entities.TimeoutFor(entities.MethodTunnelOpen, 0))
+	_, err = s.call(c, id, entities.MethodTunnelOpen, entities.TunnelOpenRequest{ID: id, Mode: "tcp", Target: target})
 	cancel()
 	if err != nil {
 		s.detachTunnel(t)
@@ -236,7 +237,7 @@ func (h *Hub) CloseTunnels(owner string) int {
 // CallPrimitive invokes an RPC-backed primitive (PrimitiveMethods), refusing
 // agents that do not declare it.
 func (h *Hub) CallPrimitive(ctx context.Context, key, primitive string, params any) (json.RawMessage, error) {
-	method, ok := PrimitiveMethods[primitive]
+	method, ok := entities.PrimitiveMethods[primitive]
 	if !ok {
 		return nil, common.ErrBad("%s is not an RPC primitive", primitive)
 	}

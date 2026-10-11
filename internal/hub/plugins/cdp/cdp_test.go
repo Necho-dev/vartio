@@ -16,8 +16,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/guest"
-	"govmomi-wmks/internal/plugin"
+	"vartio/internal/entities"
+	"vartio/internal/hub/plugins"
 )
 
 // fakeHost answers primitives locally and dials targets directly.
@@ -25,15 +25,15 @@ type fakeHost struct {
 	port   int
 	wsOnly int // a listener that only has DevToolsActivePort, like Chrome 144+ default profiles
 	mu     sync.Mutex
-	spawns []guest.SpawnRequest
+	spawns []entities.SpawnRequest
 	audits []string
 }
 
-func (h *fakeHost) Agents() []guest.SessionInfo {
-	return []guest.SessionInfo{{DeviceID: "dev1", OS: "darwin"}}
+func (h *fakeHost) Agents() []entities.SessionInfo {
+	return []entities.SessionInfo{{DeviceID: "dev1", OS: "darwin"}}
 }
-func (h *fakeHost) Agent(id string) (guest.SessionInfo, bool) {
-	return guest.SessionInfo{DeviceID: id, Online: true, OS: "darwin"}, id == "dev1"
+func (h *fakeHost) Agent(id string) (entities.SessionInfo, bool) {
+	return entities.SessionInfo{DeviceID: id, Online: true, OS: "darwin"}, id == "dev1"
 }
 func (h *fakeHost) DialTCP(ctx context.Context, _, target string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "tcp", target)
@@ -46,28 +46,28 @@ func (h *fakeHost) HTTPClient(id, target string) *http.Client {
 func (h *fakeHost) Call(_ context.Context, _, primitive string, params any) (json.RawMessage, error) {
 	var out any
 	switch primitive {
-	case guest.CapFsWhich:
-		req := params.(guest.WhichRequest)
-		out = guest.WhichResult{Hits: []guest.WhichHit{{Query: req.Paths[0], Path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"}}}
-	case guest.CapNetListeners:
-		ls := []guest.Listener{{IP: "127.0.0.1", Port: h.port, PID: 42, Name: "Google Chrome"}, {IP: "10.0.0.2", Port: 80, Name: "chrome"}}
+	case entities.CapFsWhich:
+		req := params.(entities.WhichRequest)
+		out = entities.WhichResult{Hits: []entities.WhichHit{{Query: req.Paths[0], Path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"}}}
+	case entities.CapNetListeners:
+		ls := []entities.Listener{{IP: "127.0.0.1", Port: h.port, PID: 42, Name: "Google Chrome"}, {IP: "10.0.0.2", Port: 80, Name: "chrome"}}
 		if h.wsOnly > 0 {
-			ls = append(ls, guest.Listener{IP: "127.0.0.1", Port: h.wsOnly, PID: 7, Name: "Google Chrome"})
+			ls = append(ls, entities.Listener{IP: "127.0.0.1", Port: h.wsOnly, PID: 7, Name: "Google Chrome"})
 		}
 		out = ls
-	case guest.CapFsRead:
-		req := params.(guest.ReadRequest)
-		res := guest.ReadResult{Files: []guest.ReadFile{}}
+	case entities.CapFsRead:
+		req := params.(entities.ReadRequest)
+		res := entities.ReadResult{Files: []entities.ReadFile{}}
 		if h.wsOnly > 0 && strings.HasPrefix(req.Paths[0], "~/Library/Application Support/Google/Chrome/") {
-			res.Files = append(res.Files, guest.ReadFile{Query: req.Paths[0], Data: []byte(fmt.Sprintf("%d\n/devtools/browser/abc-123\n", h.wsOnly))})
+			res.Files = append(res.Files, entities.ReadFile{Query: req.Paths[0], Data: fmt.Appendf(nil, "%d\n/devtools/browser/abc-123\n", h.wsOnly)})
 		}
 		out = res
-	case guest.CapProcSpawn:
-		req := params.(guest.SpawnRequest)
+	case entities.CapProcSpawn:
+		req := params.(entities.SpawnRequest)
 		h.mu.Lock()
 		h.spawns = append(h.spawns, req)
 		h.mu.Unlock()
-		out = guest.SpawnResult{PID: 4242, Path: req.Path, Args: req.Args}
+		out = entities.SpawnResult{PID: 4242, Path: req.Path, Args: req.Args}
 	}
 	return json.Marshal(out)
 }
@@ -122,7 +122,7 @@ func fakeChrome(t *testing.T) (port int) {
 				if err != nil {
 					return
 				}
-				_ = c.WriteMessage(typ, []byte(fmt.Sprintf("%s|origin=%q|%s", r.URL.Path, r.Header.Get("Origin"), msg)))
+				_ = c.WriteMessage(typ, fmt.Appendf(nil, "%s|origin=%q|%s", r.URL.Path, r.Header.Get("Origin"), msg))
 			}
 		default:
 			http.NotFound(w, r)
@@ -142,7 +142,7 @@ func setup(t *testing.T) (*httptest.Server, *fakeHost, int) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	p.Routes(mux, plugin.PathPrefix+"/"+Name)
+	p.Routes(mux, plugins.PathPrefix+"/"+Name)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, host, port
@@ -167,7 +167,7 @@ func getJSON(t *testing.T, method, url, body string, v any) int {
 
 func TestBrowsersDiscovery(t *testing.T) {
 	srv, _, port := setup(t)
-	base := srv.URL + plugin.PathPrefix + "/cdp/agents/dev1"
+	base := srv.URL + plugins.PathPrefix + "/cdp/agents/dev1"
 	var res browsersResult
 	if code := getJSON(t, "GET", base+"/browsers", "", &res); code != 200 {
 		t.Fatalf("browsers %d", code)
@@ -179,7 +179,7 @@ func TestBrowsersDiscovery(t *testing.T) {
 		t.Fatalf("non-loopback listener probed or endpoint missing: %+v", res)
 	}
 	ep := res.Running[0]
-	want := "ws://" + strings.TrimPrefix(srv.URL, "http://") + plugin.PathPrefix + "/cdp/agents/dev1/ports/" + strconv.Itoa(port) + "/devtools/browser/b1"
+	want := "ws://" + strings.TrimPrefix(srv.URL, "http://") + plugins.PathPrefix + "/cdp/agents/dev1/ports/" + strconv.Itoa(port) + "/devtools/browser/b1"
 	if ep.Port != port || ep.PID != 42 || ep.WebSocketDebuggerURL != want || !strings.HasPrefix(ep.LocalWebSocketURL, "ws://127.0.0.1:") {
 		t.Fatalf("endpoint %+v\nwant ws %s", ep, want)
 	}
@@ -191,7 +191,7 @@ func TestWSOnlyEndpoint(t *testing.T) {
 	t.Cleanup(dead.Close)
 	host.wsOnly = dead.Listener.Addr().(*net.TCPAddr).Port
 	var res browsersResult
-	getJSON(t, "GET", srv.URL+plugin.PathPrefix+"/cdp/agents/dev1/browsers", "", &res)
+	getJSON(t, "GET", srv.URL+plugins.PathPrefix+"/cdp/agents/dev1/browsers", "", &res)
 	if len(res.Running) != 2 {
 		t.Fatalf("running %+v", res.Running)
 	}
@@ -209,7 +209,7 @@ func TestWSOnlyEndpoint(t *testing.T) {
 func TestCloseBrowser(t *testing.T) {
 	srv, host, port := setup(t)
 	var res map[string]any
-	if code := getJSON(t, "POST", fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/close", srv.URL, plugin.PathPrefix, port), "", &res); code != http.StatusOK || res["closed"] != true {
+	if code := getJSON(t, "POST", fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/close", srv.URL, plugins.PathPrefix, port), "", &res); code != http.StatusOK || res["closed"] != true {
 		t.Fatalf("close: %d %v", code, res)
 	}
 	host.mu.Lock()
@@ -220,7 +220,7 @@ func TestCloseBrowser(t *testing.T) {
 	}
 	dead := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(dead.Close)
-	if code := getJSON(t, "POST", fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/close", srv.URL, plugin.PathPrefix, dead.Listener.Addr().(*net.TCPAddr).Port), "", nil); code != http.StatusBadRequest {
+	if code := getJSON(t, "POST", fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/close", srv.URL, plugins.PathPrefix, dead.Listener.Addr().(*net.TCPAddr).Port), "", nil); code != http.StatusBadRequest {
 		t.Fatalf("close ws-only/dead port: %d", code)
 	}
 }
@@ -228,15 +228,15 @@ func TestCloseBrowser(t *testing.T) {
 func TestJSONRewrite(t *testing.T) {
 	srv, _, port := setup(t)
 	var list []map[string]string
-	getJSON(t, "GET", fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/json/list", srv.URL, plugin.PathPrefix, port), "", &list)
-	hub := strings.TrimPrefix(srv.URL, "http://") + fmt.Sprintf("%s/cdp/agents/dev1/ports/%d/devtools/page/P1", plugin.PathPrefix, port)
+	getJSON(t, "GET", fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/json/list", srv.URL, plugins.PathPrefix, port), "", &list)
+	hub := strings.TrimPrefix(srv.URL, "http://") + fmt.Sprintf("%s/cdp/agents/dev1/ports/%d/devtools/page/P1", plugins.PathPrefix, port)
 	if len(list) != 1 || list[0]["webSocketDebuggerUrl"] != "ws://"+hub || !strings.HasSuffix(list[0]["devtoolsFrontendUrl"], "ws="+hub) {
 		t.Fatalf("rewrite %+v", list)
 	}
-	if code := getJSON(t, "GET", srv.URL+plugin.PathPrefix+"/cdp/agents/dev1/ports/0/json/list", "", nil); code != http.StatusBadRequest {
+	if code := getJSON(t, "GET", srv.URL+plugins.PathPrefix+"/cdp/agents/dev1/ports/0/json/list", "", nil); code != http.StatusBadRequest {
 		t.Fatalf("port 0: %d", code)
 	}
-	if code := getJSON(t, "GET", srv.URL+plugin.PathPrefix+"/cdp/agents/nope/ports/9222/json/list", "", nil); code != http.StatusConflict {
+	if code := getJSON(t, "GET", srv.URL+plugins.PathPrefix+"/cdp/agents/nope/ports/9222/json/list", "", nil); code != http.StatusConflict {
 		t.Fatalf("offline agent: %d", code)
 	}
 }
@@ -270,7 +270,7 @@ func roundTrip(t *testing.T, c *websocket.Conn, msg string) string {
 
 func TestWebSocketProxy(t *testing.T) {
 	srv, host, port := setup(t)
-	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + fmt.Sprintf("%s/cdp/agents/dev1/ports/%d/devtools/page/P1", plugin.PathPrefix, port)
+	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + fmt.Sprintf("%s/cdp/agents/dev1/ports/%d/devtools/page/P1", plugins.PathPrefix, port)
 	c := dialWS(t, ws)
 	msg := `{"id":1,"method":"Runtime.evaluate"}`
 	if got := roundTrip(t, c, msg); got != `/devtools/page/P1|origin=""|`+msg {
@@ -289,13 +289,13 @@ func TestWebSocketProxy(t *testing.T) {
 
 func TestTicket(t *testing.T) {
 	srv, _, port := setup(t)
-	url := fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/ticket", srv.URL, plugin.PathPrefix, port)
+	url := fmt.Sprintf("%s%s/cdp/agents/dev1/ports/%d/ticket", srv.URL, plugins.PathPrefix, port)
 	if code := getJSON(t, "POST", url, `{"path":"/json/list"}`, nil); code != http.StatusBadRequest {
 		t.Fatalf("non-devtools path: %d", code)
 	}
 	var tk struct{ WS string }
 	full := "ws://hub/devtools/page/P1"
-	if code := getJSON(t, "POST", url, `{"path":"`+full+`"}`, &tk); code != 200 || !strings.HasPrefix(tk.WS, plugin.PublicPrefix+"/cdp/") {
+	if code := getJSON(t, "POST", url, `{"path":"`+full+`"}`, &tk); code != 200 || !strings.HasPrefix(tk.WS, plugins.PublicPrefix+"/cdp/") {
 		t.Fatalf("ticket %d %+v", code, tk)
 	}
 	ws := "ws" + strings.TrimPrefix(srv.URL, "http") + tk.WS
@@ -312,7 +312,7 @@ func TestLaunch(t *testing.T) {
 	srv, host, port := setup(t)
 	var res launchResult
 	body := fmt.Sprintf(`{"browser":"chrome","port":%d,"headless":true,"url":"https://example.com"}`, port)
-	if code := getJSON(t, "POST", srv.URL+plugin.PathPrefix+"/cdp/agents/dev1/launch", body, &res); code != http.StatusCreated {
+	if code := getJSON(t, "POST", srv.URL+plugins.PathPrefix+"/cdp/agents/dev1/launch", body, &res); code != http.StatusCreated {
 		t.Fatalf("launch %d %+v", code, res)
 	}
 	if res.PID != 4242 || res.Endpoint.Port != port || res.Endpoint.Browser != "Chrome/140.0.0.0" {
@@ -330,7 +330,7 @@ func TestLaunch(t *testing.T) {
 	if !strings.HasSuffix(sp.Path, "Google Chrome") || sp.Args[len(sp.Args)-1] != "https://example.com" {
 		t.Fatalf("spawn %+v", sp)
 	}
-	if code := getJSON(t, "POST", srv.URL+plugin.PathPrefix+"/cdp/agents/dev1/launch", `{"browser":"netscape"}`, nil); code != http.StatusNotFound {
+	if code := getJSON(t, "POST", srv.URL+plugins.PathPrefix+"/cdp/agents/dev1/launch", `{"browser":"netscape"}`, nil); code != http.StatusNotFound {
 		t.Fatalf("unknown browser: %d", code)
 	}
 }

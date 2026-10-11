@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"image"
@@ -7,18 +7,18 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 func TestDisplaySelectScreen(t *testing.T) {
-	screens := []guest.Screen{{Index: 0, Primary: true}, {Index: 1, X: 1920}}
+	screens := []entities.Screen{{Index: 0, Primary: true}, {Index: 1, X: 1920}}
 	if got := pickScreen(screens, 5); got.Index != 0 {
 		t.Fatalf("unknown index should fall back to primary, got %d", got.Index)
 	}
 	if got := pickScreen(nil, 1); got.Width != 0 {
 		t.Fatalf("empty list should give the zero screen, got %+v", got)
 	}
-	v := newDisplayView(guest.DisplayAuto)
+	v := newDisplayView(entities.DisplayAuto)
 	if err := v.selectScreen(1); err == nil {
 		t.Fatal("select before open should fail")
 	}
@@ -51,9 +51,9 @@ func TestDisplaySelectScreen(t *testing.T) {
 }
 
 func TestDisplayCloseClearsArranged(t *testing.T) {
-	v := newDisplayView(guest.DisplayAuto)
+	v := newDisplayView(entities.DisplayAuto)
 	v.stop = func() {}
-	v.screens = []guest.Screen{{Index: 0}, {Index: 1}}
+	v.screens = []entities.Screen{{Index: 0}, {Index: 1}}
 	if err := v.selectScreen(screenAll); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestDisplayCloseClearsArranged(t *testing.T) {
 	// must not bring the arranged view back.
 	v.stop = func() {}
 	v.mu.Lock()
-	v.screens = []guest.Screen{{Index: 0}, {Index: 1}}
+	v.screens = []entities.Screen{{Index: 0}, {Index: 1}}
 	v.cur = 0
 	v.all = false
 	v.mu.Unlock()
@@ -75,9 +75,9 @@ func TestDisplayCloseClearsArranged(t *testing.T) {
 }
 
 func TestDisplayViewsAreIndependent(t *testing.T) {
-	screens := []guest.Screen{{Index: 0, Primary: true}, {Index: 1, X: 1920}}
+	screens := []entities.Screen{{Index: 0, Primary: true}, {Index: 1, X: 1920}}
 	arm := func() *displayView {
-		v := newDisplayView(guest.DisplayAuto)
+		v := newDisplayView(entities.DisplayAuto)
 		v.stop = func() {}
 		v.screens = screens
 		return v
@@ -100,7 +100,7 @@ func TestDisplayViewsAreIndependent(t *testing.T) {
 	if all, _, _, _, _ := b.plan(); all {
 		t.Fatal("arranging A also arranged B")
 	}
-	if d.setQuality("a", guest.DisplayHD) != guest.DisplayHD {
+	if d.setQuality("a", entities.DisplayHD) != entities.DisplayHD {
 		t.Fatal("quality")
 	}
 	if _, p := b.current(); p.FPS != autoLadder[autoStart].FPS {
@@ -120,7 +120,7 @@ func TestDisplayViewsAreIndependent(t *testing.T) {
 }
 
 func TestComposeMosaic(t *testing.T) {
-	screens := []guest.Screen{
+	screens := []entities.Screen{
 		{X: 0, Y: 0, Width: 100, Height: 50},
 		{X: 100, Y: -80, Width: 40, Height: 80},
 	}
@@ -148,23 +148,23 @@ func solid(w, h int, c color.Color) *image.RGBA {
 }
 
 func TestDisplayQualityProfiles(t *testing.T) {
-	v := newDisplayView(guest.DisplayAuto)
+	v := newDisplayView(entities.DisplayAuto)
 	if _, p := v.current(); p != autoLadder[autoStart] {
 		t.Fatalf("default should be auto at the start rung, got %+v", p)
 	}
-	if q := v.setQuality("hd"); q != guest.DisplayHD {
+	if q := v.setQuality("hd"); q != entities.DisplayHD {
 		t.Fatal(q)
 	}
 	if _, p := v.current(); p.Quality <= autoLadder[len(autoLadder)-1].Quality || p.FPS >= autoLadder[autoStart].FPS {
 		t.Fatalf("hd should trade frame rate for quality: %+v", p)
 	}
-	if _, p := v.current(); v.setQuality("smooth") != guest.DisplaySmooth || p.FPS != 3 {
+	if _, p := v.current(); v.setQuality("smooth") != entities.DisplaySmooth || p.FPS != 3 {
 		t.Fatal("switch to smooth")
 	}
 	if _, p := v.current(); p.FPS != 10 {
 		t.Fatalf("smooth should run at 10 fps: %+v", p)
 	}
-	if v.setQuality("bogus") != guest.DisplayAuto {
+	if v.setQuality("bogus") != entities.DisplayAuto {
 		t.Fatal("unknown profile should mean auto")
 	}
 }

@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"crypto/ed25519"
@@ -8,15 +8,15 @@ import (
 	"path/filepath"
 	"testing"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
-func signedAck(priv ed25519.PrivateKey, nonce, device, cred string) guest.HelloOK {
-	return guest.HelloOK{
+func signedAck(priv ed25519.PrivateKey, nonce, device, cred string) entities.HelloOK {
+	return entities.HelloOK{
 		OK:         true,
 		Credential: cred,
 		HubKey:     base64.StdEncoding.EncodeToString(priv.Public().(ed25519.PublicKey)),
-		Sig:        base64.StdEncoding.EncodeToString(ed25519.Sign(priv, guest.HelloSigMessage(nonce, device, cred))),
+		Sig:        base64.StdEncoding.EncodeToString(ed25519.Sign(priv, entities.HelloSigMessage(nonce, device, cred))),
 	}
 }
 
@@ -30,7 +30,7 @@ func TestAcceptHelloPinsAndRefuses(t *testing.T) {
 
 	// Legacy hub, nothing pinned yet: accepted, nothing stored.
 	var e hubEntry
-	if changed, err := acceptHello(&e, "n", "dev", guest.HelloOK{OK: true}); err != nil || changed {
+	if changed, err := acceptHello(&e, "n", "dev", entities.HelloOK{OK: true}); err != nil || changed {
 		t.Fatalf("legacy hub: %v %v", changed, err)
 	}
 
@@ -47,11 +47,11 @@ func TestAcceptHelloPinsAndRefuses(t *testing.T) {
 		t.Fatalf("reload %+v", e)
 	}
 
-	for name, ack := range map[string]guest.HelloOK{
+	for name, ack := range map[string]entities.HelloOK{
 		"rogue key":      signedAck(rogue, "n2", "dev", ""),
 		"unsigned":       {OK: true},
 		"replayed nonce": signedAck(hub, "old", "dev", ""),
-		"swapped cred": func() guest.HelloOK {
+		"swapped cred": func() entities.HelloOK {
 			a := signedAck(hub, "n2", "dev", "")
 			a.Credential = "attacker"
 			return a

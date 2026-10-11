@@ -44,6 +44,8 @@ func (m *Manifest) Find(goos, arch string) *Artifact {
 
 // Message binds the digest to version and platform, so a valid signature cannot
 // be replayed for another platform or to pass an old build off as a new one.
+// The probe-agent prefix is the signature contract already compiled into
+// deployed agents; renaming it would make those agents reject the upgrade.
 func Message(version string, a Artifact) []byte {
 	return fmt.Appendf(nil, "probe-agent|%s|%s|%s|%d|%s", version, a.OS, a.Arch, a.Size, strings.ToLower(a.SHA256))
 }

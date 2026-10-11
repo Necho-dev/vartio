@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"errors"
@@ -6,7 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"govmomi-wmks/internal/common"
+	"vartio/internal/common"
+	"vartio/internal/entities"
 )
 
 // record audits an operator action from the probe API. Requests turned away before
@@ -30,7 +31,7 @@ func (h *Hub) Record(r *http.Request, key, kind, detail string, err error) {
 	h.audit(key, kind, detail, clientIP(r), err)
 }
 
-func execLine(req ExecRequest) string {
+func execLine(req entities.ExecRequest) string {
 	line := strings.TrimSpace(req.Command + " " + strings.Join(req.Args, " "))
 	if len(line) > 300 {
 		line = line[:300] + "…"

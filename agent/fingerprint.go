@@ -1,26 +1,25 @@
-package main
+package agent
 
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"net"
-	"os"
 	"runtime"
 	"sort"
 	"strings"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // deviceID fingerprints the machine from the OS install id, the hardware UUID and
 // the primary NIC. VM clones often share the first two; ESXi regenerates the MAC,
 // so the triple still tells them apart. CPU, disks and hostname are left out: they
 // are identical across clones or change on a vCPU resize / vMotion.
-func deviceID() (string, *guest.DeviceFacts) {
+func deviceID() (string, *entities.DeviceFacts) {
 	mid, hw, mac := norm(readMachineID()), norm(readHardwareUUID()), primaryMAC()
-	facts := &guest.DeviceFacts{MID: digest(mid), HW: digest(hw), MAC: digest(mac)}
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("GUEST_DEVICE_ID"))); v != "" {
+	facts := &entities.DeviceFacts{MID: digest(mid), HW: digest(hw), MAC: digest(mac)}
+	if v := strings.ToLower(strings.TrimSpace(getenv("VARTIO_AGENT_DEVICE_ID", "GUEST_DEVICE_ID"))); v != "" {
 		return v, facts
 	}
 	if inContainer() {

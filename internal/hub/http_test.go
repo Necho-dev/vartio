@@ -1,4 +1,4 @@
-package guest
+package hub
 
 import (
 	"bytes"
@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"time"
+	"vartio/internal/entities"
 
 	"github.com/gorilla/websocket"
 	"testing"
@@ -19,41 +20,41 @@ func TestDevHTTPHealthExecP1Confirm(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/probe/connect?token=dev"
-	conn := dialHello(t, wsURL, Hello{BiosUUID: "http-1", Version: "t"})
+	conn := dialHello(t, wsURL, entities.Hello{BiosUUID: "http-1", Version: "t"})
 	go fakeAgent(t, conn, map[string]any{
-		MethodHealth:    Health{CPU: CPUInfo{LogicalCPUs: 4, Pct: 2}, Memory: MemInfo{TotalMB: 1024}},
-		MethodExec:      ExecResult{ExitCode: 0, Stdout: "ok\n"},
-		MethodPower:     PowerResult{Accepted: true, Action: "reboot"},
-		MethodFilesList: FilesListResult{Path: "/tmp/probe-agent", Staging: "/tmp/probe-agent", Entries: []FileEntry{}},
+		entities.MethodHealth:    entities.Health{CPU: entities.CPUInfo{LogicalCPUs: 4, Pct: 2}, Memory: entities.MemInfo{TotalMB: 1024}},
+		entities.MethodExec:      entities.ExecResult{ExitCode: 0, Stdout: "ok\n"},
+		entities.MethodPower:     entities.PowerResult{Accepted: true, Action: "reboot"},
+		entities.MethodFilesList: entities.FilesListResult{Path: "/tmp/probe-agent", Staging: "/tmp/probe-agent", Entries: []entities.FileEntry{}},
 	})
 	waitOnline(t, h, "http-1")
 
-	var sessions []SessionInfo
+	var sessions []entities.SessionInfo
 	getJSON(t, srv.URL+"/v1/probe/sessions", http.StatusOK, &sessions)
 	if len(sessions) != 1 || !sessions[0].Online {
 		t.Fatalf("sessions %+v", sessions)
 	}
 
-	var health Health
+	var health entities.Health
 	getJSON(t, srv.URL+"/v1/probe/sessions/http-1/health", http.StatusOK, &health)
 	if health.CPU.LogicalCPUs != 4 {
 		t.Fatalf("health %+v", health)
 	}
 
-	var ex ExecResult
+	var ex entities.ExecResult
 	postJSON(t, srv.URL+"/v1/probe/sessions/http-1/exec", map[string]any{"command": "hostname"}, http.StatusOK, &ex)
 	if ex.Stdout != "ok\n" {
 		t.Fatalf("exec %+v", ex)
 	}
 
-	var files FilesListResult
+	var files entities.FilesListResult
 	getJSON(t, srv.URL+"/v1/probe/sessions/http-1/files", http.StatusOK, &files)
 	if files.Entries == nil {
 		t.Fatal("files.entries should be []")
 	}
-	var disp DisplayInfo
+	var disp entities.DisplayInfo
 	getJSON(t, srv.URL+"/v1/probe/sessions/http-1/display", http.StatusOK, &disp)
-	if !disp.ViewOnly || disp.FPS != DisplayFPS {
+	if !disp.ViewOnly || disp.FPS != entities.DisplayFPS {
 		t.Fatalf("display info %+v", disp)
 	}
 
@@ -62,7 +63,7 @@ func TestDevHTTPHealthExecP1Confirm(t *testing.T) {
 		t.Fatalf("power no confirm %d %s", code, body)
 	}
 
-	var pwr PowerResult
+	var pwr entities.PowerResult
 	postJSON(t, srv.URL+"/v1/probe/sessions/http-1/power", map[string]any{"action": "reboot", "confirm": true}, http.StatusOK, &pwr)
 	if !pwr.Accepted {
 		t.Fatalf("power %+v", pwr)
@@ -79,21 +80,21 @@ func TestDisplayWSViewOnly(t *testing.T) {
 	srv := httptest.NewServer(h.DevHandler())
 	t.Cleanup(srv.Close)
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/probe/connect?token=dev"
-	conn := dialHello(t, wsURL, Hello{BiosUUID: "disp-1"})
+	conn := dialHello(t, wsURL, entities.Hello{BiosUUID: "disp-1"})
 	frame := []byte{0xff, 0xd8, 0xff, 0xd9}
 	go func() {
 		for {
-			var fr Frame
+			var fr entities.Frame
 			if err := conn.ReadJSON(&fr); err != nil {
 				return
 			}
 			switch fr.Method {
-			case MethodDisplayOpen:
-				b, _ := json.Marshal(DisplayOpenResult{OK: true, FPS: 2, MaxSide: 1280})
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: b})
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Stream: "display", Data: frame})
-			case MethodDisplayClose:
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
+			case entities.MethodDisplayOpen:
+				b, _ := json.Marshal(entities.DisplayOpenResult{OK: true, FPS: 2, MaxSide: 1280})
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: b})
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Stream: "display", Data: frame})
+			case entities.MethodDisplayClose:
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
 			}
 		}
 	}()
@@ -120,33 +121,33 @@ func TestDisplayWSSelectScreen(t *testing.T) {
 	h := NewHub("dev")
 	srv := httptest.NewServer(h.DevHandler())
 	t.Cleanup(srv.Close)
-	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect?token=dev", Hello{BiosUUID: "disp-2"})
-	screens := []Screen{{Index: 0, Name: "A", Width: 1920, Height: 1080, Primary: true}, {Index: 1, Name: "B", X: 1920, Width: 1080, Height: 1920}}
+	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect?token=dev", entities.Hello{BiosUUID: "disp-2"})
+	screens := []entities.Screen{{Index: 0, Name: "A", Width: 1920, Height: 1080, Primary: true}, {Index: 1, Name: "B", X: 1920, Width: 1080, Height: 1920}}
 	selected := make(chan int, 1)
 	go func() {
 		for {
-			var fr Frame
+			var fr entities.Frame
 			if err := conn.ReadJSON(&fr); err != nil {
 				return
 			}
 			switch fr.Method {
-			case MethodDisplayOpen:
-				var req DisplayOpenRequest
+			case entities.MethodDisplayOpen:
+				var req entities.DisplayOpenRequest
 				_ = json.Unmarshal(fr.Params, &req)
 				if req.Quality != "hd" {
 					t.Errorf("open quality %q", req.Quality)
 				}
-				b, _ := json.Marshal(DisplayOpenResult{OK: true, FPS: 10, MaxSide: 2560, Screens: screens, Quality: DisplayAuto})
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: b})
-			case MethodDisplaySelect:
-				var req DisplayOpenRequest
+				b, _ := json.Marshal(entities.DisplayOpenResult{OK: true, FPS: 10, MaxSide: 2560, Screens: screens, Quality: entities.DisplayAuto})
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: b})
+			case entities.MethodDisplaySelect:
+				var req entities.DisplayOpenRequest
 				_ = json.Unmarshal(fr.Params, &req)
 				selected <- req.Screen
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"screen":1}`)})
-			case MethodDisplayQuality:
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"quality":"smooth"}`)})
-			case MethodDisplayClose:
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: json.RawMessage(`{"screen":1}`)})
+			case entities.MethodDisplayQuality:
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: json.RawMessage(`{"quality":"smooth"}`)})
+			case entities.MethodDisplayClose:
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
 			}
 		}
 	}()
@@ -161,7 +162,7 @@ func TestDisplayWSSelectScreen(t *testing.T) {
 	}
 	defer c.Close()
 	var m displayMsg
-	if err := c.ReadJSON(&m); err != nil || m.Type != "info" || len(m.Screens) != 2 || m.Screen != 0 || m.Quality != DisplayAuto {
+	if err := c.ReadJSON(&m); err != nil || m.Type != "info" || len(m.Screens) != 2 || m.Screen != 0 || m.Quality != entities.DisplayAuto {
 		t.Fatalf("info msg %+v %v", m, err)
 	}
 	if err := c.WriteJSON(displayMsg{Type: "screen", Screen: 1}); err != nil {
@@ -176,7 +177,7 @@ func TestDisplayWSSelectScreen(t *testing.T) {
 	if err := c.WriteJSON(displayMsg{Type: "quality", Quality: "smooth"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ReadJSON(&m); err != nil || m.Type != "quality" || m.Quality != DisplaySmooth {
+	if err := c.ReadJSON(&m); err != nil || m.Type != "quality" || m.Quality != entities.DisplaySmooth {
 		t.Fatalf("quality reply %+v %v", m, err)
 	}
 }
@@ -185,29 +186,29 @@ func TestDisplayWSTwoViewers(t *testing.T) {
 	h := NewHub("dev")
 	srv := httptest.NewServer(h.DevHandler())
 	t.Cleanup(srv.Close)
-	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect?token=dev", Hello{BiosUUID: "disp-3"})
-	chosen := make(chan DisplayOpenRequest, 1)
+	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect?token=dev", entities.Hello{BiosUUID: "disp-3"})
+	chosen := make(chan entities.DisplayOpenRequest, 1)
 	go func() {
 		n := byte(0)
 		for {
-			var fr Frame
+			var fr entities.Frame
 			if err := conn.ReadJSON(&fr); err != nil {
 				return
 			}
 			switch fr.Method {
-			case MethodDisplayOpen:
+			case entities.MethodDisplayOpen:
 				n++
-				b, _ := json.Marshal(DisplayOpenResult{OK: true, FPS: 2, MaxSide: 1280, Screens: []Screen{{Index: 0, Primary: true}, {Index: 1}}, Screen: 0, Quality: DisplayAuto})
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: b})
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Stream: "display", Data: []byte{0xff, 0xd8, n}})
-			case MethodDisplaySelect:
-				var req DisplayOpenRequest
+				b, _ := json.Marshal(entities.DisplayOpenResult{OK: true, FPS: 2, MaxSide: 1280, Screens: []entities.Screen{{Index: 0, Primary: true}, {Index: 1}}, Screen: 0, Quality: entities.DisplayAuto})
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: b})
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Stream: "display", Data: []byte{0xff, 0xd8, n}})
+			case entities.MethodDisplaySelect:
+				var req entities.DisplayOpenRequest
 				_ = json.Unmarshal(fr.Params, &req)
 				chosen <- req
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"screen":1}`)})
-				_ = conn.WriteJSON(Frame{ID: req.ID, Stream: "display", Data: []byte{0xff, 0xd8, byte(req.Screen)}})
-			case MethodDisplayClose:
-				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: json.RawMessage(`{"screen":1}`)})
+				_ = conn.WriteJSON(entities.Frame{ID: req.ID, Stream: "display", Data: []byte{0xff, 0xd8, byte(req.Screen)}})
+			case entities.MethodDisplayClose:
+				_ = conn.WriteJSON(entities.Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
 			}
 		}
 	}()

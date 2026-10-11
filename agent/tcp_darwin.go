@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bufio"
@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 // tcpStats counts sockets from netstat (a few ms); gopsutil's connection list
@@ -16,8 +16,8 @@ import (
 // without root, so segment counters come from nettop's per-process TCP byte
 // totals (OutSegs/Retrans are bytes here; the ratio is what matters). Totals
 // drop when processes exit; the hub skips such intervals.
-func tcpStats(ctx context.Context) (*guest.TCPStats, error) {
-	out := &guest.TCPStats{}
+func tcpStats(ctx context.Context) (*entities.TCPStats, error) {
+	out := &entities.TCPStats{}
 	for _, fam := range []string{"inet", "inet6"} {
 		b, err := exec.CommandContext(ctx, "/usr/sbin/netstat", "-an", "-f", fam).Output()
 		if err != nil {
@@ -34,7 +34,7 @@ func tcpStats(ctx context.Context) (*guest.TCPStats, error) {
 // countNetstat tallies `netstat -an -f inet|inet6` rows by protocol (tcp4, udp6,
 // icm4, ...). Dual-stack sockets (tcp46/udp46) appear in both listings, so the
 // inet6 pass skips them.
-func countNetstat(b []byte, v6 bool, out *guest.TCPStats) {
+func countNetstat(b []byte, v6 bool, out *entities.TCPStats) {
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		fs := strings.Fields(sc.Text())

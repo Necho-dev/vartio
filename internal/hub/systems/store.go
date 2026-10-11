@@ -1,4 +1,4 @@
-package monitor
+package systems
 
 import (
 	"context"
@@ -7,11 +7,10 @@ import (
 	"fmt"
 	"sort"
 	"time"
+	"vartio/internal/entities"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"govmomi-wmks/internal/guest"
 )
 
 var schema = `
@@ -158,7 +157,7 @@ func (s *Store) LoadSystems(ctx context.Context) ([]*System, error) {
 		}
 		_ = json.Unmarshal(info, &sys.Info)
 		if len(device) > 0 {
-			var d guest.DeviceFacts
+			var d entities.DeviceFacts
 			if json.Unmarshal(device, &d) == nil {
 				sys.Device = &d
 			}
@@ -216,7 +215,7 @@ func (s *Store) AddEvent(ctx context.Context, id string, e Event) error {
 	return err
 }
 
-func (s *Store) Record(ctx context.Context, id string, info guest.SysInfo, smp Sample) error {
+func (s *Store) Record(ctx context.Context, id string, info entities.SysInfo, smp Sample) error {
 	infoJSON, _ := json.Marshal(info)
 	latestJSON, _ := json.Marshal(smp)
 	b := &pgx.Batch{}

@@ -1,4 +1,4 @@
-package guest
+package entities
 
 import (
 	"strconv"

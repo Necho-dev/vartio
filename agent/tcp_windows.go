@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"govmomi-wmks/internal/guest"
+	"vartio/internal/entities"
 )
 
 var (
@@ -28,8 +28,8 @@ const (
 
 // tcpStats reads the IPv4 and IPv6 TCP tables and statistics from iphlpapi;
 // gopsutil's connection list also resolves every owning process.
-func tcpStats(context.Context) (*guest.TCPStats, error) {
-	out := &guest.TCPStats{}
+func tcpStats(context.Context) (*entities.TCPStats, error) {
+	out := &entities.TCPStats{}
 	ok := false
 	// Row layouts: MIB_TCPROW_OWNER_PID (state first, 24 bytes) and
 	// MIB_TCP6ROW_OWNER_PID (state at 48, 56 bytes).

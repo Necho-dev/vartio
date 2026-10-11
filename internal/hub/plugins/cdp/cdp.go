@@ -28,9 +28,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/common"
-	"govmomi-wmks/internal/guest"
-	"govmomi-wmks/internal/plugin"
+	"vartio/internal/common"
+	"vartio/internal/entities"
+	"vartio/internal/hub/plugins"
 )
 
 const (
@@ -45,8 +45,8 @@ const (
 var uiFS embed.FS
 
 type Plugin struct {
-	host    plugin.Host
-	tickets plugin.Tickets[wsTicket]
+	host    plugins.Host
+	tickets plugins.Tickets[wsTicket]
 }
 
 type wsTicket struct {
@@ -57,18 +57,18 @@ type wsTicket struct {
 
 func New() *Plugin { return &Plugin{} }
 
-func (p *Plugin) Manifest() plugin.Manifest {
-	return plugin.Manifest{
+func (p *Plugin) Manifest() plugins.Manifest {
+	return plugins.Manifest{
 		Name:        Name,
 		Title:       "Chrome DevTools",
 		Version:     "1.0.0",
 		Description: "发现、启动并经探针隧道接管远端机器上的 Chrome / Edge / Chromium / 比特浏览器窗口，提供 CDP 透明转发与在线调试",
-		Primitives:  []string{guest.CapTunnelTCP, guest.CapFsWhich, guest.CapFsRead, guest.CapProcSpawn, guest.CapNetListeners},
+		Primitives:  []string{entities.CapTunnelTCP, entities.CapFsWhich, entities.CapFsRead, entities.CapProcSpawn, entities.CapNetListeners},
 		Targets:     []string{"127.0.0.1:*", "[::1]:*"},
 	}
 }
 
-func (p *Plugin) Init(_ context.Context, host plugin.Host) error {
+func (p *Plugin) Init(_ context.Context, host plugins.Host) error {
 	p.host = host
 	return nil
 }
@@ -80,7 +80,7 @@ func (p *Plugin) UI() fs.FS {
 
 func (p *Plugin) Routes(mux *http.ServeMux, prefix string) {
 	mux.HandleFunc("GET "+prefix+"/catalog", func(w http.ResponseWriter, _ *http.Request) {
-		plugin.WriteJSON(w, http.StatusOK, catalog)
+		plugins.WriteJSON(w, http.StatusOK, catalog)
 	})
 	mux.HandleFunc("GET "+prefix+"/agents/{id}/browsers", p.handleBrowsers)
 	mux.HandleFunc("POST "+prefix+"/agents/{id}/launch", p.handleLaunch)
@@ -91,7 +91,7 @@ func (p *Plugin) Routes(mux *http.ServeMux, prefix string) {
 		mux.HandleFunc(m+" "+prefix+"/agents/{id}/ports/{port}/json", p.handleJSON)
 	}
 	mux.HandleFunc("GET "+prefix+"/agents/{id}/ports/{port}/devtools/{rest...}", p.handleDevtools)
-	mux.HandleFunc("GET "+plugin.PublicPrefix+"/"+Name+"/{ticket}", p.handleTicketWS)
+	mux.HandleFunc("GET "+plugins.PublicPrefix+"/"+Name+"/{ticket}", p.handleTicketWS)
 }
 
 // ---------- catalog ----------
@@ -182,10 +182,10 @@ type browsersResult struct {
 	Errors []string `json:"errors,omitempty"`
 }
 
-func (p *Plugin) agent(w http.ResponseWriter, r *http.Request) (guest.SessionInfo, bool) {
+func (p *Plugin) agent(w http.ResponseWriter, r *http.Request) (entities.SessionInfo, bool) {
 	info, ok := p.host.Agent(r.PathValue("id"))
 	if !ok {
-		plugin.WriteError(w, common.ErrOffline())
+		plugins.WriteError(w, common.ErrOffline())
 		return info, false
 	}
 	return info, true
@@ -222,11 +222,11 @@ func (p *Plugin) handleBrowsers(w http.ResponseWriter, r *http.Request) {
 		out.Running, out.Probed = append(out.Running, eps...), n
 	}()
 	wg.Wait()
-	plugin.WriteJSON(w, http.StatusOK, out)
+	plugins.WriteJSON(w, http.StatusOK, out)
 }
 
 func (p *Plugin) findInstalled(ctx context.Context, id, goos string) ([]Installed, error) {
-	req := guest.WhichRequest{}
+	req := entities.WhichRequest{}
 	owner := map[string]Browser{}
 	for _, b := range catalog {
 		for _, q := range b.Paths[goos] {
@@ -240,11 +240,11 @@ func (p *Plugin) findInstalled(ctx context.Context, id, goos string) ([]Installe
 			}
 		}
 	}
-	raw, err := p.host.Call(ctx, id, guest.CapFsWhich, req)
+	raw, err := p.host.Call(ctx, id, entities.CapFsWhich, req)
 	if err != nil {
 		return nil, err
 	}
-	var res guest.WhichResult
+	var res entities.WhichResult
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, err
 	}
@@ -261,12 +261,12 @@ func (p *Plugin) findInstalled(ctx context.Context, id, goos string) ([]Installe
 	return out, nil
 }
 
-func (p *Plugin) listeners(ctx context.Context, id string, names []string) ([]guest.Listener, error) {
-	raw, err := p.host.Call(ctx, id, guest.CapNetListeners, guest.ListenersRequest{Names: names})
+func (p *Plugin) listeners(ctx context.Context, id string, names []string) ([]entities.Listener, error) {
+	raw, err := p.host.Call(ctx, id, entities.CapNetListeners, entities.ListenersRequest{Names: names})
 	if err != nil {
 		return nil, err
 	}
-	var ls []guest.Listener
+	var ls []entities.Listener
 	err = json.Unmarshal(raw, &ls)
 	return ls, err
 }
@@ -302,7 +302,7 @@ func (p *Plugin) findRunning(ctx context.Context, r *http.Request, id string, al
 	}
 	// One probe per port; IPv4 loopback first.
 	type cand struct {
-		l  guest.Listener
+		l  entities.Listener
 		ip string
 	}
 	byPort := map[int]cand{}
@@ -371,7 +371,7 @@ type activePort struct{ browser, path string }
 // activePorts reads DevToolsActivePort ("port\n/devtools/browser/<id>") from
 // each known browser's default profile.
 func (p *Plugin) activePorts(ctx context.Context, id, goos string) map[int]activePort {
-	req := guest.ReadRequest{Limit: 256}
+	req := entities.ReadRequest{Limit: 256}
 	owner := map[string]Browser{}
 	for _, b := range catalog {
 		if dir := b.Profile[goos]; dir != "" {
@@ -384,11 +384,11 @@ func (p *Plugin) activePorts(ctx context.Context, id, goos string) map[int]activ
 		}
 	}
 	out := map[int]activePort{}
-	raw, err := p.host.Call(ctx, id, guest.CapFsRead, req)
+	raw, err := p.host.Call(ctx, id, entities.CapFsRead, req)
 	if err != nil {
 		return out
 	}
-	var res guest.ReadResult
+	var res entities.ReadResult
 	if json.Unmarshal(raw, &res) != nil {
 		return out
 	}
@@ -471,17 +471,17 @@ func (p *Plugin) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req launchRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		plugin.WriteError(w, common.ErrBad("invalid json"))
+		plugins.WriteError(w, common.ErrBad("invalid json"))
 		return
 	}
 	res, err := p.launch(r, id, info.OS, req)
 	detail := fmt.Sprintf("%s port=%d", firstNonEmpty(res.Path, req.Path, req.Browser), res.Endpoint.Port)
 	p.host.Audit(r, id, "launch", detail, err)
 	if err != nil {
-		plugin.WriteError(w, err)
+		plugins.WriteError(w, err)
 		return
 	}
-	plugin.WriteJSON(w, http.StatusCreated, res)
+	plugins.WriteJSON(w, http.StatusCreated, res)
 }
 
 func (p *Plugin) launch(r *http.Request, id, goos string, req launchRequest) (launchResult, error) {
@@ -546,11 +546,11 @@ func (p *Plugin) launch(r *http.Request, id, goos string, req launchRequest) (la
 	if req.URL != "" {
 		args = append(args, req.URL)
 	}
-	raw, err := p.host.Call(ctx, id, guest.CapProcSpawn, guest.SpawnRequest{Path: path, Args: args})
+	raw, err := p.host.Call(ctx, id, entities.CapProcSpawn, entities.SpawnRequest{Path: path, Args: args})
 	if err != nil {
 		return launchResult{Path: path}, err
 	}
-	var sp guest.SpawnResult
+	var sp entities.SpawnResult
 	_ = json.Unmarshal(raw, &sp)
 	res := launchResult{PID: sp.PID, Path: sp.Path, Args: sp.Args}
 	deadline := time.Now().Add(launchWait)
@@ -592,7 +592,7 @@ func portOf(r *http.Request) (int, error) {
 // hubBase is host+path that replaces "127.0.0.1:{port}" in DevTools URLs, so
 // ws://{hubBase}/devtools/... reaches the browser through the hub.
 func hubBase(r *http.Request, id string, port int) string {
-	return r.Host + plugin.PathPrefix + "/" + Name + "/agents/" + url.PathEscape(id) + "/ports/" + strconv.Itoa(port)
+	return r.Host + plugins.PathPrefix + "/" + Name + "/agents/" + url.PathEscape(id) + "/ports/" + strconv.Itoa(port)
 }
 
 func secure(r *http.Request) bool {
@@ -615,16 +615,16 @@ func (p *Plugin) handleClose(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	port, err := portOf(r)
 	if err != nil {
-		plugin.WriteError(w, err)
+		plugins.WriteError(w, err)
 		return
 	}
 	err = p.closeBrowser(r.Context(), r, id, port)
 	p.host.Audit(r, id, "close", fmt.Sprintf("port=%d", port), err)
 	if err != nil {
-		plugin.WriteError(w, err)
+		plugins.WriteError(w, err)
 		return
 	}
-	plugin.WriteJSON(w, http.StatusOK, map[string]any{"closed": true, "port": port})
+	plugins.WriteJSON(w, http.StatusOK, map[string]any{"closed": true, "port": port})
 }
 
 // closeBrowser sends Browser.close on the browser-level session, so the
@@ -700,7 +700,7 @@ func (p *Plugin) proxy(id string, port int, path, query string, rewriteJSON func
 		},
 		ModifyResponse: rewriteJSON,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			plugin.WriteError(w, err)
+			plugins.WriteError(w, err)
 		},
 	}
 }
@@ -711,7 +711,7 @@ func (p *Plugin) handleJSON(w http.ResponseWriter, r *http.Request) {
 	}
 	port, err := portOf(r)
 	if err != nil {
-		plugin.WriteError(w, err)
+		plugins.WriteError(w, err)
 		return
 	}
 	id := r.PathValue("id")
@@ -749,7 +749,7 @@ func (p *Plugin) handleDevtools(w http.ResponseWriter, r *http.Request) {
 	}
 	port, err := portOf(r)
 	if err != nil {
-		plugin.WriteError(w, err)
+		plugins.WriteError(w, err)
 		return
 	}
 	p.serveWS(w, r, wsTicket{Agent: r.PathValue("id"), Port: port, Path: "/devtools/" + r.PathValue("rest")})
@@ -757,7 +757,7 @@ func (p *Plugin) handleDevtools(w http.ResponseWriter, r *http.Request) {
 
 func (p *Plugin) serveWS(w http.ResponseWriter, r *http.Request, t wsTicket) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		plugin.WriteError(w, common.ErrBad("expected a WebSocket upgrade"))
+		plugins.WriteError(w, common.ErrBad("expected a WebSocket upgrade"))
 		return
 	}
 	p.host.Audit(r, t.Agent, "connect", fmt.Sprintf("port=%d %s", t.Port, t.Path), nil)
@@ -770,26 +770,26 @@ func (p *Plugin) handleTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	port, err := portOf(r)
 	if err != nil {
-		plugin.WriteError(w, err)
+		plugins.WriteError(w, err)
 		return
 	}
 	var body struct {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
-		plugin.WriteError(w, common.ErrBad("invalid json"))
+		plugins.WriteError(w, common.ErrBad("invalid json"))
 		return
 	}
 	if u, err := url.Parse(body.Path); err == nil && u.Scheme != "" {
 		body.Path = u.Path
 	}
 	if !strings.HasPrefix(body.Path, "/devtools/") || strings.Contains(body.Path, "..") {
-		plugin.WriteError(w, common.ErrBad("path must be a /devtools/... target path"))
+		plugins.WriteError(w, common.ErrBad("path must be a /devtools/... target path"))
 		return
 	}
 	id, exp := p.tickets.Issue(wsTicket{Agent: r.PathValue("id"), Port: port, Path: body.Path})
-	plugin.WriteJSON(w, http.StatusOK, map[string]any{
-		"ws":      plugin.PublicPrefix + "/" + Name + "/" + id,
+	plugins.WriteJSON(w, http.StatusOK, map[string]any{
+		"ws":      plugins.PublicPrefix + "/" + Name + "/" + id,
 		"expires": exp,
 		"note":    "one-shot; open within 2 minutes",
 	})
