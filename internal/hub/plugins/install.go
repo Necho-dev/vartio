@@ -1,19 +1,21 @@
 package plugins
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 
+	sdk "github.com/Necho-dev/vartio/sdk"
 	"vartio/internal/common"
 )
 
-var pluginName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,40}$`)
+var pluginName = sdk.PluginName
 
 func randomToken() (string, error) {
 	var b [16]byte
@@ -36,25 +38,46 @@ func (r *Registry) Restore(ctx context.Context) {
 	}
 }
 
-// Install downloads, builds and starts name. A plugin that is already running
-// is left as it is. A previous failure is retried.
+// Install downloads a signed package and starts it. A plugin already running
+// the same package is left alone.
 func (r *Registry) Install(ctx context.Context, name string) error {
 	if !pluginName.MatchString(name) {
 		return errNotFound(name)
 	}
 	r.mu.Lock()
-	item, ok := r.catalogBy(name)
+	item, ok := r.lookup(name)
 	if !ok {
 		r.mu.Unlock()
 		return errNotFound(name)
 	}
-	if r.running[name] != nil {
+	art, err := pickArtifact(item)
+	if err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	pub, trusted := r.keys[art.SigningKeyID]
+	var key ed25519.PublicKey
+	if trusted {
+		key = ed25519.PublicKey(bytes.Clone(pub))
+	}
+	pinSHA := ""
+	for _, p := range r.pins {
+		if p.Name == name {
+			pinSHA = p.SHA256
+		}
+	}
+	runningSame := r.running[name] != nil && r.running[name].manifest.Version == item.Version && pinSHA == art.SHA256
+	if runningSame {
 		r.mu.Unlock()
 		return nil
 	}
 	if r.starting[name] {
 		r.mu.Unlock()
 		return &common.Error{Status: 503, Code: "plugin_installing", Message: "plugin " + name + " is still installing"}
+	}
+	if !trusted {
+		r.mu.Unlock()
+		return common.ErrBad("不认识的签名密钥 %s", art.SigningKeyID)
 	}
 	r.starting[name] = true
 	delete(r.problems, name)
@@ -68,11 +91,29 @@ func (r *Registry) Install(ctx context.Context, name string) error {
 		return err
 	}
 
-	bin := filepath.Join(r.Dir, name, "vartio-plugin")
-	if st, err := os.Stat(bin); err != nil || st.IsDir() {
-		var err error
-		bin, err = r.fetch.Fetch(ctx, item, filepath.Join(r.Dir, name))
+	dir := filepath.Join(r.Dir, name, item.Version)
+	bin := filepath.Join(dir, sdk.BinaryName)
+	if pinSHA != art.SHA256 || !localOK(dir, key, art.SigningKeyID, item.Manifest) {
+		r.stopName(name)
+		body, err := downloadPackage(ctx, art.URL, art.Size)
 		if err != nil {
+			return fail(err)
+		}
+		if packageSHA(body) != art.SHA256 {
+			return fail(common.ErrBad("安装包 SHA-256 不符"))
+		}
+		pkg, err := sdk.Open(body)
+		if err != nil {
+			return fail(common.ErrBad("安装包无法打开"))
+		}
+		got, err := pkg.Verify(key, art.SigningKeyID)
+		if err != nil {
+			return fail(common.ErrBad("安装包签名校验失败"))
+		}
+		if got.Name != name || !sdk.SameManifest(got, item.Manifest) {
+			return fail(common.ErrBad("安装包清单与目录不一致"))
+		}
+		if err := writePackage(dir, pkg); err != nil {
 			return fail(err)
 		}
 	}
@@ -80,9 +121,21 @@ func (r *Registry) Install(ctx context.Context, name string) error {
 		return fail(err)
 	}
 	r.mu.Lock()
-	r.upsertPin(item)
+	r.upsertPin(item, art)
 	r.mu.Unlock()
+	r.keepOnly(name, item.Version)
 	return r.remember(name, true)
+}
+
+func (r *Registry) stopName(name string) {
+	r.mu.Lock()
+	p := r.running[name]
+	delete(r.running, name)
+	r.mu.Unlock()
+	if p != nil {
+		p.stop()
+		r.hub.CloseTunnels("plugin:" + name)
+	}
 }
 
 // Uninstall stops the process, deletes the downloaded tree, and forgets it.
@@ -142,9 +195,9 @@ func (r *Registry) saveLocked() error {
 	}
 	st := stateFile{
 		Installed: append([]string(nil), r.wanted...),
-		Manual:    append([]gitEntry(nil), r.manual...),
+		Manual:    append([]manualEntry(nil), r.manual...),
 		Repos:     append([]repoEntry(nil), r.repos...),
-		Pins:      append([]gitEntry(nil), r.pins...),
+		Pins:      append([]pinEntry(nil), r.pins...),
 	}
 	if st.Installed == nil {
 		st.Installed = []string{}

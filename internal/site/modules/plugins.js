@@ -9,15 +9,19 @@ import { openDrawer, openModal, closeModal } from "./ui.js";
 
 /**
  * @typedef {{ id: string, hostname?: string, os?: string, version?: string, ready: boolean, missing?: string[] }} PluginAgent
- * @typedef {{ name: string, title: string, version: string, description?: string, primitives: string[], targets?: string[], installed: boolean, status?: string, error?: string, ui?: string, repo?: string, official?: boolean, origin?: string, agents: PluginAgent[] }} PluginItem
- * @typedef {{ id: string, name: string, url: string, plugins: number, error?: string }} PluginRepo
- * @typedef {{ official?: { name: string }, repos: PluginRepo[], manual: { name: string, git: string }[] }} PluginSources
+ * @typedef {{ name: string, title: string, version: string, description?: string, primitives: string[], targets?: string[], machines?: string[], installed: boolean, status?: string, error?: string, ui?: string, repo?: string, official?: boolean, origin?: string, agents: PluginAgent[] }} PluginItem
+ * @typedef {{ id: string, name: string, url: string, keyId?: string, plugins: number, error?: string }} PluginRepo
+ * @typedef {{ official?: { name: string }, repos: PluginRepo[], manual: { name: string, url: string, sha256?: string, signingKeyId?: string }[] }} PluginSources
  * @typedef {{ name: string, agent: string, embedded: boolean, params: URLSearchParams,
  *   api: (path: string, opts?: any) => Promise<any>, base: string, open: (name: string, params?: Record<string, string>) => void }} PluginCtx
  */
 
 const PRIM_NAMES = /** @type {Record<string, string>} */ ({
   "tunnel.tcp": "TCP 隧道", "fs.which": "程序查找", "fs.read": "读小文件", "proc.spawn": "进程启动", "net.listeners": "端口监听",
+  machine: "不适用这台机器",
+});
+const MACHINE_NAMES = /** @type {Record<string, string>} */ ({
+  mac: "Mac", windows: "Windows", linux: "Linux", docker: "Docker", vmware: "VMware",
 });
 
 /** @type {(() => void) | null} */
@@ -108,7 +112,7 @@ export async function pluginCenter() {
           <button type="button" class="icon-btn" id="plugRefresh" title="刷新">${raw(icon("refresh-cw"))}</button>
         </div>
       </div>
-      <p class="plug-note" id="plugNote">${raw(icon("info"))}插件由独立仓库维护。安装会下载源码并在本机编译后启动；插件本身的问题请到卡片上的仓库入口提交。</p>
+      <p class="plug-note" id="plugNote">${raw(icon("info"))}安装会下载已签名的 .vtp 安装包，核对整包 SHA-256 和 Ed25519 签名后再启动。插件本身的问题请到卡片上的仓库入口提交。</p>
       <div id="plugMain"><div class="empty">加载中…</div></div>
     </div>`;
   $("#plugTabs").querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
@@ -156,7 +160,7 @@ function paintCenter() {
   const list = catalog.filter((p) => {
     if (centerTab === "installed" && !p.installed) return false;
     if (!q) return true;
-    const hay = [p.title, p.name, p.description || "", p.origin || "", ...(p.primitives || []).map((c) => PRIM_NAMES[c] || c)].join(" ").toLowerCase();
+    const hay = [p.title, p.name, p.description || "", p.origin || "", ...(p.machines || []).map((c) => MACHINE_NAMES[c] || c), ...(p.primitives || []).map((c) => PRIM_NAMES[c] || c)].join(" ").toLowerCase();
     return hay.includes(q);
   });
   if (!catalog.length) { box.innerHTML = `<div class="empty">目录里没有可安装的插件</div>`; return; }
@@ -184,17 +188,21 @@ function cardHTML(p) {
     ? `<span class="plug-official">${icon("badge-check")}Vartio 官方</span>`
     : `<span class="faint">${esc(p.origin || "自定义")}</span>`;
   const ver = p.version ? `v${esc(p.version)} · ` : "";
+  const machines = (p.machines || []).map((c) => `<span class="tag">${esc(MACHINE_NAMES[c] || c)}</span>`).join("");
+  const prims = (p.primitives || []).map((c) => `<span class="tag" title="${esc(PRIM_NAMES[c] || c)}">${esc(PRIM_NAMES[c] || c)}</span>`).join("");
+  const blocked = p.agents.filter((a) => !a.ready);
+  const needUpgrade = blocked.some((a) => (a.missing || []).some((c) => c !== "machine"));
   return `<article class="plug-card" data-name="${esc(p.name)}">
     <div class="plug-top"><span class="plug-ic tone-${esc(p.name)}">${icon(p.name === "cdp" ? "globe" : p.name === "bitbrowser" ? "grid-2x2-plus" : "package")}</span>
       <div class="plug-title"><b>${esc(p.title)}</b>${origin}</div>
       ${badge ? `<span class="badge ${badgeCls}">${badge}</span>` : ""}
       ${repo}</div>
-    <div class="plug-prims">${(p.primitives || []).map((c) => `<span class="tag" title="${esc(PRIM_NAMES[c] || c)}">${esc(PRIM_NAMES[c] || c)}</span>`).join("")}</div>
+    <div class="plug-prims">${machines}${prims}</div>
     <p class="plug-desc" title="${esc(p.description || "")}">${esc(p.description || "")}</p>
     ${p.error ? `<p class="plug-err">${esc(p.error)}</p>` : ""}
     <div class="plug-foot"><span class="faint">${ver}${p.agents.length ? `${n} / ${p.agents.length} 台可用` : "暂无在线探针"}</span>
       <span class="plug-btns">${buttons}</span></div>
-    ${p.agents.some((a) => !a.ready) ? `<details class="plug-miss"><summary class="faint">${p.agents.length - n} 台探针缺少所需能力</summary>${p.agents.filter((a) => !a.ready).map((a) => `<div class="faint">${esc(a.hostname || a.id)}（${esc(a.version || "?")}）缺 ${esc((a.missing || []).join("、"))}</div>`).join("")}<div class="faint">升级探针到 1.16.0 或以上</div></details>` : ""}
+    ${blocked.length ? `<details class="plug-miss"><summary class="faint">${blocked.length} 台探针不可用</summary>${blocked.map((a) => `<div class="faint">${esc(a.hostname || a.id)}（${esc(a.version || "?")}）缺 ${esc((a.missing || []).map((c) => PRIM_NAMES[c] || c).join("、"))}</div>`).join("")}${needUpgrade ? `<div class="faint">升级探针到 1.16.0 或以上</div>` : ""}</details>` : ""}
   </article>`;
 }
 
@@ -206,8 +214,8 @@ async function onPluginAct(b) {
   const title = p ? p.title : name;
   const install = b.dataset.act === "install";
   const yes = await askChoice(install
-    ? { title: `安装${title}`, body: `将从${p && p.official ? "官方目录" : "插件仓库"}下载「${title}」的源码，在本机编译后启动。第一次安装通常需要一两分钟。`, ok: "安装" }
-    : { title: `卸载${title}`, body: `「${title}」的进程会停掉，已下载的源码和编译结果会被删除，正在进行的连接会被断开。`, ok: "卸载", danger: true });
+    ? { title: `安装${title}`, body: `将下载「${title}」的已签名安装包，核对 SHA-256 和签名后启动。`, ok: "安装" }
+    : { title: `卸载${title}`, body: `「${title}」的进程会停掉，已下载的安装包会被删除，正在进行的连接会被断开。`, ok: "卸载", danger: true });
   if (!yes) return;
   b.disabled = true;
   b.textContent = install ? "安装中…" : "卸载中…";
@@ -251,18 +259,20 @@ function paintSettings(box) {
   box.innerHTML = `<div class="plug-settings">
     <section class="card plug-set">
       <h3>${icon("download")}手动安装</h3>
-      <p class="hint">填写插件名和 Git 地址。Hub 会克隆源码并在本机编译，插件名必须和插件自己声明的名字一致。</p>
+      <p class="hint">填写 .vtp 地址、整包 SHA-256，以及一把已经信任的签名密钥。插件名必须和安装包里的 manifest 一致。</p>
       <form class="plug-form" id="plugManual">
         <input class="input" id="plugManName" placeholder="插件名，如 hello" autocomplete="off" spellcheck="false">
-        <input class="input grow" id="plugManGit" placeholder="git@github.com:org/vartio-plugin-hello.git" autocomplete="off" spellcheck="false">
+        <input class="input grow" id="plugManURL" placeholder="https://example.com/hello-1.0.0-darwin-arm64.vtp" autocomplete="off" spellcheck="false">
+        <input class="input" id="plugManSHA" placeholder="SHA-256" autocomplete="off" spellcheck="false">
+        <input class="input" id="plugManKey" placeholder="签名密钥 ID" autocomplete="off" spellcheck="false">
         <button class="btn primary" type="submit">安装</button>
       </form>
-      <div id="plugManualList">${manual.length ? manual.map((m) => `<div class="plug-repo"><div class="grow"><b>${esc(m.name)}</b><span class="faint">${esc(m.git)}</span></div><button class="btn sm" data-drop-manual="${esc(m.name)}">移除</button></div>`).join("") : `<p class="faint">还没有手动安装的插件</p>`}</div>
+      <div id="plugManualList">${manual.length ? manual.map((m) => `<div class="plug-repo"><div class="grow"><b>${esc(m.name)}</b><span class="faint">${esc(m.url)}</span></div><button class="btn sm" data-drop-manual="${esc(m.name)}">移除</button></div>`).join("") : `<p class="faint">还没有手动安装的插件</p>`}</div>
     </section>
     <section class="card plug-set">
       <h3>${icon("package")}插件仓库</h3>
-      <p class="hint">官方目录随 Hub 发布。添加的目录是一个 catalogVersion 为 1 的 JSON，每条插件给出 Git 地址，而不是安装包。</p>
-      <p class="plug-note plug-warn">${icon("triangle-alert")}自定义仓库和手动安装的插件会在本机编译运行，只应添加自己确认可信的来源。Hub 目前还没有 DBX 那种安装包签名校验。</p>
+      <p class="hint">官方目录随 Hub 发布，安装包由官方密钥签名。自定义目录同样是 catalogVersion 为 1 的 JSON，每条插件给出 .vtp 地址、整包 SHA-256 和密钥 ID。添加仓库时要带上对应公钥。</p>
+      <p class="plug-note plug-warn">${icon("triangle-alert")}公钥一旦加入就会用来验签。只添加自己确认可信的仓库。</p>
       <div class="plug-repo">
         <div class="grow"><b>Vartio 官方 <span class="plug-official">${icon("badge-check")}官方</span></b><span class="faint">内置目录，随 Hub 发布</span></div>
         <span class="badge up">已启用</span>
@@ -272,6 +282,8 @@ function paintSettings(box) {
         <input class="input" id="plugRepoID" placeholder="仓库 ID" autocomplete="off" spellcheck="false">
         <input class="input" id="plugRepoName" placeholder="仓库名称" autocomplete="off">
         <input class="input grow" id="plugRepoURL" placeholder="https://example.com/catalog/index.json" autocomplete="off" spellcheck="false">
+        <input class="input" id="plugRepoKey" placeholder="密钥 ID" autocomplete="off" spellcheck="false">
+        <input class="input grow" id="plugRepoPub" placeholder="Base64 公钥" autocomplete="off" spellcheck="false">
         <button class="btn primary" type="submit">添加仓库</button>
       </form>
     </section>
@@ -279,15 +291,17 @@ function paintSettings(box) {
   $("#plugManual").addEventListener("submit", async (/** @type {SubmitEvent} */ e) => {
     e.preventDefault();
     const name = $("#plugManName").value.trim();
-    const git = $("#plugManGit").value.trim();
-    if (!name || !git) return;
-    const yes = await askChoice({ title: `安装${name}`, body: `将从 ${git} 克隆源码，在本机编译后启动。请确认这个地址是你信任的仓库。`, ok: "安装" });
+    const url = $("#plugManURL").value.trim();
+    const sha256 = $("#plugManSHA").value.trim();
+    const signingKeyId = $("#plugManKey").value.trim();
+    if (!name || !url || !sha256 || !signingKeyId) return;
+    const yes = await askChoice({ title: `安装${name}`, body: `将从 ${url} 下载安装包，并用已信任的密钥 ${signingKeyId} 验签。`, ok: "安装" });
     if (!yes) return;
     const btn = /** @type {HTMLButtonElement} */ ($("#plugManual button"));
     btn.disabled = true;
     btn.textContent = "安装中…";
     try {
-      await api("/plugins/_manual", { method: "POST", json: { name, git } });
+      await api("/plugins/_manual", { method: "POST", json: { name, url, sha256, signingKeyId } });
       await drawCenter(true);
     } catch (err) {
       await tell("安装失败", err.message);
@@ -299,11 +313,13 @@ function paintSettings(box) {
     const id = $("#plugRepoID").value.trim();
     const name = $("#plugRepoName").value.trim();
     const url = $("#plugRepoURL").value.trim();
-    if (!id || !name || !url) return;
-    const yes = await askChoice({ title: `添加仓库 ${name}`, body: `Hub 会读取 ${url}，并把其中的插件列进目录。之后的安装仍是克隆 Git 源码并在本机编译。`, ok: "添加" });
+    const keyId = $("#plugRepoKey").value.trim();
+    const publicKey = $("#plugRepoPub").value.trim();
+    if (!id || !name || !url || !keyId || !publicKey) return;
+    const yes = await askChoice({ title: `添加仓库 ${name}`, body: `Hub 会读取 ${url}，并用密钥 ${keyId} 校验其中的安装包。`, ok: "添加" });
     if (!yes) return;
     try {
-      sources = await api("/plugins/_sources", { method: "POST", json: { id, name, url } });
+      sources = await api("/plugins/_sources", { method: "POST", json: { id, name, url, keyId, publicKey } });
       await drawCenter(true);
     } catch (err) {
       await tell("无法添加仓库", err.message);
@@ -311,7 +327,7 @@ function paintSettings(box) {
   });
   box.querySelectorAll("[data-drop-manual]").forEach((b) => b.addEventListener("click", async () => {
     const name = /** @type {HTMLElement} */ (b).dataset.dropManual || "";
-    const yes = await askChoice({ title: `移除${name}`, body: `「${name}」会从手动安装列表中去掉。如果它正在运行，进程会停掉，已下载的文件会被删除。`, ok: "移除", danger: true });
+    const yes = await askChoice({ title: `移除${name}`, body: `「${name}」会从手动安装列表中去掉。如果它正在运行，进程会停掉，已下载的安装包会被删除。`, ok: "移除", danger: true });
     if (!yes) return;
     try {
       await api("/plugins/_manual/" + encodeURIComponent(name), { method: "DELETE" });

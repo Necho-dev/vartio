@@ -19,4 +19,4 @@ make vartio-agent
 
 说明见 [supplemental/guides/guest-agent.md](supplemental/guides/guest-agent.md)。ESXi 虚拟化层探针尚未实施，约定见 [supplemental/guides/vmware-probe.md](supplemental/guides/vmware-probe.md)。
 
-插件不编进 Hub。插件中心从仓库下载源码，在本机编译后启动：`vartio-plugin-chrome-devtools`（插件名 `cdp`）、`vartio-plugin-bitbrowser`。已安装的记录仍在 `probe-hub.plugins.json` / `vartio.plugins.json`，目录是 `vartio-plugins/`（`VARTIO_PLUGIN_DIR` 可改）。
+插件不编进 Hub。插件中心下载已签名的 `.vtp` 安装包（整包 SHA-256 加 Ed25519），校验通过后启动。官方插件是 `vartio-plugin-chrome-devtools`（插件名 `cdp`，适用于 Mac、Windows、Linux）和 `vartio-plugin-bitbrowser`（适用于 Mac、Windows）。已安装的记录仍在 `probe-hub.plugins.json` / `vartio.plugins.json`，目录是 `vartio-plugins/`（`VARTIO_PLUGIN_DIR` 可改）。官方签名公钥编进 Hub，私钥不入库。

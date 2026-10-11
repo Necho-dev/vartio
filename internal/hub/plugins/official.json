@@ -1,0 +1,119 @@
+{
+  "catalogVersion": 1,
+  "repository": {
+    "id": "vartio",
+    "name": "Vartio 官方"
+  },
+  "plugins": [
+    {
+      "manifestVersion": 1,
+      "name": "cdp",
+      "title": "Chrome DevTools",
+      "version": "1.0.0",
+      "description": "发现、启动并经探针隧道接管远端机器上的 Chrome / Edge / Chromium / 比特浏览器窗口，提供 CDP 透明转发与在线调试",
+      "source": "https://github.com/Necho-dev/vartio-plugin-chrome-devtools",
+      "engines": {
+        "hostApi": "1"
+      },
+      "primitives": [
+        "tunnel.tcp",
+        "fs.which",
+        "fs.read",
+        "proc.spawn",
+        "net.listeners"
+      ],
+      "targets": [
+        "127.0.0.1:*",
+        "[::1]:*"
+      ],
+      "machines": [
+        "mac",
+        "windows",
+        "linux"
+      ],
+      "ui": true,
+      "artifacts": [
+        {
+          "target": "darwin-arm64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-chrome-devtools/releases/download/v1.0.0/cdp-1.0.0-darwin-arm64.vtp",
+          "sha256": "8fd354a0e908284aa505fc9b9eb0b1f505158053c4833dd24e69781830579b0f",
+          "size": 5508023,
+          "signingKeyId": "vartio-plugins-2026"
+        },
+        {
+          "target": "darwin-amd64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-chrome-devtools/releases/download/v1.0.0/cdp-1.0.0-darwin-amd64.vtp",
+          "sha256": "742fe540379a325ef99a1284aa0b4d3a9f4f622e580cb6cee9be48a1787082f2",
+          "size": 5858641,
+          "signingKeyId": "vartio-plugins-2026"
+        },
+        {
+          "target": "linux-amd64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-chrome-devtools/releases/download/v1.0.0/cdp-1.0.0-linux-amd64.vtp",
+          "sha256": "3c76b37bbf30cabaa88fd4e98dde46c9516ece9c63761cf611c042515ab6ab39",
+          "size": 5700931,
+          "signingKeyId": "vartio-plugins-2026"
+        },
+        {
+          "target": "linux-arm64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-chrome-devtools/releases/download/v1.0.0/cdp-1.0.0-linux-arm64.vtp",
+          "sha256": "a9225d4f82e58a499e6ee9a2bf50e444214a350e45c6e59d98f5f6a4459b5ed1",
+          "size": 5236369,
+          "signingKeyId": "vartio-plugins-2026"
+        }
+      ]
+    },
+    {
+      "manifestVersion": 1,
+      "name": "bitbrowser",
+      "title": "比特浏览器",
+      "version": "1.0.0",
+      "description": "经探针 TCP 隧道调用远端机器上的比特浏览器本地 API（127.0.0.1:54345）",
+      "source": "https://github.com/Necho-dev/vartio-plugin-bitbrowser",
+      "engines": {
+        "hostApi": "1"
+      },
+      "primitives": [
+        "tunnel.tcp"
+      ],
+      "targets": [
+        "127.0.0.1:54345"
+      ],
+      "machines": [
+        "mac",
+        "windows"
+      ],
+      "ui": true,
+      "artifacts": [
+        {
+          "target": "darwin-arm64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-bitbrowser/releases/download/v1.0.0/bitbrowser-1.0.0-darwin-arm64.vtp",
+          "sha256": "c76c5ebcda1ee52faf2b632dae7438a0bef7dfadc35b9fb3dc485832a0d1182e",
+          "size": 5313422,
+          "signingKeyId": "vartio-plugins-2026"
+        },
+        {
+          "target": "darwin-amd64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-bitbrowser/releases/download/v1.0.0/bitbrowser-1.0.0-darwin-amd64.vtp",
+          "sha256": "63248bc70aa4c671766c25a4ac5a38ef2cacff629cf07ddaa40dc2ec9f15a9f5",
+          "size": 5648628,
+          "signingKeyId": "vartio-plugins-2026"
+        },
+        {
+          "target": "linux-amd64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-bitbrowser/releases/download/v1.0.0/bitbrowser-1.0.0-linux-amd64.vtp",
+          "sha256": "74ff27feaca91b383b406b68ec23aa07a342eeaae14cb3e67c416068227f1681",
+          "size": 5497616,
+          "signingKeyId": "vartio-plugins-2026"
+        },
+        {
+          "target": "linux-arm64",
+          "url": "https://github.com/Necho-dev/vartio-plugin-bitbrowser/releases/download/v1.0.0/bitbrowser-1.0.0-linux-arm64.vtp",
+          "sha256": "bc2c375ef2888259e2d3b630c8df8ef6a1500c27634b2c1289849f646f41a5ae",
+          "size": 5049673,
+          "signingKeyId": "vartio-plugins-2026"
+        }
+      ]
+    }
+  ]
+}

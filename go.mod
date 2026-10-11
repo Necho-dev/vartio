@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	fyne.io/systray v1.12.2
+	github.com/Necho-dev/vartio/sdk v0.0.0
 	github.com/creack/pty v1.1.24
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.11.0
@@ -29,3 +30,5 @@ require (
 )
 
 replace fyne.io/systray => ./third_party/systray
+
+replace github.com/Necho-dev/vartio/sdk => ./sdk

@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	sdk "github.com/Necho-dev/vartio/sdk"
 	"vartio/internal/common"
 	"vartio/internal/entities"
 	"vartio/internal/hub"
@@ -52,23 +54,6 @@ func get(t *testing.T, mux http.Handler, method, path string) *httptest.Response
 	return rec
 }
 
-type copyBin struct{ bin string }
-
-func (c copyBin) Fetch(_ context.Context, _ CatalogItem, dest string) (string, error) {
-	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return "", err
-	}
-	out := filepath.Join(dest, "vartio-plugin")
-	b, err := os.ReadFile(c.bin)
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(out, b, 0o755); err != nil {
-		return "", err
-	}
-	return out, nil
-}
-
 func TestRegistryDownloadsAndStarts(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "hello")
@@ -77,13 +62,45 @@ func TestRegistryDownloadsAndStarts(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build hello plugin: %v\n%s", err, out)
 	}
+	binary, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const rawManifest = `{
+  "manifestVersion": 1,
+  "name": "hello",
+  "title": "Hello",
+  "version": "0.0.1",
+  "engines": {"hostApi": "1"},
+  "primitives": ["tunnel.tcp"],
+  "targets": [],
+  "machines": ["mac", "windows", "linux"],
+  "ui": true
+}`
+	manifest, err := sdk.ParseManifest([]byte(rawManifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := sdk.GenerateKey("test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := sdk.Pack([]byte(rawManifest), binary, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(blob)
+	}))
+	defer srv.Close()
 
 	r := NewRegistry(hub.NewHub(""))
 	r.Dir = filepath.Join(dir, "plugins")
-	r.fetch = copyBin{bin}
+	r.keys[key.ID] = key.Public()
 	r.catalog = []CatalogItem{{
-		Name: "hello", Git: "unused",
-		Manifest: Manifest{Name: "hello", Title: "Hello", Version: "0.0.1", Primitives: []string{entities.CapTunnelTCP}},
+		Name: "hello", Origin: "test",
+		Manifest:  manifest,
+		Artifacts: []Artifact{{Target: runtime.GOOS + "-" + runtime.GOARCH, URL: srv.URL, SHA256: packageSHA(blob), Size: int64(len(blob)), SigningKeyID: key.ID}},
 	}}
 	state := filepath.Join(dir, "plugins.json")
 	if err := r.Load(state, nil); err != nil {
@@ -150,6 +167,37 @@ func TestScopedHostCall(t *testing.T) {
 	}
 }
 
+func TestDistPackagesMatchCatalog(t *testing.T) {
+	dir := os.Getenv("VTP_DIST")
+	if dir == "" {
+		t.Skip()
+	}
+	pub := officialPublic()
+	for _, item := range DefaultCatalog() {
+		for _, art := range item.Artifacts {
+			name := filepath.Base(art.URL)
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if packageSHA(b) != art.SHA256 || int64(len(b)) != art.Size {
+				t.Fatalf("%s hash or size", name)
+			}
+			pkg, err := sdk.Open(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := pkg.Verify(pub, art.SigningKeyID)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if !sdk.SameManifest(got, item.Manifest) {
+				t.Fatalf("%s manifest mismatch\npackage: %#v\ncatalog: %#v", name, got, item.Manifest)
+			}
+		}
+	}
+}
+
 func TestTickets(t *testing.T) {
 	var tk Tickets[string]
 	id, _ := tk.Issue("v")
@@ -162,11 +210,17 @@ func TestTickets(t *testing.T) {
 }
 
 func TestReadiness(t *testing.T) {
-	m := Manifest{Primitives: []string{entities.CapTunnelTCP}}
-	if a := readiness(m, entities.SessionInfo{DeviceID: "d", Primitives: map[string]int{entities.CapTunnelTCP: 1}}); !a.Ready {
+	m := Manifest{Machines: []string{"linux"}, Primitives: []string{entities.CapTunnelTCP}}
+	if a := readiness(m, entities.SessionInfo{DeviceID: "d", OS: "linux", Primitives: map[string]int{entities.CapTunnelTCP: 1}}); !a.Ready {
 		t.Fatalf("%+v", a)
 	}
-	if a := readiness(m, entities.SessionInfo{DeviceID: "d"}); a.Ready || len(a.Missing) != 1 {
+	if a := readiness(m, entities.SessionInfo{DeviceID: "d", OS: "linux"}); a.Ready || len(a.Missing) != 1 {
 		t.Fatalf("%+v", a)
+	}
+	if a := readiness(m, entities.SessionInfo{DeviceID: "d", OS: "darwin", Primitives: map[string]int{entities.CapTunnelTCP: 1}}); a.Ready || len(a.Missing) != 1 || a.Missing[0] != "machine" {
+		t.Fatalf("%+v", a)
+	}
+	if a := readiness(m, entities.SessionInfo{DeviceID: "d", OS: "linux", Caps: []string{"docker"}, Primitives: map[string]int{entities.CapTunnelTCP: 1}}); !a.Ready {
+		t.Fatalf("docker cap should not hide linux: %+v", a)
 	}
 }

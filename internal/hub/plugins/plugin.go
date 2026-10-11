@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	sdk "github.com/Necho-dev/vartio/sdk"
 	"vartio/internal/common"
 	"vartio/internal/entities"
 	"vartio/internal/hub"
@@ -34,17 +35,9 @@ const (
 	UIPrefix     = "/plugins"
 )
 
-type Manifest struct {
-	Name        string `json:"name"`
-	Title       string `json:"title"`
-	Version     string `json:"version"`
-	Description string `json:"description,omitempty"`
-	// Primitives are the agent caps the plugin needs (guest.CapTunnelTCP, ...).
-	Primitives []string `json:"primitives"`
-	// Targets are the host:port values the plugin may dial on an agent;
-	// "host:*" allows any port on host.
-	Targets []string `json:"targets,omitempty"`
-}
+// Manifest is the plugin contract. Identity comes from the signed package,
+// not from a method on the process.
+type Manifest = sdk.Manifest
 
 type Plugin interface {
 	Manifest() Manifest
@@ -80,21 +73,20 @@ type Host interface {
 	Audit(r *http.Request, id, kind, detail string, err error)
 }
 
-// Registry installs plugins by downloading their repositories, building them,
-// and running each one as its own process. A name in the state file is
-// installed, not merely enabled.
+// Registry installs plugins by downloading signed packages and running each
+// one as its own process. A name in the state file is installed.
 type Registry struct {
-	hub   *hub.Hub
-	Dir   string
-	fetch Fetcher
+	hub *hub.Hub
+	Dir string
 
 	mu           sync.Mutex
 	catalog      []CatalogItem
 	statePath    string
 	wanted       []string
-	manual       []gitEntry
+	manual       []manualEntry
 	repos        []repoEntry
-	pins         []gitEntry
+	pins         []pinEntry
+	keys         map[string][]byte
 	remote       []CatalogItem
 	repoProblems map[string]string
 	running      map[string]*proc
@@ -103,23 +95,25 @@ type Registry struct {
 }
 
 func NewRegistry(h *hub.Hub) *Registry {
-	return &Registry{
+	r := &Registry{
 		hub:          h,
 		Dir:          "vartio-plugins",
-		fetch:        gitFetch{},
 		catalog:      DefaultCatalog(),
 		running:      map[string]*proc{},
 		problems:     map[string]string{},
 		starting:     map[string]bool{},
 		repoProblems: map[string]string{},
+		keys:         map[string][]byte{},
 	}
+	r.keys[officialKeyID] = append([]byte(nil), officialPublic()...)
+	return r
 }
 
 type stateFile struct {
-	Installed []string    `json:"installed"`
-	Manual    []gitEntry  `json:"manual,omitempty"`
-	Repos     []repoEntry `json:"repos,omitempty"`
-	Pins      []gitEntry  `json:"pins,omitempty"`
+	Installed []string      `json:"installed"`
+	Manual    []manualEntry `json:"manual,omitempty"`
+	Repos     []repoEntry   `json:"repos,omitempty"`
+	Pins      []pinEntry    `json:"pins,omitempty"`
 }
 
 // Load reads which plugins are installed. Without the file, defaults is that
@@ -140,19 +134,56 @@ func (r *Registry) Load(path string, defaults []string) error {
 	r.mu.Lock()
 	r.statePath = path
 	r.wanted = append([]string(nil), installed...)
-	r.manual = cleanGit(st.Manual)
-	r.repos = cleanRepos(st.Repos)
-	r.pins = cleanGit(st.Pins)
+	r.repos = r.keepRepos(cleanRepos(st.Repos))
+	r.manual = r.keepManual(cleanManual(st.Manual))
+	r.pins = cleanPins(st.Pins)
 	r.mu.Unlock()
 	return nil
 }
 
-func cleanGit(in []gitEntry) []gitEntry {
-	out := make([]gitEntry, 0, len(in))
+func cleanManual(in []manualEntry) []manualEntry {
+	out := make([]manualEntry, 0, len(in))
+	seen := map[string]bool{}
 	for _, e := range in {
-		if pluginName.MatchString(e.Name) && validateGit(e.Git) == nil {
-			out = append(out, gitEntry{Name: e.Name, Git: strings.TrimSpace(e.Git)})
+		e.Name = strings.TrimSpace(e.Name)
+		e.URL = strings.TrimSpace(e.URL)
+		e.SigningKeyID = strings.TrimSpace(e.SigningKeyID)
+		sum, err := normalizeSHA(e.SHA256)
+		if err != nil || seen[e.Name] || !pluginName.MatchString(e.Name) || e.SigningKeyID == "" {
+			continue
 		}
+		if _, err := validateFetchURL(e.URL); err != nil {
+			continue
+		}
+		e.SHA256 = sum
+		seen[e.Name] = true
+		out = append(out, e)
+	}
+	return out
+}
+
+func (r *Registry) keepManual(in []manualEntry) []manualEntry {
+	out := make([]manualEntry, 0, len(in))
+	for _, e := range in {
+		if _, ok := r.keys[e.SigningKeyID]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func cleanPins(in []pinEntry) []pinEntry {
+	out := make([]pinEntry, 0, len(in))
+	seen := map[string]bool{}
+	for _, e := range in {
+		e.Name = strings.TrimSpace(e.Name)
+		sum, err := normalizeSHA(e.SHA256)
+		if err != nil || seen[e.Name] || !pluginName.MatchString(e.Name) {
+			continue
+		}
+		e.SHA256 = sum
+		seen[e.Name] = true
+		out = append(out, e)
 	}
 	return out
 }
@@ -161,14 +192,36 @@ func cleanRepos(in []repoEntry) []repoEntry {
 	out := make([]repoEntry, 0, len(in))
 	seen := map[string]bool{}
 	for _, e := range in {
-		e.ID, e.Name, e.URL = strings.TrimSpace(e.ID), strings.TrimSpace(e.Name), strings.TrimSpace(e.URL)
-		if seen[e.ID] || !repoID.MatchString(e.ID) || e.Name == "" {
+		e.ID = strings.TrimSpace(e.ID)
+		e.Name = strings.TrimSpace(e.Name)
+		e.URL = strings.TrimSpace(e.URL)
+		e.KeyID = strings.TrimSpace(e.KeyID)
+		e.PublicKey = strings.TrimSpace(e.PublicKey)
+		if seen[e.ID] || !pluginName.MatchString(e.ID) || e.ID == "vartio" || e.Name == "" || e.KeyID == "" {
 			continue
 		}
-		if _, err := validateCatalogURL(e.URL); err != nil {
+		if _, err := validateFetchURL(e.URL); err != nil {
+			continue
+		}
+		if _, err := sdk.ParsePublicKey(e.PublicKey); err != nil {
 			continue
 		}
 		seen[e.ID] = true
+		out = append(out, e)
+	}
+	return out
+}
+
+func (r *Registry) keepRepos(in []repoEntry) []repoEntry {
+	out := make([]repoEntry, 0, len(in))
+	for _, e := range in {
+		pub, err := sdk.ParsePublicKey(e.PublicKey)
+		if err != nil {
+			continue
+		}
+		if err := r.trust(e.KeyID, pub); err != nil {
+			continue
+		}
 		out = append(out, e)
 	}
 	return out
@@ -252,11 +305,14 @@ func (r *Registry) item(name string, sessions []entities.SessionInfo) (listItem,
 	if m.Name == "" {
 		m.Name = name
 	}
-	it := listItem{Manifest: m, Installed: wanted, Repo: repoWeb(cat.Git), Official: cat.Official, Origin: cat.Origin, Agents: []AgentReadiness{}}
+	it := listItem{Manifest: m, Installed: wanted, Repo: repoWeb(m.Source), Official: cat.Official, Origin: cat.Origin, Agents: []AgentReadiness{}}
 	switch {
 	case p != nil:
 		it.Status = "ready"
 		it.Manifest = p.manifest
+		if src := repoWeb(p.manifest.Source); src != "" {
+			it.Repo = src
+		}
 		if p.ui {
 			it.UI = UIPrefix + "/" + name + "/index.js"
 		}
@@ -272,15 +328,10 @@ func (r *Registry) item(name string, sessions []entities.SessionInfo) (listItem,
 	return it, true
 }
 
-// repoWeb turns git@github.com:org/name.git into an https page.
-func repoWeb(git string) string {
-	const prefix = "git@github.com:"
-	git = strings.TrimSuffix(strings.TrimSpace(git), ".git")
-	if strings.HasPrefix(git, prefix) {
-		return "https://github.com/" + strings.TrimPrefix(git, prefix)
-	}
-	if strings.HasPrefix(git, "https://github.com/") {
-		return git
+func repoWeb(source string) string {
+	source = strings.TrimSuffix(strings.TrimSpace(source), ".git")
+	if strings.HasPrefix(source, "https://github.com/") {
+		return source
 	}
 	return ""
 }
@@ -359,6 +410,9 @@ func readiness(m Manifest, s entities.SessionInfo) AgentReadiness {
 	if a.ID == "" {
 		a.ID = s.BiosUUID
 	}
+	if !sdk.MachineMatch(m.Machines, s.OS, s.Caps) {
+		a.Missing = append(a.Missing, "machine")
+	}
 	for _, c := range m.Primitives {
 		if s.Primitives[c] < entities.PrimitiveVersions[c] {
 			a.Missing = append(a.Missing, c)
@@ -374,9 +428,31 @@ type scopedHost struct {
 	m   Manifest
 }
 
-func (h *scopedHost) Agents() []entities.SessionInfo { return h.hub.List() }
+func (h *scopedHost) Agents() []entities.SessionInfo {
+	var out []entities.SessionInfo
+	for _, s := range h.hub.List() {
+		if sdk.MachineMatch(h.m.Machines, s.OS, s.Caps) {
+			out = append(out, s)
+		}
+	}
+	if out == nil {
+		out = []entities.SessionInfo{}
+	}
+	return out
+}
 
 func (h *scopedHost) Agent(id string) (entities.SessionInfo, bool) { return h.hub.Info(id) }
+
+func (h *scopedHost) allowAgent(id string) error {
+	info, ok := h.hub.Info(id)
+	if !ok || !info.Online {
+		return common.ErrOffline()
+	}
+	if !sdk.MachineMatch(h.m.Machines, info.OS, info.Caps) {
+		return errForbidden(h.m.Name + " is not for this machine")
+	}
+	return nil
+}
 
 func (h *scopedHost) DialTCP(ctx context.Context, id, target string) (net.Conn, error) {
 	if !slices.Contains(h.m.Primitives, entities.CapTunnelTCP) {
@@ -384,6 +460,9 @@ func (h *scopedHost) DialTCP(ctx context.Context, id, target string) (net.Conn, 
 	}
 	if !targetAllowed(h.m.Targets, target) {
 		return nil, errForbidden(h.m.Name + " may not dial " + target)
+	}
+	if err := h.allowAgent(id); err != nil {
+		return nil, err
 	}
 	return h.hub.DialTCP(ctx, id, target, "plugin:"+h.m.Name)
 }
@@ -404,6 +483,9 @@ func (h *scopedHost) HTTPClient(id, target string) *http.Client {
 func (h *scopedHost) Call(ctx context.Context, id, primitive string, params any) (json.RawMessage, error) {
 	if !slices.Contains(h.m.Primitives, primitive) {
 		return nil, errForbidden(h.m.Name + " did not declare " + primitive)
+	}
+	if err := h.allowAgent(id); err != nil {
+		return nil, err
 	}
 	return h.hub.CallPrimitive(ctx, id, primitive, params)
 }

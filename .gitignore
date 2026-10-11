@@ -15,5 +15,6 @@ probe-hub.agents.json
 bin/
 dist/
 vartio-plugins/
+plugin-signing.key
 *.exe
 .DS_Store

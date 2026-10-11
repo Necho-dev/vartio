@@ -13,9 +13,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
+	sdk "github.com/Necho-dev/vartio/sdk"
 	"vartio/internal/common"
 )
 
@@ -108,6 +110,7 @@ func (r *Registry) start(ctx context.Context, item CatalogItem, bin string) erro
 	cmd.Env = append(os.Environ(),
 		"VARTIO_PLUGIN_HUB=http://"+hostLn.Addr().String(),
 		"VARTIO_PLUGIN_TOKEN="+token,
+		"VARTIO_PLUGIN_MANIFEST="+filepath.Join(filepath.Dir(bin), sdk.ManifestName),
 	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -125,13 +128,10 @@ func (r *Registry) start(ctx context.Context, item CatalogItem, bin string) erro
 		hostLn.Close()
 		return err
 	}
-	if hello.Manifest.Name != "" && hello.Manifest.Name != item.Name {
+	if !sdk.SameManifest(hello.Manifest, item.Manifest) || hello.UI != item.UI {
 		_ = cmd.Process.Kill()
 		hostLn.Close()
-		return &common.Error{Status: http.StatusBadGateway, Code: "plugin_manifest", Message: "plugin " + item.Name + " announced itself as " + hello.Manifest.Name}
-	}
-	if hello.Manifest.Name == "" {
-		hello.Manifest = item.Manifest
+		return &common.Error{Status: http.StatusBadGateway, Code: "plugin_manifest", Message: "plugin " + item.Name + " announced a different manifest"}
 	}
 	px, err := proxyTo(hello.Listen)
 	if err != nil {
@@ -233,6 +233,10 @@ func (r *Registry) hostAPI(p *proc) http.Handler {
 		info, ok := h.Agent(req.PathValue("id"))
 		if !ok || !info.Online {
 			WriteError(w, common.ErrOffline())
+			return
+		}
+		if !sdk.MachineMatch(h.m.Machines, info.OS, info.Caps) {
+			WriteError(w, errForbidden(h.m.Name+" is not for this machine"))
 			return
 		}
 		writeJSON(w, http.StatusOK, info)
