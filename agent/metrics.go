@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"runtime"
 	"sort"
@@ -42,6 +41,7 @@ func staticInfo() guest.SysInfo {
 		if info, err := cpu.Info(); err == nil && len(info) > 0 {
 			v.CPUModel = strings.TrimSpace(info[0].ModelName)
 		}
+		v.Vendor, v.Product, v.Virt = virtualization()
 		v.Cores, _ = cpu.Counts(false)
 		v.Threads, _ = cpu.Counts(true)
 		sysInfoOnce.v = v
@@ -117,25 +117,8 @@ func diskUsages(ctx context.Context) ([]guest.DiskUsage, string) {
 	return dedupePools(out, root), root
 }
 
-// dedupePools keeps one mount per storage pool. APFS volumes in one container
-// (e.g. macOS "/" and "/System/Volumes/Data") all report the container's size
-// and free space, so identical fs/total/used means the same space; the root
-// mount wins.
 func dedupePools(disks []guest.DiskUsage, root string) []guest.DiskUsage {
-	key := func(d guest.DiskUsage) string { return fmt.Sprintf("%s|%d|%d", d.FS, d.Total, d.Used) }
-	keep := map[string]string{}
-	for _, d := range disks {
-		if k := key(d); keep[k] == "" || d.Mount == root {
-			keep[k] = d.Mount
-		}
-	}
-	out := disks[:0]
-	for _, d := range disks {
-		if keep[key(d)] == d.Mount {
-			out = append(out, d)
-		}
-	}
-	return out
+	return guest.DedupePools(disks, root)
 }
 
 func pickRoot(disks []guest.DiskUsage) string {

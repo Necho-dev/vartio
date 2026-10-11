@@ -119,6 +119,22 @@ export function osKey(s) {
 export const OS_NAMES = { windows: "Windows", darwin: "MacOS", linux: "Linux", docker: "Docker", unknown: "未知" };
 /** Stable order for fleet counts and filters. */
 export const OS_ORDER = ["darwin", "windows", "linux", "docker", "unknown"];
+/** Short names for a guest hypervisor. A physical machine leaves virt empty. */
+export const VIRT_NAMES = { vmware: "VMware", kvm: "KVM", qemu: "QEMU", hyperv: "Hyper-V", virtualbox: "VirtualBox", parallels: "Parallels", xen: "Xen", bhyve: "bhyve" };
+export const VIRT_ORDER = ["vmware", "kvm", "hyperv", "virtualbox", "parallels", "xen", "bhyve", "qemu"];
+
+/** @param {SystemView} s */
+export function virtKey(s) {
+  return (s.info && s.info.virt) || "";
+}
+
+/** Pill beside the hostname. Physical machines and agents that omit virt return "". */
+/** @param {SystemView} s */
+export function virtTag(s) {
+  const k = virtKey(s);
+  if (!k) return "";
+  return `<span class="os-tag virt-tag">${esc(VIRT_NAMES[k] || k)}</span>`;
+}
 /** @param {SystemView} s */
 export const ip = (s) => {
   const n = s.latest && s.latest.nics && s.latest.nics.find((x) => x.ipv4);

@@ -17,7 +17,7 @@ import (
 )
 
 // agentVersion is a var so test builds can override it with -ldflags -X.
-var agentVersion = "1.18.0"
+var agentVersion = "1.18.3"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] != "upgrade-watch" && !(len(os.Args) > 2 && os.Args[1] == "service" && os.Args[2] == "run") {

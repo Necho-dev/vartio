@@ -2,6 +2,10 @@
 #   GUEST_CONTROL_URL=ws://hub:8766/v1/probe/connect GUEST_TOKEN=... \
 #     docker compose -f deploy/docker/compose.agent.yml up -d --build
 #
+# probe-agent:<version> and :latest (the default) keep the binary in the image.
+# The edge tag follows hub releases. Build it with the edge stage:
+#   PROBE_AGENT_TAG=edge PROBE_AGENT_TARGET=edge docker compose -f deploy/docker/compose.agent.yml up -d --build
+#
 # Host-wide metrics need the host's pid and network namespaces and its / at
 # /hostfs (disks, os-release, machine-id). docker.sock is root-equivalent on
 # the host even mounted read-only; GUEST_DOCKER decides what the agent does with it.
@@ -12,6 +16,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/probe-agent.Dockerfile
+      target: ${PROBE_AGENT_TARGET:-release}
     container_name: probe-agent
     restart: unless-stopped
     network_mode: host

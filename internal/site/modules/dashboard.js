@@ -1,5 +1,5 @@
 // @ts-check
-import { $, API, app, state, esc, rate, dur, ago, meter, osLabel, osKey, OS_NAMES, OS_ORDER, ip, api, every } from "./core.js";
+import { $, API, app, state, esc, rate, dur, ago, meter, osLabel, osKey, OS_NAMES, OS_ORDER, virtKey, virtTag, VIRT_NAMES, VIRT_ORDER, ip, api, every } from "./core.js";
 import { icon, osIcon } from "./icons.js";
 import { latestAgent, outdated, canUpgrade, upgradeAll, upgradeOne, upgradeNotice } from "./upgrade.js";
 
@@ -92,6 +92,10 @@ function renderChips() {
   /** @type {[string, string, number][]} */
   const chips = [["all", "全部", s.length], ["online", "在线", s.filter((x) => x.online).length], ["offline", "离线", s.filter((x) => !x.online).length]];
   osEntries(countBy(s, osKey)).forEach(([k, n]) => chips.push(["os:" + k, OS_NAMES[k] || k, n]));
+  const virts = countBy(s, virtKey);
+  delete virts[""];
+  VIRT_ORDER.filter((k) => virts[k]).forEach((k) => chips.push(["virt:" + k, VIRT_NAMES[k] || k, virts[k]]));
+  Object.keys(virts).filter((k) => !VIRT_ORDER.includes(k)).sort().forEach((k) => chips.push(["virt:" + k, k, virts[k]]));
   const tags = {};
   s.forEach((x) => (x.tags || []).forEach((t) => (tags[t] = (tags[t] || 0) + 1)));
   Object.entries(tags).sort().forEach(([t, n]) => chips.push(["tag:" + t, "#" + t, n]));
@@ -122,9 +126,11 @@ function filtered() {
     if (c === "online" && !s.online) return false;
     if (c === "offline" && s.online) return false;
     if (c.startsWith("os:") && osKey(s) !== c.slice(3)) return false;
+    if (c.startsWith("virt:") && virtKey(s) !== c.slice(5)) return false;
     if (c.startsWith("tag:") && !(s.tags || []).includes(c.slice(4))) return false;
     if (q) {
-      const hay = [s.name, s.hostname, s.id, s.biosUuid, ip(s), s.remoteAddr, osLabel(s), ...(s.tags || [])].join(" ").toLowerCase();
+      const vk = virtKey(s);
+      const hay = [s.name, s.hostname, s.id, s.biosUuid, ip(s), s.remoteAddr, osLabel(s), VIRT_NAMES[vk] || vk, ...(s.tags || [])].join(" ").toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -177,7 +183,7 @@ function row(s) {
   const up = s.online && s.info && s.info.bootTime ? Date.now() / 1000 - s.info.bootTime : 0;
   const tags = (s.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
   return `<tr data-id="${esc(s.id)}" class="${s.online ? "" : "offline"}">
-    <td class="c-name"><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div><div class="nm">${esc(s.name || s.hostname || s.id)}${osTag(s)}</div><div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div>${tags ? `<div class="name-tags">${tags}</div>` : ""}</div></div></td>
+    <td class="c-name"><div class="sys-name"><span class="dot ${s.online ? "up" : ""}"></span><div><div class="nm">${esc(s.name || s.hostname || s.id)}${osTag(s)}${virtTag(s)}</div><div class="os">${esc(osLabel(s) || "—")} · ${esc(ip(s))}</div>${tags ? `<div class="name-tags">${tags}</div>` : ""}</div></div></td>
     <td class="c-cpu" data-l="CPU">${on ? meter(l.cpuPct) : `<span class="faint">—</span>`}</td>
     <td class="c-mem" data-l="内存">${on ? meter(l.memPct) : `<span class="faint">—</span>`}</td>
     <td class="c-disk" data-l="磁盘">${l ? meter(l.diskPct) : `<span class="faint">—</span>`}</td>

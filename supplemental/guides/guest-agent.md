@@ -241,7 +241,7 @@ compose 用 `pid: host` 和 `network_mode: host` 看到宿主机的进程、网�
 - `GUEST_HOST_ROOT=/hostfs`：磁盘用量按 `/hostfs/<挂载点>` 统计；`os-release`、`machine-id`、主机名从 `/hostfs/etc` 读。`GUEST_HOSTNAME` 可以覆盖主机名
 - 设备 ID：容器里不用网卡 MAC（不共享宿主机网络时，每次重建容器都会变）。读不到宿主机的 `machine-id` 时，生成一个存在 `GUEST_STATE_DIR`（默认 `/var/lib/probe-agent`，compose 挂了数据卷）
 - 终端、命令执行、关机默认在探针容器里运行。`GUEST_HOST_NS=1` 时用 `nsenter -t 1 -m -u -i -n -p` 进入宿主机命名空间，需要 `privileged: true`
-- 远程升级默认关闭，换镜像重建容器即可；`GUEST_UPGRADE=on` 才允许原地替换容器内的二进制（重建后会回到镜像里的版本）
+- 镜像标签：`probe-agent:<版本>` 和 `:latest` 里的二进制就是该版本，容器内拒绝远程升级。`probe-agent:edge` 打开 `GUEST_UPGRADE` 和 `GUEST_AUTO_UPDATE`，跟着 hub 的签名包走；重建容器后回到 edge 镜像里打包的版本。compose 用 `PROBE_AGENT_TAG=edge PROBE_AGENT_TARGET=edge`
 - 宿主机根目录默认是普通绑定挂载，探针启动后才挂上的磁盘看不到；加 `,rslave` 可以看到，但 Docker Desktop 的根目录不是共享挂载，不支持
 
 ### hub 镜像
@@ -251,7 +251,7 @@ make docker-hub
 GUEST_TOKEN=… PROBE_HUB_ADMIN_TOKEN=… docker compose -f deploy/docker/compose.hub.yml up -d
 ```
 
-带一个 PostgreSQL 存历史。工作目录 `/data`（数据卷，hub 签名密钥 `probe-hub.key` 和设备凭据也在这里，重建容器时不要丢），远程升级用的签名产物挂到 `/data/dist/probe-agent`（compose 里有注释示例）。多架构镜像：`make docker-push REGISTRY=…`（buildx，默认 `linux/amd64,linux/arm64`，标签取 `agentVersion`）。
+带一个 PostgreSQL 存历史。工作目录 `/data`（数据卷，hub 签名密钥 `probe-hub.key` 和设备凭据也在这里，重建容器时不要丢），远程升级用的签名产物挂到 `/data/dist/probe-agent`（compose 里有注释示例）。多架构镜像：`make docker-push REGISTRY=…`（buildx，默认 `linux/amd64,linux/arm64`）。agent 镜像打 `agentVersion`、`latest`（两者都是锁定版本的 release）和 `edge`。
 
 ## 远程升级
 

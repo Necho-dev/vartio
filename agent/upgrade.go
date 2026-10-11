@@ -50,9 +50,8 @@ type upgradeState struct {
 	Cwd     string    `json:"cwd"`
 }
 
-// upgradeEnabled is on unless GUEST_UPGRADE=off. In a container a swapped-in
-// binary is lost when the container is recreated, so there it takes
-// GUEST_UPGRADE=on and the image is the normal way to upgrade.
+// upgradeEnabled is on unless GUEST_UPGRADE=off. A container keeps the binary
+// in its image unless the edge image (or GUEST_UPGRADE=on) opts into replacement.
 func upgradeEnabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("GUEST_UPGRADE")))
 	if inContainer() {

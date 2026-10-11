@@ -21,6 +21,10 @@ interface HostInfo {
   cores?: number;
   threads?: number;
   bootTime?: number;
+  vendor?: string;
+  product?: string;
+  /** Hypervisor when this machine is a guest: vmware, kvm, hyperv, … */
+  virt?: string;
 }
 
 /** guest.DiskUsage */

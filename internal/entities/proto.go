@@ -463,6 +463,12 @@ type SysInfo struct {
 	Cores           int    `json:"cores,omitempty"`
 	Threads         int    `json:"threads,omitempty"`
 	BootTime        int64  `json:"bootTime,omitempty"`
+	// Vendor and Product are SMBIOS identity. Virt is set only when that
+	// identity is a guest (vmware, kvm, hyperv, …); a physical machine sends
+	// vendor/product with Virt empty.
+	Vendor  string `json:"vendor,omitempty"`
+	Product string `json:"product,omitempty"`
+	Virt    string `json:"virt,omitempty"`
 }
 
 type DiskUsage struct {

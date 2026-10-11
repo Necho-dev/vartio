@@ -2,6 +2,19 @@ package guest
 
 import "testing"
 
+func TestDedupePoolsFoldsSystemVolume(t *testing.T) {
+	sys := DiskUsage{Mount: "/", FS: "apfs", Total: 500, Used: 12}
+	data := DiskUsage{Mount: "/System/Volumes/Data", FS: "apfs", Total: 500, Used: 400}
+	ext := DiskUsage{Mount: "/Volumes/X", FS: "apfs", Total: 500, Used: 1}
+	got := DedupePools([]DiskUsage{sys, data, ext}, "/System/Volumes/Data")
+	if len(got) != 2 || got[0].Mount != "/System/Volumes/Data" || got[1].Mount != "/Volumes/X" {
+		t.Fatalf("used mismatch still split the system volume: %+v", got)
+	}
+	if used, total := DiskSum(got); used != 401 || total != 1000 {
+		t.Fatalf("sum = %d/%d", used, total)
+	}
+}
+
 func TestDiskSum(t *testing.T) {
 	old := DiskUsage{Mount: "/oldroot", FS: "erofs", Total: 100, Used: 100}
 	data := DiskUsage{Mount: "/var/lib", FS: "ext4", Total: 1000, Used: 10}

@@ -1,5 +1,5 @@
 // @ts-check
-import { $, app, state, esc, html, bytes, rate, pct, dur, ago, meter, osKey, ip, api, every } from "./core.js";
+import { $, app, state, esc, html, bytes, rate, pct, dur, ago, meter, osKey, virtTag, VIRT_NAMES, ip, api, every } from "./core.js";
 import { renderChart } from "./charts.js";
 import { icon, osIcon } from "./icons.js";
 import { openModal, closeModal } from "./ui.js";
@@ -284,25 +284,50 @@ function ioPanel(id, title, desc, left, right) {
     <div class="legend" id="lg-${id}"></div></div>`;
 }
 
+/** Firmware was read. An empty virt means a physical machine; old agents omit both. */
+/** @param {HostInfo} i */
+function virtLabel(i) {
+  if (!i || (!i.virt && !i.vendor && !i.product)) return "";
+  const kind = i.virt ? `${VIRT_NAMES[i.virt] || i.virt} 虚拟机` : "物理机";
+  const hw = [i.vendor, i.product].filter(Boolean).join(" ");
+  return hw ? `${kind} · ${hw}` : kind;
+}
+
+/** Round-trip of the latest pull. Hundreds of ms collapse to an integer. */
+function latText(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
+  const n = ms >= 100 ? Math.round(ms) : Math.round(ms * 100) / 100;
+  return n + " ms";
+}
+
 /** @param {SystemView} s */
 function renderHero(s) {
   const i = s.info || {}, l = s.latest;
   const docker = isDockerRunner(s);
   const up = s.online && i.bootTime ? Date.now() / 1000 - i.bootTime : 0;
+  const title = s.name || s.hostname;
   const fact = (label, v) => (v ? `<span>${label} <b>${esc(v)}</b></span>` : "");
+  const ms = s.online && l ? l.latencyMs : null;
+  const prev = /** @type {HTMLElement | null} */ (document.querySelector("#hero .lat"));
+  const tick = prev && prev.dataset.ms !== String(ms) ? " tick" : "";
+  const latCls = ms == null ? "" : ms >= 300 ? " bad" : ms >= 100 ? " slow" : "";
+  const lat = ms == null ? "" : `<span class="lat${latCls}${tick}" data-ms="${ms}" title="最近一次采集的往返延迟，约每 ${state.config.intervalSec}s 刷新">${esc(latText(ms))}</span>`;
+  const badge = s.online
+    ? `<span class="badge up"><span class="dot up"></span>在线${lat}</span>`
+    : `<span class="badge down"><span class="dot"></span>离线</span>`;
   $("#hero").innerHTML = `
     <div class="hero-main">
-      <h1>${osIcon(osKey(s))}${esc(s.name || s.hostname)} <span class="badge ${s.online ? "up" : "down"}"><span class="dot ${s.online ? "up" : ""}"></span>${s.online ? "在线" : "离线"}</span>
+      <h1>${osIcon(osKey(s))}${esc(title)}${virtTag(s)} ${badge}
         <span class="edit" id="editBtn" title="编辑名称和标签">${icon("pencil")} 编辑</span>
         <span class="hero-tags">${(s.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</span></h1>
       <div class="facts">
         ${fact("主机名", s.hostname)}${fact("IP", ip(s))}${s.remoteAddr && s.remoteAddr !== ip(s) ? fact("来源", s.remoteAddr) : ""}
         ${fact("系统", docker ? "Docker" : [i.platform, i.platformVersion].filter(Boolean).join(" "))}
+        ${fact("虚拟化", virtLabel(i))}
         ${fact("CPU", i.cpuModel ? `${i.cpuModel} (${i.cores || "?"}C/${i.threads || "?"}T)` : "")}
         ${fact("内存", l ? bytes(l.memTotal) : "")}
         ${s.online ? fact("运行", dur(up)) : fact("最后在线", ago(s.lastSeen))}
         ${fact("探针", s.version)}${outdated(s, latest) && !canUpgrade(s) && s.online ? `<span class="faint">可更新至 ${esc(latest)}，${s.runner === "docker" ? "请拉取新镜像后重建容器" : "当前版本需手动更新一次"}</span>` : ""}
-        ${l && s.online ? fact("延迟", l.latencyMs + " ms") : ""}
       </div>
     </div>
     <div class="hero-actions">
@@ -348,7 +373,7 @@ function renderInfo(s) {
   const nics = l.nics || [];
   $("#nics").innerHTML = nics.length ? `<table class="kv-table nic-table"><tr><th>名称</th><th>IPv4</th><th>MAC</th><th>状态</th></tr>
     ${nics.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.ipv4 || "—")}</td><td>${esc(n.mac || "—")}</td><td>${n.up ? '<span style="color:var(--green)">up</span>' : '<span class="faint">down</span>'}</td></tr>`).join("")}</table>` : `<div class="faint">暂无</div>`;
-  const kv = [["设备 ID", s.id], ["BIOS UUID", s.biosUuid], ["操作系统", isDockerRunner(s) ? "Docker" : [i.os, i.platform, i.platformVersion].filter(Boolean).join(" / ")], ["内核", i.kernel], ["架构", i.arch],
+  const kv = [["设备 ID", s.id], ["BIOS UUID", s.biosUuid], ["操作系统", isDockerRunner(s) ? "Docker" : [i.os, i.platform, i.platformVersion].filter(Boolean).join(" / ")], ["虚拟化", virtLabel(i)], ["内核", i.kernel], ["架构", i.arch],
     ["CPU", i.cpuModel], ["核心/线程", i.cores ? `${i.cores} / ${i.threads}` : ""], ["进程数", l.procs],
     ["运行方式", s.online && s.runner ? RUNNERS[s.runner] || s.runner : ""], ["首次接入", s.firstSeen && new Date(s.firstSeen).toLocaleString()],
     ["本次连接", s.online && s.connectedAt ? new Date(s.connectedAt).toLocaleString() : ""], ["最近采样", l.ts && new Date(l.ts).toLocaleString()]];
@@ -536,8 +561,9 @@ function renderConn(d, base, now, win) {
     { label: "其他", color: C.pink, data: d.connOther, cur: now?.other },
   ].filter((r) => r.label !== "其他" || (d.connOther || []).some((v) => v > 0));
   const n = (v) => (v == null ? "—" : String(Math.round(v)));
+  const sockets = now ? (now.total || 0) + (now.udp || 0) + (now.other || 0) : 0;
   chart("conn", { ...base, stacked: true, totalLabel: "合计", fmt: n, series: rows.map(({ label, color, data }) => ({ label, color, data, width: 1.2 })) },
-    now ? `合计 ${now.total + now.udp + now.other}` : "");
+    now ? `合计 ${sockets}` : "");
   $("#desc-conn").textContent = win ? "按协议统计的套接字数量（堆积）；Windows 不统计原始套接字" : "按协议统计的套接字数量（堆积）；其他为原始 / ICMP 套接字";
   $("#lg-conn").innerHTML = rows.map((r) => {
     const st = stats(r.data);

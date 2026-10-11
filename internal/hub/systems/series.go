@@ -1,7 +1,6 @@
 package monitor
 
 import (
-	"fmt"
 	"time"
 
 	"govmomi-wmks/internal/guest"
@@ -140,22 +139,6 @@ func stepFor(span, interval time.Duration) time.Duration {
 	return step.Round(time.Second)
 }
 
-// dedupePools keeps one mount per storage pool: volumes reporting the same
-// fs/total/used (APFS containers) share one space. Agents >= 1.7.1 already do
-// this; older ones would otherwise double-count in stacked disk charts.
 func dedupePools(disks []guest.DiskUsage, root string) []guest.DiskUsage {
-	key := func(d guest.DiskUsage) string { return fmt.Sprintf("%s|%d|%d", d.FS, d.Total, d.Used) }
-	keep := map[string]string{}
-	for _, d := range disks {
-		if k := key(d); keep[k] == "" || d.Mount == root {
-			keep[k] = d.Mount
-		}
-	}
-	out := make([]guest.DiskUsage, 0, len(disks))
-	for _, d := range disks {
-		if keep[key(d)] == d.Mount {
-			out = append(out, d)
-		}
-	}
-	return out
+	return guest.DedupePools(disks, root)
 }
