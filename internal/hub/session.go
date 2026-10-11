@@ -13,36 +13,35 @@ import (
 )
 
 type session struct {
-	hello      Hello
-	conn       *websocket.Conn
-	mu         sync.Mutex
-	pending    map[string]chan Frame
-	terms      map[string]*termSink
-	tunnels    map[string]*tunnelSink
-	displayOut chan []byte
-	displayID  string
-	onUpgrade  func(UpgradeStep)
-	pings      map[string]chan struct{}
-	seen       time.Time
-	remote     string
-	since      time.Time
-	closed     chan struct{}
-	closeOnce  sync.Once
+	hello     Hello
+	conn      *websocket.Conn
+	mu        sync.Mutex
+	pending   map[string]chan Frame
+	terms     map[string]*termSink
+	tunnels   map[string]*tunnelSink
+	displays  map[string]*displaySink
+	onUpgrade func(UpgradeStep)
+	pings     map[string]chan struct{}
+	seen      time.Time
+	remote    string
+	since     time.Time
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func newSession(conn *websocket.Conn, hello Hello, remote string) *session {
 	now := time.Now()
 	return &session{
-		hello:      hello,
-		conn:       conn,
-		pending:    map[string]chan Frame{},
-		terms:      map[string]*termSink{},
-		tunnels:    map[string]*tunnelSink{},
-		displayOut: make(chan []byte, 2),
-		seen:       now,
-		remote:     remote,
-		since:      now,
-		closed:     make(chan struct{}),
+		hello:    hello,
+		conn:     conn,
+		pending:  map[string]chan Frame{},
+		terms:    map[string]*termSink{},
+		tunnels:  map[string]*tunnelSink{},
+		displays: map[string]*displaySink{},
+		seen:     now,
+		remote:   remote,
+		since:    now,
+		closed:   make(chan struct{}),
 	}
 }
 
@@ -65,6 +64,69 @@ func (t *termSink) stop(bye string) {
 		t.bye = bye
 		close(t.done)
 	})
+}
+
+// displaySink receives JPEG frames for one browser live view. Frames for a
+// different viewer stay on that viewer's sink, so two pages never share a picture.
+type displaySink struct {
+	id   string
+	out  chan []byte
+	done chan struct{}
+	once sync.Once
+}
+
+func (d *displaySink) stop() {
+	d.once.Do(func() { close(d.done) })
+}
+
+// push keeps the newest frame. A slow page drops an older one instead of
+// stalling the agent read loop or leaking the frame into another page.
+func (d *displaySink) push(p []byte) {
+	select {
+	case <-d.done:
+		return
+	case d.out <- p:
+		return
+	default:
+	}
+	select {
+	case <-d.out:
+	default:
+	}
+	select {
+	case <-d.done:
+	case d.out <- p:
+	default:
+	}
+}
+
+func (s *session) attachDisplay(id string) (*displaySink, error) {
+	d := &displaySink{id: id, out: make(chan []byte, 2), done: make(chan struct{})}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.displays) >= MaxDisplays {
+		return nil, &RPCError{Code: "too_many", Message: fmt.Sprintf("同一台机器最多 %d 路实时画面", MaxDisplays)}
+	}
+	if old := s.displays[id]; old != nil {
+		old.stop()
+	}
+	s.displays[id] = d
+	return d, nil
+}
+
+func (s *session) detachDisplay(d *displaySink) {
+	s.mu.Lock()
+	if s.displays[d.id] == d {
+		delete(s.displays, d.id)
+	}
+	s.mu.Unlock()
+	d.stop()
+}
+
+func (s *session) displayFor(id string) *displaySink {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.displays[id]
 }
 
 // attachTerm registers a terminal stream. Single-PTY agents get the previous
@@ -223,9 +285,14 @@ func (s *session) close() {
 		}
 		tunnels := s.tunnels
 		s.tunnels = map[string]*tunnelSink{}
+		displays := s.displays
+		s.displays = map[string]*displaySink{}
 		s.mu.Unlock()
 		for _, t := range tunnels {
 			t.stop()
+		}
+		for _, d := range displays {
+			d.stop()
 		}
 	})
 }
@@ -317,17 +384,8 @@ func (s *session) deliver(fr Frame) {
 			if len(fr.Data) == 0 {
 				return
 			}
-			select {
-			case s.displayOut <- fr.Data:
-			default:
-				select {
-				case <-s.displayOut:
-				default:
-				}
-				select {
-				case s.displayOut <- fr.Data:
-				default:
-				}
+			if d := s.displayFor(fr.ID); d != nil {
+				d.push(fr.Data)
 			}
 		}
 		return

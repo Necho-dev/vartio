@@ -66,6 +66,9 @@ const (
 	DisplayMaxSide = 2560
 	// MaxTerms caps concurrent terminal sessions (browser tabs) per guest.
 	MaxTerms = 8
+	// MaxDisplays caps concurrent live-view streams per guest. Each browser
+	// page has its own screen and quality; they do not share one capture.
+	MaxDisplays = 4
 	// MaxTunnels caps concurrent TCP tunnels per guest; TunnelIdle closes one
 	// with no traffic (plugin tunnels; port forwards stay open).
 	MaxTunnels  = 64
@@ -691,7 +694,10 @@ type SessionInfo struct {
 
 // DisplayOpenRequest picks the monitor to stream; Screen indexes
 // DisplayOpenResult.Screens, and index 0 is always the primary monitor.
+// ID is the viewer (the display.open frame id). Select, quality and close
+// must name it so one page cannot retarget another page's stream.
 type DisplayOpenRequest struct {
+	ID      string `json:"id,omitempty"`
 	Screen  int    `json:"screen"`
 	Quality string `json:"quality,omitempty"`
 }

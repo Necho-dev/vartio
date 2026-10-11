@@ -584,6 +584,15 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer browser.Close()
 
+	// Register the sink before open so the first frame, sent during the RPC,
+	// lands on this page and not on another one.
+	sink, err := s.attachDisplay(t.ID)
+	if err != nil {
+		_ = browser.WriteMessage(websocket.TextMessage, []byte(err.Error()))
+		return
+	}
+	defer s.detachDisplay(sink)
+
 	ctx := r.Context()
 	raw, err := s.call(ctx, t.ID, MethodDisplayOpen, DisplayOpenRequest{Quality: r.URL.Query().Get("quality")})
 	if err != nil {
@@ -608,16 +617,10 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		h.audit(t.Key, "display.close", "时长 "+time.Since(opened).Round(time.Second).String(), clientIP(r), nil)
 	}()
-	s.mu.Lock()
-	s.displayID = t.ID
-	s.mu.Unlock()
 	defer func() {
 		c, cancel := context.WithTimeout(context.Background(), TermOpenTimeout)
 		_, _ = s.call(c, t.ID+"-close", MethodDisplayClose, map[string]string{"id": t.ID})
 		cancel()
-		s.mu.Lock()
-		s.displayID = ""
-		s.mu.Unlock()
 	}()
 
 	idle := time.NewTimer(DisplayIdle)
@@ -640,9 +643,9 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 			var params DisplayOpenRequest
 			switch {
 			case m.Type == "screen" && len(res.Screens) > 0:
-				method, what, params = MethodDisplaySelect, "切换屏幕", DisplayOpenRequest{Screen: m.Screen}
+				method, what, params = MethodDisplaySelect, "切换屏幕", DisplayOpenRequest{ID: t.ID, Screen: m.Screen}
 			case m.Type == "quality" && res.Quality != "":
-				method, what, params = MethodDisplayQuality, "切换清晰度", DisplayOpenRequest{Quality: m.Quality}
+				method, what, params = MethodDisplayQuality, "切换清晰度", DisplayOpenRequest{ID: t.ID, Quality: m.Quality}
 			default:
 				continue
 			}
@@ -671,10 +674,13 @@ func (h *Hub) HandleDisplayWS(w http.ResponseWriter, r *http.Request) {
 			case <-s.closed:
 				errc <- errOffline
 				return
+			case <-sink.done:
+				errc <- errOffline
+				return
 			case <-idle.C:
 				errc <- context.DeadlineExceeded
 				return
-			case b, ok := <-s.displayOut:
+			case b, ok := <-sink.out:
 				if !ok {
 					errc <- errOffline
 					return

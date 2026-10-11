@@ -6,6 +6,7 @@ package main
 #cgo CFLAGS: -x objective-c -fobjc-arc
 #cgo LDFLAGS: -framework CoreGraphics -framework Foundation -framework ImageIO
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -40,6 +41,7 @@ static int sckAvailable(void) {
 }
 
 static SCShareableContent *gContent API_AVAILABLE(macos(14.0));
+static pthread_mutex_t gContentMu = PTHREAD_MUTEX_INITIALIZER;
 
 static int sckRefresh(void) API_AVAILABLE(macos(14.0)) {
 	dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -67,12 +69,22 @@ static void *sckCapture(CGDirectDisplayID did, int maxSide, double quality, int 
 	if (@available(macOS 14.0, *)) {
 		if (!sckAvailable()) { *rc = -1; return NULL; }
 		@autoreleasepool {
+			pthread_mutex_lock(&gContentMu);
 			if (gContent == nil || sckFind(did) == nil) {
-				if (sckRefresh() != 0) { *rc = -1; return NULL; }
+				if (sckRefresh() != 0) {
+					pthread_mutex_unlock(&gContentMu);
+					*rc = -1;
+					return NULL;
+				}
 			}
 			SCDisplay *d = sckFind(did);
-			if (d == nil) { *rc = -2; return NULL; }
+			if (d == nil) {
+				pthread_mutex_unlock(&gContentMu);
+				*rc = -2;
+				return NULL;
+			}
 			SCContentFilter *f = [[NSClassFromString(@"SCContentFilter") alloc] initWithDisplay:d excludingWindows:@[]];
+			pthread_mutex_unlock(&gContentMu);
 			double scale = f.pointPixelScale > 0 ? f.pointPixelScale : 1;
 			double w = f.contentRect.size.width * scale, h = f.contentRect.size.height * scale;
 			double side = w > h ? w : h;
@@ -89,7 +101,9 @@ static void *sckCapture(CGDirectDisplayID did, int maxSide, double quality, int 
 				dispatch_semaphore_signal(sem);
 			}];
 			if (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0 || img == NULL) {
+				pthread_mutex_lock(&gContentMu);
 				gContent = nil;
+				pthread_mutex_unlock(&gContentMu);
 				*rc = -3;
 				return NULL;
 			}

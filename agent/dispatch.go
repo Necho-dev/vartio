@@ -76,7 +76,7 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 	case guest.MethodDisplayOpen:
 		var req guest.DisplayOpenRequest
 		_ = json.Unmarshal(fr.Params, &req)
-		res, err := a.display.open(req, func(p []byte) { a.streamDisplay(fr.ID, p) })
+		res, err := a.display.open(fr.ID, req, func(p []byte) { a.streamDisplay(fr.ID, p) })
 		if err != nil {
 			return nil, err
 		}
@@ -86,7 +86,7 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
-		if err := a.display.selectScreen(req.Screen); err != nil {
+		if err := a.display.selectScreen(req.ID, req.Screen); err != nil {
 			return nil, err
 		}
 		return map[string]int{"screen": req.Screen}, nil
@@ -95,9 +95,11 @@ func (a *agent) dispatch(fr guest.Frame) (any, *guest.FrameError) {
 		if err := json.Unmarshal(fr.Params, &req); err != nil {
 			return nil, bad("invalid params")
 		}
-		return map[string]string{"quality": a.display.setQuality(req.Quality)}, nil
+		return map[string]string{"quality": a.display.setQuality(req.ID, req.Quality)}, nil
 	case guest.MethodDisplayClose:
-		a.display.close()
+		var req guest.DisplayOpenRequest
+		_ = json.Unmarshal(fr.Params, &req)
+		a.display.close(req.ID)
 		return map[string]bool{"ok": true}, nil
 	case guest.MethodFilesList:
 		return filesList(fr.Params)

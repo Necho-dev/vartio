@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"testing"
@@ -177,6 +178,101 @@ func TestDisplayWSSelectScreen(t *testing.T) {
 	}
 	if err := c.ReadJSON(&m); err != nil || m.Type != "quality" || m.Quality != DisplaySmooth {
 		t.Fatalf("quality reply %+v %v", m, err)
+	}
+}
+
+func TestDisplayWSTwoViewers(t *testing.T) {
+	h := NewHub("dev")
+	srv := httptest.NewServer(h.DevHandler())
+	t.Cleanup(srv.Close)
+	conn := dialHello(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/v1/probe/connect?token=dev", Hello{BiosUUID: "disp-3"})
+	chosen := make(chan DisplayOpenRequest, 1)
+	go func() {
+		n := byte(0)
+		for {
+			var fr Frame
+			if err := conn.ReadJSON(&fr); err != nil {
+				return
+			}
+			switch fr.Method {
+			case MethodDisplayOpen:
+				n++
+				b, _ := json.Marshal(DisplayOpenResult{OK: true, FPS: 2, MaxSide: 1280, Screens: []Screen{{Index: 0, Primary: true}, {Index: 1}}, Screen: 0, Quality: DisplayAuto})
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: b})
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Stream: "display", Data: []byte{0xff, 0xd8, n}})
+			case MethodDisplaySelect:
+				var req DisplayOpenRequest
+				_ = json.Unmarshal(fr.Params, &req)
+				chosen <- req
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"screen":1}`)})
+				_ = conn.WriteJSON(Frame{ID: req.ID, Stream: "display", Data: []byte{0xff, 0xd8, byte(req.Screen)}})
+			case MethodDisplayClose:
+				_ = conn.WriteJSON(Frame{ID: fr.ID, Result: json.RawMessage(`{"ok":true}`)})
+			}
+		}
+	}()
+	waitOnline(t, h, "disp-3")
+	dial := func() *websocket.Conn {
+		t.Helper()
+		ticket, err := h.IssueDisplay("disp-3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+ticket["ws"], nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info displayMsg
+		if err := c.ReadJSON(&info); err != nil || info.Type != "info" {
+			t.Fatalf("info %+v %v", info, err)
+		}
+		return c
+	}
+	a := dial()
+	defer a.Close()
+	b := dial()
+	defer b.Close()
+	_, fa, err := a.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fb, err := b.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(fa, fb) || fa[2] == fb[2] {
+		t.Fatalf("viewers got the same frame %x %x", fa, fb)
+	}
+	if err := b.WriteJSON(displayMsg{Type: "screen", Screen: 1}); err != nil {
+		t.Fatal(err)
+	}
+	req := <-chosen
+	if req.ID == "" || req.Screen != 1 {
+		t.Fatalf("select did not name B's screen: %+v", req)
+	}
+	// The JPEG can arrive before the text reply; both belong to B.
+	_ = b.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var reply displayMsg
+	var switched []byte
+	for reply.Type == "" || switched == nil {
+		kind, data, err := b.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind == websocket.TextMessage {
+			if err := json.Unmarshal(data, &reply); err != nil || reply.Type != "screen" || reply.Screen != 1 {
+				t.Fatalf("B reply %s %v", data, err)
+			}
+			continue
+		}
+		switched = data
+	}
+	if len(switched) != 3 || switched[2] != 1 {
+		t.Fatalf("B frame %x", switched)
+	}
+	_ = a.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, extra, err := a.ReadMessage(); err == nil {
+		t.Fatalf("A received B's frame %x", extra)
 	}
 }
 

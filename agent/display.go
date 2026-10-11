@@ -3,15 +3,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/jpeg"
+	"math"
 	"runtime"
 	"sync"
 	"time"
 
 	"govmomi-wmks/internal/guest"
 )
+
+// screenAll asks the capture loop to composite every monitor by its desktop
+// position instead of streaming one of them.
+const screenAll = -1
 
 // displayProfile is one point on the frame-rate / picture-quality trade-off.
 type displayProfile struct {
@@ -49,11 +56,23 @@ func normQuality(q string) string {
 	return guest.DisplayAuto
 }
 
+// displayHub keeps one capture per browser page. Screen and quality belong to
+// that page: opening or switching in a second page must not retarget the first.
 type displayHub struct {
+	mu    sync.Mutex
+	views map[string]*displayView
+}
+
+// displayView is one viewer's capture loop.
+type displayView struct {
 	mu      sync.Mutex
 	stop    context.CancelFunc
 	screens []guest.Screen
 	cur     int
+	all     bool
+	// gen bumps whenever this viewer's choice changes, so a frame captured
+	// under the old choice is dropped instead of being sent after they switch.
+	gen     int
 	quality string
 	level   int
 	// auto-mode measurement window
@@ -63,34 +82,70 @@ type displayHub struct {
 	good            int
 }
 
-func newDisplayHub() *displayHub { return &displayHub{quality: guest.DisplayAuto, level: autoStart} }
+func newDisplayHub() *displayHub { return &displayHub{views: map[string]*displayView{}} }
 
-func (d *displayHub) open(req guest.DisplayOpenRequest, send func([]byte)) (guest.DisplayOpenResult, *guest.FrameError) {
+func newDisplayView(q string) *displayView {
+	return &displayView{quality: normQuality(q), level: autoStart}
+}
+
+func (d *displayHub) open(id string, req guest.DisplayOpenRequest, send func([]byte)) (guest.DisplayOpenResult, *guest.FrameError) {
+	if id == "" {
+		return guest.DisplayOpenResult{}, &guest.FrameError{Code: "bad_request", Message: "display id is required"}
+	}
 	if err := interactiveSession(); err != nil {
 		return guest.DisplayOpenResult{}, asRPC(err)
 	}
 	screens := listScreens()
 	sc := pickScreen(screens, req.Screen)
 	q := normQuality(req.Quality)
-	d.close()
-	d.mu.Lock()
-	d.quality, d.level, d.good, d.winN = q, autoStart, 0, 0
-	p := d.profileLocked()
-	d.mu.Unlock()
-	first, err := captureFrame(sc, p)
+	v := newDisplayView(q)
+	first, err := captureFrame(sc, v.profileLocked())
 	if err != nil {
 		return guest.DisplayOpenResult{}, asRPC(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	v.mu.Lock()
+	v.stop = cancel
+	v.screens = screens
+	v.cur = sc.Index
+	v.all = false
+	v.gen++
+	v.mu.Unlock()
+
 	d.mu.Lock()
-	d.stop = cancel
-	d.screens = screens
-	d.cur = sc.Index
+	if old := d.views[id]; old != nil {
+		delete(d.views, id)
+		d.mu.Unlock()
+		old.close()
+		d.mu.Lock()
+	}
+	if len(d.views) >= guest.MaxDisplays {
+		d.mu.Unlock()
+		cancel()
+		return guest.DisplayOpenResult{}, &guest.FrameError{Code: "too_many", Message: fmt.Sprintf("同一台机器最多 %d 路实时画面", guest.MaxDisplays)}
+	}
+	d.views[id] = v
 	d.mu.Unlock()
 	send(first)
-	go d.loop(ctx, send)
+	go v.loop(ctx, send)
 	return guest.DisplayOpenResult{OK: true, FPS: autoLadder[len(autoLadder)-1].FPS, MaxSide: fixedProfiles[guest.DisplayHD].MaxSide,
 		Screens: screens, Screen: sc.Index, Quality: q}, nil
+}
+
+// view finds the named capture. An empty id addresses the only open one, so a
+// caller that predates per-viewer ids still works until a second page opens.
+func (d *displayHub) view(id string) *displayView {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if id != "" {
+		return d.views[id]
+	}
+	if len(d.views) == 1 {
+		for _, v := range d.views {
+			return v
+		}
+	}
+	return nil
 }
 
 // pickScreen falls back to the primary monitor (index 0) for an unknown index.
@@ -105,61 +160,101 @@ func pickScreen(screens []guest.Screen, i int) guest.Screen {
 	return guest.Screen{}
 }
 
-func (d *displayHub) selectScreen(i int) *guest.FrameError {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.stop == nil {
+func (d *displayHub) selectScreen(id string, i int) *guest.FrameError {
+	v := d.view(id)
+	if v == nil {
 		return &guest.FrameError{Code: "not_open", Message: "display is not open"}
 	}
-	if i < 0 || i >= len(d.screens) {
+	return v.selectScreen(i)
+}
+
+func (v *displayView) selectScreen(i int) *guest.FrameError {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.stop == nil {
+		return &guest.FrameError{Code: "not_open", Message: "display is not open"}
+	}
+	if i == screenAll {
+		if len(v.screens) < 2 {
+			return &guest.FrameError{Code: "bad_request", Message: "no such screen"}
+		}
+		v.all = true
+		v.gen++
+		return nil
+	}
+	if i < 0 || i >= len(v.screens) {
 		return &guest.FrameError{Code: "bad_request", Message: "no such screen"}
 	}
-	d.cur = i
+	v.cur = i
+	v.all = false
+	v.gen++
 	return nil
 }
 
-func (d *displayHub) setQuality(q string) string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.quality = normQuality(q)
-	d.good, d.winN = 0, 0
-	return d.quality
+func (d *displayHub) setQuality(id, q string) string {
+	v := d.view(id)
+	if v == nil {
+		return normQuality(q)
+	}
+	return v.setQuality(q)
 }
 
-func (d *displayHub) profileLocked() displayProfile {
-	if p, ok := fixedProfiles[d.quality]; ok {
+func (v *displayView) setQuality(q string) string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.quality = normQuality(q)
+	v.good, v.winN = 0, 0
+	return v.quality
+}
+
+func (v *displayView) profileLocked() displayProfile {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.profile()
+}
+
+func (v *displayView) profile() displayProfile {
+	if p, ok := fixedProfiles[v.quality]; ok {
 		return p
 	}
-	return autoLadder[d.level]
+	return autoLadder[v.level]
 }
 
-func (d *displayHub) current() (guest.Screen, displayProfile) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return pickScreen(d.screens, d.cur), d.profileLocked()
+func (v *displayView) current() (guest.Screen, displayProfile) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return pickScreen(v.screens, v.cur), v.profile()
+}
+
+// plan is what the next frame should be. all is the arranged multi-monitor view.
+func (v *displayView) plan() (all bool, screens []guest.Screen, sc guest.Screen, p displayProfile, gen int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	screens = append([]guest.Screen(nil), v.screens...)
+	return v.all && len(screens) > 1, screens, pickScreen(screens, v.cur), v.profile(), v.gen
 }
 
 // observe feeds one frame's timings to the auto controller: prod is capture +
 // encode, out is the time the frame took to leave on the hub connection.
-func (d *displayHub) observe(prod, out time.Duration) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.quality != guest.DisplayAuto {
+func (v *displayView) observe(prod, out time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.quality != guest.DisplayAuto {
 		return
 	}
 	now := time.Now()
-	if d.winN == 0 {
-		d.winStart, d.winProd, d.winOut = now, 0, 0
+	if v.winN == 0 {
+		v.winStart, v.winProd, v.winOut = now, 0, 0
 	}
-	d.winN++
-	d.winProd += prod
-	d.winOut += out
-	if now.Sub(d.winStart) < autoWindow {
+	v.winN++
+	v.winProd += prod
+	v.winOut += out
+	if now.Sub(v.winStart) < autoWindow {
 		return
 	}
-	n := time.Duration(d.winN)
-	d.level, d.good = autoStep(d.level, d.good, d.winProd/n, d.winOut/n)
-	d.winN = 0
+	n := time.Duration(v.winN)
+	v.level, v.good = autoStep(v.level, v.good, v.winProd/n, v.winOut/n)
+	v.winN = 0
 }
 
 // autoStep moves one rung down when sending saturates the link or the machine
@@ -184,17 +279,30 @@ func autoStep(level, good int, prod, out time.Duration) (int, int) {
 	}
 }
 
-func (d *displayHub) loop(ctx context.Context, send func([]byte)) {
+func (v *displayView) loop(ctx context.Context, send func([]byte)) {
 	for {
-		start := time.Now()
-		sc, p := d.current()
-		b, err := captureFrame(sc, p)
-		if err != nil {
+		if ctx.Err() != nil {
 			return
+		}
+		start := time.Now()
+		all, screens, sc, p, gen := v.plan()
+		var b []byte
+		var err error
+		if all {
+			b, err = captureMosaic(screens, p)
+		} else {
+			b, err = captureFrame(sc, p)
+		}
+		if err != nil || ctx.Err() != nil {
+			return
+		}
+		// This viewer switched (or closed) while the frame was being captured.
+		if _, _, _, _, gen2 := v.plan(); gen2 != gen {
+			continue
 		}
 		sent := time.Now()
 		send(b)
-		d.observe(sent.Sub(start), time.Since(sent))
+		v.observe(sent.Sub(start), time.Since(sent))
 		wait := max(time.Second/time.Duration(p.FPS)-time.Since(start), 10*time.Millisecond)
 		select {
 		case <-ctx.Done():
@@ -204,14 +312,175 @@ func (d *displayHub) loop(ctx context.Context, send func([]byte)) {
 	}
 }
 
-func (d *displayHub) close() {
+// close stops one viewer. An empty id stops every viewer, which is what a
+// dropped agent connection does.
+func (d *displayHub) close(id string) {
 	d.mu.Lock()
-	c := d.stop
-	d.stop = nil
+	var drop []*displayView
+	if id == "" {
+		for _, v := range d.views {
+			drop = append(drop, v)
+		}
+		d.views = map[string]*displayView{}
+	} else if v := d.views[id]; v != nil {
+		drop = []*displayView{v}
+		delete(d.views, id)
+	}
 	d.mu.Unlock()
+	for _, v := range drop {
+		v.close()
+	}
+}
+
+func (v *displayView) close() {
+	v.mu.Lock()
+	c := v.stop
+	v.stop = nil
+	v.all = false
+	v.gen++
+	v.mu.Unlock()
 	if c != nil {
 		c()
 	}
+}
+
+// captureMosaic grabs every monitor and places it on one canvas using the
+// desktop origin each screen reported, then encodes that overview.
+func captureMosaic(screens []guest.Screen, p displayProfile) ([]byte, error) {
+	imgs := make([]image.Image, len(screens))
+	var last error
+	ok := 0
+	for i, s := range screens {
+		if s.Width <= 0 || s.Height <= 0 {
+			continue
+		}
+		tile := p
+		tile.MaxSide = mosaicSlot(screens, i, p.MaxSide)
+		raw, err := captureFrame(s, tile)
+		if err != nil {
+			last = err
+			continue
+		}
+		img, err := jpeg.Decode(bytes.NewReader(raw))
+		if err != nil {
+			last = err
+			continue
+		}
+		imgs[i] = img
+		ok++
+	}
+	if ok == 0 {
+		if last == nil {
+			last = &guest.FrameError{Code: "no_user_session", Message: "no screen to arrange"}
+		}
+		return nil, last
+	}
+	return encodeJPEG(composeMosaic(screens, imgs, p.MaxSide), p)
+}
+
+// mosaicSlot is the longer side of one screen after the whole desktop is fit
+// to maxSide, so each capture is already close to the pixels it will occupy.
+func mosaicSlot(screens []guest.Screen, i, maxSide int) int {
+	_, _, scale := mosaicScale(screens, maxSide)
+	s := screens[i]
+	w := int(math.Round(float64(s.Width) * scale))
+	h := int(math.Round(float64(s.Height) * scale))
+	if w < h {
+		w = h
+	}
+	if w < 1 {
+		return 1
+	}
+	return w
+}
+
+func mosaicScale(screens []guest.Screen, maxSide int) (minX, minY int, scale float64) {
+	minX, minY, maxX, maxY, ok := deskBounds(screens)
+	if !ok {
+		return 0, 0, 1
+	}
+	dw, dh := maxX-minX, maxY-minY
+	side := dw
+	if dh > side {
+		side = dh
+	}
+	scale = 1
+	if maxSide > 0 && side > maxSide {
+		scale = float64(maxSide) / float64(side)
+	}
+	return minX, minY, scale
+}
+
+func deskBounds(screens []guest.Screen) (minX, minY, maxX, maxY int, ok bool) {
+	for _, s := range screens {
+		if s.Width <= 0 || s.Height <= 0 {
+			continue
+		}
+		x2, y2 := s.X+s.Width, s.Y+s.Height
+		if !ok {
+			minX, minY, maxX, maxY, ok = s.X, s.Y, x2, y2, true
+			continue
+		}
+		if s.X < minX {
+			minX = s.X
+		}
+		if s.Y < minY {
+			minY = s.Y
+		}
+		if x2 > maxX {
+			maxX = x2
+		}
+		if y2 > maxY {
+			maxY = y2
+		}
+	}
+	return minX, minY, maxX, maxY, ok
+}
+
+// composeMosaic paints imgs onto a black desktop. A nil image leaves its
+// rectangle black. The result's longer side is at most maxSide.
+func composeMosaic(screens []guest.Screen, imgs []image.Image, maxSide int) *image.RGBA {
+	minX, minY, maxX, maxY, ok := deskBounds(screens)
+	if !ok {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	_, _, scale := mosaicScale(screens, maxSide)
+	cw := max(int(math.Round(float64(maxX-minX)*scale)), 1)
+	ch := max(int(math.Round(float64(maxY-minY)*scale)), 1)
+	dst := image.NewRGBA(image.Rect(0, 0, cw, ch))
+	draw.Draw(dst, dst.Bounds(), image.NewUniform(color.Black), image.Point{}, draw.Src)
+	for i, s := range screens {
+		if i >= len(imgs) || imgs[i] == nil || s.Width <= 0 || s.Height <= 0 {
+			continue
+		}
+		x := int(math.Round(float64(s.X-minX) * scale))
+		y := int(math.Round(float64(s.Y-minY) * scale))
+		w := max(int(math.Round(float64(s.Width)*scale)), 1)
+		h := max(int(math.Round(float64(s.Height)*scale)), 1)
+		if x < 0 {
+			x = 0
+		}
+		if y < 0 {
+			y = 0
+		}
+		if x+w > cw {
+			w = cw - x
+		}
+		if y+h > ch {
+			h = ch - y
+		}
+		if w < 1 || h < 1 {
+			continue
+		}
+		src := image.NewRGBA(image.Rect(0, 0, imgs[i].Bounds().Dx(), imgs[i].Bounds().Dy()))
+		draw.Draw(src, src.Bounds(), imgs[i], imgs[i].Bounds().Min, draw.Src)
+		fitted := src
+		if src.Bounds().Dx() != w || src.Bounds().Dy() != h {
+			fitted = resizeBilinear(src, w, h)
+		}
+		draw.Draw(dst, image.Rect(x, y, x+w, y+h), fitted, image.Point{}, draw.Src)
+	}
+	return dst
 }
 
 func encodeJPEG(img image.Image, p displayProfile) ([]byte, error) {

@@ -133,7 +133,7 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 	defer stop()
 	a := &agent{cfg: cfg, conn: conn, term: newTermHub(), display: newDisplayHub(), tun: newTunnelHub()}
 	defer a.term.close("")
-	defer a.display.close()
+	defer a.display.close("")
 	defer a.tun.close("")
 	return true, a.loop(ctx)
 }

@@ -1,5 +1,6 @@
 // @ts-check
 import { $, esc, bytes, api } from "./core.js";
+import { icon } from "./icons.js";
 import { openModal, toggleFullscreen } from "./ui.js";
 
 /** @typedef {{ index: number, name: string, x: number, y: number, width: number, height: number, primary?: boolean }} Screen */
@@ -16,7 +17,7 @@ export async function openScreen(s) {
   let frames = 0;
   /** @type {Screen[]} */
   let screens = [];
-  let cur = 0, failed = false;
+  let cur = 0, confirmed = 0, failed = false;
   let quality = localStorage.getItem(QKEY) || "auto";
   /** "" until the agent reports quality profiles (older agents have none) */
   let qSupported = "";
@@ -36,17 +37,21 @@ export async function openScreen(s) {
     if (!bar) return;
     bar.hidden = screens.length < 2 && !qSupported;
     if (bar.hidden) return;
-    bar.innerHTML = (screens.length > 1 ? `<div class="seg" id="scrSeg">${screens.map((sc) => `<button type="button" data-i="${sc.index}" class="${sc.index === cur ? "on" : ""}" title="${sc.x}, ${sc.y} · 按 ${sc.index + 1} 切换">
-      <b>${sc.index + 1}</b> ${esc(sc.name || "屏幕")}${sc.primary ? "（主屏）" : ""}<span class="faint"> ${sc.width}×${sc.height}</span></button>`).join("")}</div>` : "<span></span>") +
+    const arranged = cur < 0;
+    bar.innerHTML = (screens.length > 1 ? `<div class="seg" id="scrSeg">${screens.map((sc) => `<button type="button" data-i="${sc.index}" class="${!arranged && sc.index === cur ? "on" : ""}" title="${sc.x}, ${sc.y} · 按 ${sc.index + 1} 切换">
+      <b>${sc.index + 1}</b> ${esc(sc.name || "屏幕")}${sc.primary ? "（主屏）" : ""}<span class="faint"> ${sc.width}×${sc.height}</span></button>`).join("")}
+      <button type="button" data-i="-1" class="icon ${arranged ? "on" : ""}" title="按各屏幕在桌面上的位置同时显示">${icon("gallery-thumbnails")}全部显示器</button></div>` : "<span></span>") +
       (qSupported ? `<div class="seg" id="qSeg">${QUALITIES.map(([k, n, tip]) => `<button type="button" data-q="${k}" class="${k === quality ? "on" : ""}" title="${tip}">${n}</button>`).join("")}</div>` : "");
     bar.querySelectorAll("#scrSeg button").forEach((b) => b.addEventListener("click", () => pick(Number(b.dataset.i))));
     bar.querySelectorAll("#qSeg button").forEach((b) => b.addEventListener("click", () => setQuality(b.dataset.q || "auto")));
   };
   /** @param {number} i */
   const pick = (i) => {
-    if (i === cur || !ws || ws.readyState !== 1) return;
-    cur = i;
-    renderBar();
+    if (!ws || ws.readyState !== 1 || Number.isNaN(i)) return;
+    // Send even when this button is already highlighted. The picture can still
+    // be the arranged view after a reconnect, and a second click has to be
+    // able to pull the agent back onto this one screen.
+    if (i !== cur) { cur = i; renderBar(); }
     ws.send(JSON.stringify({ type: "screen", screen: i }));
   };
   /** @param {string} q */
@@ -64,10 +69,24 @@ export async function openScreen(s) {
     let m = null;
     if (text.startsWith("{")) { try { m = JSON.parse(text); } catch { m = null; } }
     if (!m) { failed = true; if (box) box.innerHTML = `<div class="msg">${esc(text)}</div>`; return; }
-    if (m.type === "info") { screens = m.screens || []; cur = m.screen || 0; qSupported = m.quality || ""; if (qSupported) quality = qSupported; renderBar(); }
-    else if (m.type === "screen") { cur = m.screen || 0; renderBar(); }
-    else if (m.type === "quality") { quality = m.quality || "auto"; renderBar(); }
-    else if (m.type === "error") alert(m.message);
+    if (m.type === "info") {
+      screens = m.screens || [];
+      cur = typeof m.screen === "number" ? m.screen : 0;
+      confirmed = cur;
+      qSupported = m.quality || "";
+      if (qSupported) quality = qSupported;
+      renderBar();
+    } else if (m.type === "screen") {
+      // A reply for an older click must not move the highlight off the screen
+      // the user picked last.
+      if (typeof m.screen === "number" && m.screen === cur) confirmed = cur;
+      renderBar();
+    } else if (m.type === "quality") { quality = m.quality || "auto"; renderBar(); }
+    else if (m.type === "error") {
+      cur = confirmed;
+      renderBar();
+      alert(m.message);
+    }
   };
 
   /** @type {[number, number][]} arrival time and size of frames in the last 3 s */
@@ -103,8 +122,8 @@ export async function openScreen(s) {
         const ql = QUALITIES.find(([k]) => k === quality);
         if (info) info.textContent = `${el.naturalWidth}×${el.naturalHeight} · ${span ? ((recent.length - 1) / span).toFixed(1) : "—"} fps · ${span ? bytes(sum / span) + "/s" : "—"} · ${bytes(sum / recent.length)}/帧` +
           (qSupported && ql ? ` · ${ql[1]}` : "") +
-          (screens.length > 1 ? ` · 共 ${screens.length} 块屏幕` : "") +
-          (matchMedia("(pointer: coarse)").matches ? " · 横屏查看更清晰" : screens.length > 1 ? " · 数字键切换屏幕，双击画面铺满页面" : " · 双击画面铺满页面");
+          (cur < 0 ? ` · 全部显示器` : screens.length > 1 ? ` · 共 ${screens.length} 块屏幕` : "") +
+          (matchMedia("(pointer: coarse)").matches ? " · 横屏查看更清晰" : screens.length > 1 ? " · 数字键切换单屏，双击画面铺满页面" : " · 双击画面铺满页面");
       };
       el.src = next;
       if (url) URL.revokeObjectURL(url);

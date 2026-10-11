@@ -29,7 +29,7 @@ ICONS = [
     # events
     "network", "package", "user", "copy", "check", "circle-arrow-up",
     # plugins
-    "grid-2x2-plus", "globe", "play", "send", "external-link", "camera",
+    "grid-2x2-plus", "globe", "play", "send", "external-link", "camera", "gallery-thumbnails",
 ]
 
 TEMPLATE = """// @ts-check
