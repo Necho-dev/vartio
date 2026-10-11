@@ -5,11 +5,13 @@
 // host picks the agent, so a plugin only ever renders for one agent.
 import { $, app, esc, html, raw, api } from "./core.js";
 import { icon } from "./icons.js";
-import { openDrawer } from "./ui.js";
+import { openDrawer, openModal, closeModal } from "./ui.js";
 
 /**
  * @typedef {{ id: string, hostname?: string, os?: string, version?: string, ready: boolean, missing?: string[] }} PluginAgent
- * @typedef {{ name: string, title: string, version: string, description?: string, primitives: string[], targets?: string[], installed: boolean, ui?: string, agents: PluginAgent[] }} PluginItem
+ * @typedef {{ name: string, title: string, version: string, description?: string, primitives: string[], targets?: string[], installed: boolean, status?: string, error?: string, ui?: string, repo?: string, official?: boolean, origin?: string, agents: PluginAgent[] }} PluginItem
+ * @typedef {{ id: string, name: string, url: string, plugins: number, error?: string }} PluginRepo
+ * @typedef {{ official?: { name: string }, repos: PluginRepo[], manual: { name: string, git: string }[] }} PluginSources
  * @typedef {{ name: string, agent: string, embedded: boolean, params: URLSearchParams,
  *   api: (path: string, opts?: any) => Promise<any>, base: string, open: (name: string, params?: Record<string, string>) => void }} PluginCtx
  */
@@ -38,50 +40,292 @@ export function pluginHref(name, params) {
 }
 
 // ---------- plugin center ----------
-export async function pluginCenter() {
-  app.innerHTML = html`<a class="back" href="#/">${raw(icon("arrow-left"))}返回全部主机</a>
-    <section class="card"><div class="card-head"><div><h2>插件中心</h2><p>插件运行在 Hub 上，经探针的通用能力（隧道、程序查找、读小文件、进程启动、端口监听）操作远端机器；卸载后接口与页面立即停用</p></div></div>
-    <div class="plug-grid" id="plugGrid"><div class="empty">加载中…</div></div></section>`;
-  await drawCenter();
+/** @type {"all" | "installed" | "settings"} */
+let centerTab = "all";
+let centerQuery = "";
+/** @type {PluginItem[]} */
+let catalog = [];
+/** @type {PluginSources} */
+let sources = { repos: [], manual: [] };
+let centerPoll = 0;
+
+function tabFromHash() {
+  const t = new URLSearchParams((location.hash.split("?")[1]) || "").get("tab");
+  return t === "installed" || t === "settings" ? t : "all";
 }
 
-async function drawCenter() {
-  const box = $("#plugGrid");
-  /** @type {PluginItem[]} */
-  let list;
-  try { list = await listPlugins(); } catch (e) {
-    if (box && e.message !== "unauthorized") box.innerHTML = `<div class="empty err">${esc(e.message)}</div>`;
+/** In-page confirm. Resolves true only when the primary button is pressed. */
+function askChoice(/** @type {{ title: string, body: string, ok: string, danger?: boolean }} */ opts) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (/** @type {boolean} */ yes) => {
+      if (settled) return;
+      settled = true;
+      closeModal();
+      resolve(yes);
+    };
+    openModal(opts.title, `<p class="plug-ask">${esc(opts.body)}</p>
+      <div class="form-actions"><button type="button" class="btn" id="plugNo">取消</button>
+      <button type="button" class="btn ${opts.danger ? "danger-solid" : "primary"}" id="plugYes">${esc(opts.ok)}</button></div>`,
+      () => finish(false), { small: true });
+    $("#plugNo").addEventListener("click", () => finish(false));
+    $("#plugYes").addEventListener("click", () => finish(true));
+    $("#plugYes").focus();
+  });
+}
+
+/** In-page notice. Replaces window.alert. */
+function tell(/** @type {string} */ title, /** @type {string} */ body) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      closeModal();
+      resolve(undefined);
+    };
+    openModal(title, `<p class="plug-ask">${esc(body)}</p>
+      <div class="form-actions"><button type="button" class="btn primary" id="plugYes">知道了</button></div>`,
+      finish, { small: true });
+    $("#plugYes").addEventListener("click", finish);
+    $("#plugYes").focus();
+  });
+}
+
+export async function pluginCenter() {
+  clearTimeout(centerPoll);
+  centerTab = tabFromHash();
+  app.innerHTML = html`<a class="back" href="#/">${raw(icon("arrow-left"))}返回全部主机</a>
+    <div class="plug-center">
+      <div class="plug-bar">
+        <div class="seg" id="plugTabs">
+          <button type="button" data-tab="all">${raw(icon("package"))}插件目录</button>
+          <button type="button" data-tab="installed">${raw(icon("check"))}已安装<span class="plug-count" id="plugInstalledN"></span></button>
+          <button type="button" data-tab="settings">${raw(icon("settings"))}设置</button>
+        </div>
+        <div class="plug-tools" id="plugTools">
+          <label class="search">${raw(icon("search"))}<input id="plugQ" placeholder="搜索插件或能力" value="${esc(centerQuery)}" autocomplete="off"></label>
+          <button type="button" class="icon-btn" id="plugRefresh" title="刷新">${raw(icon("refresh-cw"))}</button>
+        </div>
+      </div>
+      <p class="plug-note" id="plugNote">${raw(icon("info"))}插件由独立仓库维护。安装会下载源码并在本机编译后启动；插件本身的问题请到卡片上的仓库入口提交。</p>
+      <div id="plugMain"><div class="empty">加载中…</div></div>
+    </div>`;
+  $("#plugTabs").querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+    centerTab = /** @type {"all" | "installed" | "settings"} */ (/** @type {HTMLElement} */ (b).dataset.tab || "all");
+    const q = centerTab === "all" ? "" : "?tab=" + centerTab;
+    history.replaceState(null, "", "#/plugins" + q);
+    paintCenter();
+    if (centerTab === "settings") drawCenter(true);
+  }));
+  $("#plugQ").addEventListener("input", (/** @type {any} */ e) => { centerQuery = e.target.value; paintCenter(); });
+  $("#plugRefresh").addEventListener("click", () => drawCenter(true));
+  await drawCenter(true);
+}
+
+/** @param {boolean} [reloadSources] */
+async function drawCenter(reloadSources) {
+  clearTimeout(centerPoll);
+  const box = $("#plugMain");
+  if (reloadSources || centerTab === "settings") {
+    try { sources = await api("/plugins/_sources"); } catch (e) {
+      if (e.message === "unauthorized") return;
+      if (centerTab === "settings" && box) box.innerHTML = `<div class="empty err">${esc(e.message)}</div>`;
+    }
+  }
+  try { catalog = await listPlugins(); } catch (e) {
+    if (box && e.message !== "unauthorized" && centerTab !== "settings") box.innerHTML = `<div class="empty err">${esc(e.message)}</div>`;
     return;
   }
   if (!box) return;
-  if (!list.length) { box.innerHTML = `<div class="empty">没有内置插件</div>`; return; }
-  box.innerHTML = list.map((p) => {
-    const n = readyCount(p);
-    return `<article class="plug-card${p.installed ? " on" : ""}" data-name="${esc(p.name)}">
-      <div class="plug-top"><span class="plug-ic">${icon(p.name === "cdp" ? "globe" : "grid-2x2-plus")}</span>
-        <div class="plug-title"><b>${esc(p.title)}</b><span class="faint mono">${esc(p.name)} · v${esc(p.version)}</span></div>
-        <span class="badge ${p.installed ? "up" : ""}">${p.installed ? "已安装" : "未安装"}</span></div>
-      <p class="plug-desc">${esc(p.description || "")}</p>
-      <div class="plug-prims">${p.primitives.map((c) => `<span class="tag" title="${esc(c)}">${esc(PRIM_NAMES[c] || c)}</span>`).join("")}</div>
-      <div class="plug-foot"><span class="faint">${p.agents.length ? `${n} / ${p.agents.length} 台在线探针可用` : "暂无在线探针"}</span>
-        <span class="plug-btns">
-          ${p.installed
-            ? `${p.ui ? `<a class="btn primary sm" href="${pluginHref(p.name)}">${icon("external-link")}打开</a>` : ""}<button class="btn danger sm" data-act="uninstall">卸载</button>`
-            : `<button class="btn primary sm" data-act="install">${icon("plus")}安装</button>`}
-        </span></div>
-      ${p.agents.some((a) => !a.ready) ? `<details class="plug-miss"><summary class="faint">${p.agents.length - n} 台探针缺少所需能力</summary>${p.agents.filter((a) => !a.ready).map((a) => `<div class="faint">${esc(a.hostname || a.id)}（${esc(a.version || "?")}）缺 ${esc((a.missing || []).join("、"))}</div>`).join("")}<div class="faint">升级探针到 1.16.0 或以上</div></details>` : ""}
-    </article>`;
-  }).join("");
-  box.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", async () => {
-    const card = /** @type {HTMLElement} */ (b.closest(".plug-card"));
-    const name = card.dataset.name || "";
-    const on = /** @type {HTMLElement} */ (b).dataset.act === "install";
-    if (!on && !confirm(`卸载插件 ${name}？它的接口与页面会停用，正在进行的连接会被断开。`)) return;
-    /** @type {HTMLButtonElement} */ (b).disabled = true;
+  paintCenter();
+  if (centerTab !== "settings" && catalog.some((p) => p.status === "installing")) centerPoll = window.setTimeout(() => drawCenter(false), 1500);
+}
+
+function paintCenter() {
+  const box = $("#plugMain");
+  const nEl = $("#plugInstalledN");
+  const note = $("#plugNote");
+  if (!box) return;
+  $("#plugTabs").querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", /** @type {HTMLElement} */ (b).dataset.tab === centerTab));
+  const installedN = catalog.filter((p) => p.installed).length;
+  if (nEl) nEl.textContent = installedN ? String(installedN) : "";
+  if (note) note.hidden = centerTab === "settings";
+  if (centerTab === "settings") { paintSettings(box); return; }
+  const q = centerQuery.trim().toLowerCase();
+  const list = catalog.filter((p) => {
+    if (centerTab === "installed" && !p.installed) return false;
+    if (!q) return true;
+    const hay = [p.title, p.name, p.description || "", p.origin || "", ...(p.primitives || []).map((c) => PRIM_NAMES[c] || c)].join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+  if (!catalog.length) { box.innerHTML = `<div class="empty">目录里没有可安装的插件</div>`; return; }
+  if (!list.length) {
+    box.innerHTML = `<div class="empty">${centerTab === "installed" && !q ? "还没有安装插件" : "没有匹配的插件"}</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="plug-grid">${list.map(cardHTML).join("")}</div>`;
+  box.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => onPluginAct(/** @type {HTMLElement} */ (b))));
+  clampTags(box);
+}
+
+/** @param {PluginItem} p */
+function cardHTML(p) {
+  const n = readyCount(p);
+  const badge = p.status === "installing" ? "安装中" : p.status === "error" ? "安装失败" : p.installed ? "已安装" : "";
+  const badgeCls = p.status === "ready" ? "up" : p.status === "error" ? "down" : "";
+  const buttons = p.status === "installing"
+    ? `<button class="btn sm" disabled>安装中…</button>`
+    : p.status === "ready"
+      ? `${p.ui ? `<a class="btn primary sm" href="${pluginHref(p.name)}">${icon("external-link")}打开</a>` : ""}<button class="btn sm" data-act="uninstall">卸载</button>`
+      : `${p.status === "error" ? `<button class="btn sm" data-act="install">重试</button>` : `<button class="btn primary sm" data-act="install">安装</button>`}${p.installed ? `<button class="btn sm" data-act="uninstall">卸载</button>` : ""}`;
+  const repo = p.repo ? `<a class="icon-btn" href="${esc(p.repo)}" target="_blank" rel="noopener" title="GitHub">${icon("github")}</a>` : "";
+  const origin = p.official
+    ? `<span class="plug-official">${icon("badge-check")}Vartio 官方</span>`
+    : `<span class="faint">${esc(p.origin || "自定义")}</span>`;
+  const ver = p.version ? `v${esc(p.version)} · ` : "";
+  return `<article class="plug-card" data-name="${esc(p.name)}">
+    <div class="plug-top"><span class="plug-ic tone-${esc(p.name)}">${icon(p.name === "cdp" ? "globe" : p.name === "bitbrowser" ? "grid-2x2-plus" : "package")}</span>
+      <div class="plug-title"><b>${esc(p.title)}</b>${origin}</div>
+      ${badge ? `<span class="badge ${badgeCls}">${badge}</span>` : ""}
+      ${repo}</div>
+    <div class="plug-prims">${(p.primitives || []).map((c) => `<span class="tag" title="${esc(PRIM_NAMES[c] || c)}">${esc(PRIM_NAMES[c] || c)}</span>`).join("")}</div>
+    <p class="plug-desc" title="${esc(p.description || "")}">${esc(p.description || "")}</p>
+    ${p.error ? `<p class="plug-err">${esc(p.error)}</p>` : ""}
+    <div class="plug-foot"><span class="faint">${ver}${p.agents.length ? `${n} / ${p.agents.length} 台可用` : "暂无在线探针"}</span>
+      <span class="plug-btns">${buttons}</span></div>
+    ${p.agents.some((a) => !a.ready) ? `<details class="plug-miss"><summary class="faint">${p.agents.length - n} 台探针缺少所需能力</summary>${p.agents.filter((a) => !a.ready).map((a) => `<div class="faint">${esc(a.hostname || a.id)}（${esc(a.version || "?")}）缺 ${esc((a.missing || []).join("、"))}</div>`).join("")}<div class="faint">升级探针到 1.16.0 或以上</div></details>` : ""}
+  </article>`;
+}
+
+/** @param {HTMLElement} b */
+async function onPluginAct(b) {
+  const card = /** @type {HTMLElement} */ (b.closest(".plug-card"));
+  const name = card.dataset.name || "";
+  const p = catalog.find((x) => x.name === name);
+  const title = p ? p.title : name;
+  const install = b.dataset.act === "install";
+  const yes = await askChoice(install
+    ? { title: `安装${title}`, body: `将从${p && p.official ? "官方目录" : "插件仓库"}下载「${title}」的源码，在本机编译后启动。第一次安装通常需要一两分钟。`, ok: "安装" }
+    : { title: `卸载${title}`, body: `「${title}」的进程会停掉，已下载的源码和编译结果会被删除，正在进行的连接会被断开。`, ok: "卸载", danger: true });
+  if (!yes) return;
+  b.disabled = true;
+  b.textContent = install ? "安装中…" : "卸载中…";
+  try {
+    await api("/plugins/" + encodeURIComponent(name), { method: install ? "POST" : "DELETE" });
+    await drawCenter();
+  } catch (e) {
+    await tell(install ? "安装失败" : "卸载失败", e.message);
+    await drawCenter();
+  }
+}
+
+/** Keep capability tags on one line; the rest collapse into +N. @param {ParentNode} root */
+function clampTags(root) {
+  root.querySelectorAll(".plug-prims").forEach((row) => {
+    const tags = [...row.querySelectorAll(".tag")];
+    if (!tags.length || row.scrollHeight <= row.clientHeight + 1) return;
+    /** @type {string[]} */
+    const hidden = [];
+    while (tags.length && row.scrollHeight > row.clientHeight + 1) {
+      const last = tags.pop();
+      if (!last) break;
+      hidden.unshift(last.textContent || "");
+      last.remove();
+      let more = row.querySelector(".plug-more");
+      if (!more) {
+        more = document.createElement("span");
+        more.className = "tag plug-more";
+        row.appendChild(more);
+      }
+      more.textContent = "+" + hidden.length;
+      more.title = hidden.join("、");
+    }
+  });
+}
+
+/** @param {HTMLElement} box */
+function paintSettings(box) {
+  const repos = sources.repos || [];
+  const manual = sources.manual || [];
+  box.innerHTML = `<div class="plug-settings">
+    <section class="card plug-set">
+      <h3>${icon("download")}手动安装</h3>
+      <p class="hint">填写插件名和 Git 地址。Hub 会克隆源码并在本机编译，插件名必须和插件自己声明的名字一致。</p>
+      <form class="plug-form" id="plugManual">
+        <input class="input" id="plugManName" placeholder="插件名，如 hello" autocomplete="off" spellcheck="false">
+        <input class="input grow" id="plugManGit" placeholder="git@github.com:org/vartio-plugin-hello.git" autocomplete="off" spellcheck="false">
+        <button class="btn primary" type="submit">安装</button>
+      </form>
+      <div id="plugManualList">${manual.length ? manual.map((m) => `<div class="plug-repo"><div class="grow"><b>${esc(m.name)}</b><span class="faint">${esc(m.git)}</span></div><button class="btn sm" data-drop-manual="${esc(m.name)}">移除</button></div>`).join("") : `<p class="faint">还没有手动安装的插件</p>`}</div>
+    </section>
+    <section class="card plug-set">
+      <h3>${icon("package")}插件仓库</h3>
+      <p class="hint">官方目录随 Hub 发布。添加的目录是一个 catalogVersion 为 1 的 JSON，每条插件给出 Git 地址，而不是安装包。</p>
+      <p class="plug-note plug-warn">${icon("triangle-alert")}自定义仓库和手动安装的插件会在本机编译运行，只应添加自己确认可信的来源。Hub 目前还没有 DBX 那种安装包签名校验。</p>
+      <div class="plug-repo">
+        <div class="grow"><b>Vartio 官方 <span class="plug-official">${icon("badge-check")}官方</span></b><span class="faint">内置目录，随 Hub 发布</span></div>
+        <span class="badge up">已启用</span>
+      </div>
+      ${repos.map((repo) => `<div class="plug-repo"><div class="grow"><b>${esc(repo.name)}</b><span class="faint">${esc(repo.url)}</span>${repo.error ? `<span class="plug-err">${esc(repo.error)}</span>` : `<span class="faint">${repo.plugins} 个插件</span>`}</div><button class="btn sm" data-drop-repo="${esc(repo.id)}">移除</button></div>`).join("")}
+      <form class="plug-form" id="plugRepo">
+        <input class="input" id="plugRepoID" placeholder="仓库 ID" autocomplete="off" spellcheck="false">
+        <input class="input" id="plugRepoName" placeholder="仓库名称" autocomplete="off">
+        <input class="input grow" id="plugRepoURL" placeholder="https://example.com/catalog/index.json" autocomplete="off" spellcheck="false">
+        <button class="btn primary" type="submit">添加仓库</button>
+      </form>
+    </section>
+  </div>`;
+  $("#plugManual").addEventListener("submit", async (/** @type {SubmitEvent} */ e) => {
+    e.preventDefault();
+    const name = $("#plugManName").value.trim();
+    const git = $("#plugManGit").value.trim();
+    if (!name || !git) return;
+    const yes = await askChoice({ title: `安装${name}`, body: `将从 ${git} 克隆源码，在本机编译后启动。请确认这个地址是你信任的仓库。`, ok: "安装" });
+    if (!yes) return;
+    const btn = /** @type {HTMLButtonElement} */ ($("#plugManual button"));
+    btn.disabled = true;
+    btn.textContent = "安装中…";
     try {
-      await api("/plugins/" + encodeURIComponent(name), { method: on ? "POST" : "DELETE" });
-      await drawCenter();
-    } catch (e) { alert(e.message); /** @type {HTMLButtonElement} */ (b).disabled = false; }
+      await api("/plugins/_manual", { method: "POST", json: { name, git } });
+      await drawCenter(true);
+    } catch (err) {
+      await tell("安装失败", err.message);
+      await drawCenter(true);
+    }
+  });
+  $("#plugRepo").addEventListener("submit", async (/** @type {SubmitEvent} */ e) => {
+    e.preventDefault();
+    const id = $("#plugRepoID").value.trim();
+    const name = $("#plugRepoName").value.trim();
+    const url = $("#plugRepoURL").value.trim();
+    if (!id || !name || !url) return;
+    const yes = await askChoice({ title: `添加仓库 ${name}`, body: `Hub 会读取 ${url}，并把其中的插件列进目录。之后的安装仍是克隆 Git 源码并在本机编译。`, ok: "添加" });
+    if (!yes) return;
+    try {
+      sources = await api("/plugins/_sources", { method: "POST", json: { id, name, url } });
+      await drawCenter(true);
+    } catch (err) {
+      await tell("无法添加仓库", err.message);
+    }
+  });
+  box.querySelectorAll("[data-drop-manual]").forEach((b) => b.addEventListener("click", async () => {
+    const name = /** @type {HTMLElement} */ (b).dataset.dropManual || "";
+    const yes = await askChoice({ title: `移除${name}`, body: `「${name}」会从手动安装列表中去掉。如果它正在运行，进程会停掉，已下载的文件会被删除。`, ok: "移除", danger: true });
+    if (!yes) return;
+    try {
+      await api("/plugins/_manual/" + encodeURIComponent(name), { method: "DELETE" });
+      await drawCenter(true);
+    } catch (err) { await tell("移除失败", err.message); }
+  }));
+  box.querySelectorAll("[data-drop-repo]").forEach((b) => b.addEventListener("click", async () => {
+    const id = /** @type {HTMLElement} */ (b).dataset.dropRepo || "";
+    const yes = await askChoice({ title: `移除仓库 ${id}`, body: "目录里来自这个仓库的未安装插件会消失。已经安装的插件会继续运行，直到单独卸载。", ok: "移除", danger: true });
+    if (!yes) return;
+    try {
+      sources = await api("/plugins/_sources/" + encodeURIComponent(id), { method: "DELETE" });
+      await drawCenter(true);
+    } catch (err) { await tell("移除失败", err.message); }
   }));
 }
 

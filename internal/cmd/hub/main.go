@@ -18,8 +18,6 @@ import (
 	"vartio/internal/entities"
 	"vartio/internal/hub"
 	"vartio/internal/hub/plugins"
-	"vartio/internal/hub/plugins/bitbrowser"
-	"vartio/internal/hub/plugins/cdp"
 	"vartio/internal/hub/systems"
 	"vartio/internal/site"
 )
@@ -81,14 +79,11 @@ func main() {
 	go mon.Run(ctx)
 
 	reg := plugins.NewRegistry(h)
-	for _, p := range []plugins.Plugin{bitbrowser.New(), cdp.New()} {
-		if err := reg.Add(ctx, p); err != nil {
-			log.Fatalf("plugins: %v", err)
-		}
-	}
+	reg.Dir = pluginDir()
 	if err := reg.Load(stateFile([]string{"VARTIO_PLUGINS_FILE", "PROBE_HUB_PLUGINS_FILE"}, "vartio.plugins.json", "probe-hub.plugins.json"), splitList(firstEnv("VARTIO_PLUGINS", "PROBE_HUB_PLUGINS"))); err != nil {
 		log.Fatalf("plugins: %v", err)
 	}
+	go reg.Restore(ctx)
 
 	mux := http.NewServeMux()
 	h.RegisterDev(mux)
@@ -121,6 +116,14 @@ func loadEnv() {
 			_ = godotenv.Load(filepath.Join(filepath.Dir(exe), name))
 		}
 	}
+}
+
+// pluginDir is where downloaded plugin repositories are built and kept.
+func pluginDir() string {
+	if d := firstEnv("VARTIO_PLUGIN_DIR"); d != "" {
+		return d
+	}
+	return "vartio-plugins"
 }
 
 // agentDir holds the signed agent builds the hub offers.

@@ -14,5 +14,6 @@ probe-hub.forwards.json
 probe-hub.agents.json
 bin/
 dist/
+vartio-plugins/
 *.exe
 .DS_Store

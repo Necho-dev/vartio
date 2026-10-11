@@ -18,3 +18,5 @@ make vartio-agent
 线上协议没有改：`/v1/probe/*`、Hello 签名 `probe-hub-hello/v1`、发布包签名 `probe-agent|…`、请求头 `X-Guest-*`。已安装的 agent 用远程升级替换二进制；macOS 签名标识、LaunchAgent 标签和 Windows 服务名仍是 `probe-agent`，这样录屏授权和正在跑的服务不会断。
 
 说明见 [supplemental/guides/guest-agent.md](supplemental/guides/guest-agent.md)。
+
+插件不编进 Hub。插件中心从仓库下载源码，在本机编译后启动：`vartio-plugin-chrome-devtools`（插件名 `cdp`）、`vartio-plugin-bitbrowser`。已安装的记录仍在 `probe-hub.plugins.json` / `vartio.plugins.json`，目录是 `vartio-plugins/`（`VARTIO_PLUGIN_DIR` 可改）。

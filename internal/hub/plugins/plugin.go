@@ -9,11 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -82,64 +80,56 @@ type Host interface {
 	Audit(r *http.Request, id, kind, detail string, err error)
 }
 
+// Registry installs plugins by downloading their repositories, building them,
+// and running each one as its own process. A name in the state file is
+// installed, not merely enabled.
 type Registry struct {
-	hub *hub.Hub
+	hub   *hub.Hub
+	Dir   string
+	fetch Fetcher
 
-	mu        sync.Mutex
-	plugins   []*entry
-	statePath string
+	mu           sync.Mutex
+	catalog      []CatalogItem
+	statePath    string
+	wanted       []string
+	manual       []gitEntry
+	repos        []repoEntry
+	pins         []gitEntry
+	remote       []CatalogItem
+	repoProblems map[string]string
+	running      map[string]*proc
+	problems     map[string]string
+	starting     map[string]bool
 }
 
-type entry struct {
-	p         Plugin
-	m         Manifest
-	host      *scopedHost
-	mux       *http.ServeMux
-	installed bool
-}
-
-func NewRegistry(hub *hub.Hub) *Registry {
-	return &Registry{hub: hub}
-}
-
-// Add registers p as installed; Load then applies the persisted state.
-func (r *Registry) Add(ctx context.Context, p Plugin) error {
-	m := p.Manifest()
-	if m.Name == "" || strings.ContainsAny(m.Name, "/ ") {
-		return fmt.Errorf("plugin name %q is invalid", m.Name)
+func NewRegistry(h *hub.Hub) *Registry {
+	return &Registry{
+		hub:          h,
+		Dir:          "vartio-plugins",
+		fetch:        gitFetch{},
+		catalog:      DefaultCatalog(),
+		running:      map[string]*proc{},
+		problems:     map[string]string{},
+		starting:     map[string]bool{},
+		repoProblems: map[string]string{},
 	}
-	if r.find(m.Name) != nil {
-		return fmt.Errorf("plugin %s registered twice", m.Name)
-	}
-	for _, c := range m.Primitives {
-		if _, ok := entities.PrimitiveVersions[c]; !ok {
-			return fmt.Errorf("plugin %s needs unknown primitive %s", m.Name, c)
-		}
-	}
-	h := &scopedHost{hub: r.hub, m: m}
-	if err := p.Init(ctx, h); err != nil {
-		return fmt.Errorf("plugin %s: %w", m.Name, err)
-	}
-	e := &entry{p: p, m: m, host: h, mux: http.NewServeMux(), installed: true}
-	p.Routes(e.mux, PathPrefix+"/"+m.Name)
-	r.mu.Lock()
-	r.plugins = append(r.plugins, e)
-	r.mu.Unlock()
-	return nil
 }
 
 type stateFile struct {
-	Installed []string `json:"installed"`
+	Installed []string    `json:"installed"`
+	Manual    []gitEntry  `json:"manual,omitempty"`
+	Repos     []repoEntry `json:"repos,omitempty"`
+	Pins      []gitEntry  `json:"pins,omitempty"`
 }
 
-// Load makes path the install-state file. Without the file, only defaults
-// are installed.
+// Load reads which plugins are installed. Without the file, defaults is that
+// list (VARTIO_PLUGINS). It does not start them; call Restore.
 func (r *Registry) Load(path string, defaults []string) error {
 	installed := defaults
+	var st stateFile
 	b, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		var st stateFile
 		if err := json.Unmarshal(b, &st); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
@@ -148,81 +138,49 @@ func (r *Registry) Load(path string, defaults []string) error {
 		return err
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.statePath = path
-	for _, e := range r.plugins {
-		e.installed = slices.Contains(installed, e.m.Name)
-	}
-	return nil
-}
-
-func (r *Registry) find(name string) *entry {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, e := range r.plugins {
-		if e.m.Name == name {
-			return e
-		}
-	}
-	return nil
-}
-
-// SetInstalled installs or uninstalls a plugin. Uninstalling closes its
-// tunnels and stops it; routes answer 404 plugin_not_installed afterwards.
-func (r *Registry) SetInstalled(name string, on bool) error {
-	r.mu.Lock()
-	var e *entry
-	for _, x := range r.plugins {
-		if x.m.Name == name {
-			e = x
-		}
-	}
-	if e == nil {
-		r.mu.Unlock()
-		return errNotFound(name)
-	}
-	changed := e.installed != on
-	e.installed = on
-	err := r.saveLocked()
+	r.wanted = append([]string(nil), installed...)
+	r.manual = cleanGit(st.Manual)
+	r.repos = cleanRepos(st.Repos)
+	r.pins = cleanGit(st.Pins)
 	r.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	if changed && !on {
-		r.hub.CloseTunnels("plugin:" + name)
-		if s, ok := e.p.(Stopper); ok {
-			s.Stop()
-		}
-	}
-	if changed {
-		log.Printf("plugin %s installed=%v", name, on)
-	}
 	return nil
 }
 
-func (r *Registry) saveLocked() error {
-	if r.statePath == "" {
-		return nil
-	}
-	st := stateFile{Installed: []string{}}
-	for _, e := range r.plugins {
-		if e.installed {
-			st.Installed = append(st.Installed, e.m.Name)
+func cleanGit(in []gitEntry) []gitEntry {
+	out := make([]gitEntry, 0, len(in))
+	for _, e := range in {
+		if pluginName.MatchString(e.Name) && validateGit(e.Git) == nil {
+			out = append(out, gitEntry{Name: e.Name, Git: strings.TrimSpace(e.Git)})
 		}
 	}
-	b, _ := json.MarshalIndent(st, "", "  ")
-	if dir := filepath.Dir(r.statePath); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+	return out
+}
+
+func cleanRepos(in []repoEntry) []repoEntry {
+	out := make([]repoEntry, 0, len(in))
+	seen := map[string]bool{}
+	for _, e := range in {
+		e.ID, e.Name, e.URL = strings.TrimSpace(e.ID), strings.TrimSpace(e.Name), strings.TrimSpace(e.URL)
+		if seen[e.ID] || !repoID.MatchString(e.ID) || e.Name == "" {
+			continue
+		}
+		if _, err := validateCatalogURL(e.URL); err != nil {
+			continue
+		}
+		seen[e.ID] = true
+		out = append(out, e)
 	}
-	tmp := r.statePath + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.statePath)
+	return out
 }
 
 func (r *Registry) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathPrefix, r.handleList)
+	mux.HandleFunc("GET "+PathPrefix+"/_sources", r.handleSources)
+	mux.HandleFunc("POST "+PathPrefix+"/_sources", r.handleAddRepo)
+	mux.HandleFunc("DELETE "+PathPrefix+"/_sources/{id}", r.handleDelRepo)
+	mux.HandleFunc("POST "+PathPrefix+"/_manual", r.handleAddManual)
+	mux.HandleFunc("DELETE "+PathPrefix+"/_manual/{name}", r.handleDelManual)
 	mux.HandleFunc("GET "+PathPrefix+"/{name}", r.handleGet)
 	mux.HandleFunc("POST "+PathPrefix+"/{name}", r.handleInstall(true))
 	mux.HandleFunc("DELETE "+PathPrefix+"/{name}", r.handleInstall(false))
@@ -234,40 +192,24 @@ func (r *Registry) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+UIPrefix+"/{name}/{file...}", r.handleUI)
 }
 
-func (r *Registry) live(w http.ResponseWriter, name string) *entry {
-	e := r.find(name)
-	if e == nil {
-		WriteError(w, errNotFound(name))
-		return nil
-	}
-	r.mu.Lock()
-	on := e.installed
-	r.mu.Unlock()
-	if !on {
-		WriteError(w, &common.Error{Status: http.StatusNotFound, Code: "plugin_not_installed", Message: "plugin " + name + " is not installed"})
-		return nil
-	}
-	return e
-}
-
 func (r *Registry) dispatch(w http.ResponseWriter, req *http.Request) {
-	if e := r.live(w, req.PathValue("name")); e != nil {
-		e.mux.ServeHTTP(w, req)
+	p := r.ready(w, req.PathValue("name"))
+	if p != nil {
+		p.proxy.ServeHTTP(w, req)
 	}
 }
 
 func (r *Registry) handleUI(w http.ResponseWriter, req *http.Request) {
-	e := r.live(w, req.PathValue("name"))
-	if e == nil {
+	p := r.ready(w, req.PathValue("name"))
+	if p == nil {
 		return
 	}
-	u, ok := e.p.(UIPlugin)
-	if f := req.PathValue("file"); !ok || f == "" || strings.HasSuffix(f, "/") {
+	if !p.ui {
 		http.NotFound(w, req)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-cache")
-	http.StripPrefix(UIPrefix+"/"+e.m.Name+"/", http.FileServerFS(u.UI())).ServeHTTP(w, req)
+	p.proxy.ServeHTTP(w, req)
 }
 
 // AgentReadiness says whether one online agent has every primitive a plugin needs.
@@ -283,22 +225,64 @@ type AgentReadiness struct {
 type listItem struct {
 	Manifest
 	Installed bool `json:"installed"`
-	// UI is the front-end module URL; empty when the plugin has none.
-	UI     string           `json:"ui,omitempty"`
+	// Status is ready, installing, or error. Empty means not installed.
+	Status string `json:"status,omitempty"`
+	Error  string `json:"error,omitempty"`
+	// UI is the front-end module URL; empty when the plugin has none or is not ready.
+	UI string `json:"ui,omitempty"`
+	// Repo is the plugin's source repository as an https URL.
+	Repo string `json:"repo,omitempty"`
+	// Official is set for plugins shipped with the hub.
+	Official bool `json:"official,omitempty"`
+	// Origin is the catalog label: Vartio 官方, a custom repository name, or 手动安装.
+	Origin string           `json:"origin,omitempty"`
 	Agents []AgentReadiness `json:"agents"`
 }
 
-func (r *Registry) item(e *entry, sessions []entities.SessionInfo) listItem {
+func (r *Registry) item(name string, sessions []entities.SessionInfo) (listItem, bool) {
 	r.mu.Lock()
-	it := listItem{Manifest: e.m, Installed: e.installed, Agents: []AgentReadiness{}}
-	r.mu.Unlock()
-	if _, ok := e.p.(UIPlugin); ok {
-		it.UI = UIPrefix + "/" + e.m.Name + "/index.js"
+	defer r.mu.Unlock()
+	cat, known := r.catalogBy(name)
+	p := r.running[name]
+	wanted := slices.Contains(r.wanted, name)
+	if !known && p == nil && !wanted {
+		return listItem{}, false
+	}
+	m := cat.Manifest
+	if m.Name == "" {
+		m.Name = name
+	}
+	it := listItem{Manifest: m, Installed: wanted, Repo: repoWeb(cat.Git), Official: cat.Official, Origin: cat.Origin, Agents: []AgentReadiness{}}
+	switch {
+	case p != nil:
+		it.Status = "ready"
+		it.Manifest = p.manifest
+		if p.ui {
+			it.UI = UIPrefix + "/" + name + "/index.js"
+		}
+	case r.starting[name]:
+		it.Status = "installing"
+	case r.problems[name] != "":
+		it.Status = "error"
+		it.Error = r.problems[name]
 	}
 	for _, s := range sessions {
-		it.Agents = append(it.Agents, readiness(e.m, s))
+		it.Agents = append(it.Agents, readiness(it.Manifest, s))
 	}
-	return it
+	return it, true
+}
+
+// repoWeb turns git@github.com:org/name.git into an https page.
+func repoWeb(git string) string {
+	const prefix = "git@github.com:"
+	git = strings.TrimSuffix(strings.TrimSpace(git), ".git")
+	if strings.HasPrefix(git, prefix) {
+		return "https://github.com/" + strings.TrimPrefix(git, prefix)
+	}
+	if strings.HasPrefix(git, "https://github.com/") {
+		return git
+	}
+	return ""
 }
 
 func (r *Registry) sessions() []entities.SessionInfo {
@@ -310,32 +294,63 @@ func (r *Registry) sessions() []entities.SessionInfo {
 func (r *Registry) handleList(w http.ResponseWriter, _ *http.Request) {
 	sessions := r.sessions()
 	r.mu.Lock()
-	all := slices.Clone(r.plugins)
+	names := map[string]bool{}
+	for _, c := range r.catalog {
+		names[c.Name] = true
+	}
+	for _, c := range r.manual {
+		names[c.Name] = true
+	}
+	for _, c := range r.remote {
+		names[c.Name] = true
+	}
+	for _, c := range r.pins {
+		names[c.Name] = true
+	}
+	for _, n := range r.wanted {
+		names[n] = true
+	}
 	r.mu.Unlock()
-	out := make([]listItem, 0, len(all))
-	for _, e := range all {
-		out = append(out, r.item(e, sessions))
+	order := make([]string, 0, len(names))
+	for n := range names {
+		order = append(order, n)
+	}
+	sort.Strings(order)
+	out := make([]listItem, 0, len(order))
+	for _, n := range order {
+		if it, ok := r.item(n, sessions); ok {
+			out = append(out, it)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (r *Registry) handleGet(w http.ResponseWriter, req *http.Request) {
-	e := r.find(req.PathValue("name"))
-	if e == nil {
+	it, ok := r.item(req.PathValue("name"), r.sessions())
+	if !ok {
 		WriteError(w, errNotFound(req.PathValue("name")))
 		return
 	}
-	writeJSON(w, http.StatusOK, r.item(e, r.sessions()))
+	writeJSON(w, http.StatusOK, it)
 }
 
 func (r *Registry) handleInstall(on bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		name := req.PathValue("name")
-		if err := r.SetInstalled(name, on); err != nil {
+		ctx, cancel := context.WithTimeout(req.Context(), 10*time.Minute)
+		defer cancel()
+		var err error
+		if on {
+			err = r.Install(ctx, name)
+		} else {
+			err = r.Uninstall(name)
+		}
+		if err != nil {
 			WriteError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, r.item(r.find(name), r.sessions()))
+		it, _ := r.item(name, r.sessions())
+		writeJSON(w, http.StatusOK, it)
 	}
 }
 

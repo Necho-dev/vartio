@@ -4,14 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/fstest"
 
 	"vartio/internal/common"
 	"vartio/internal/entities"
@@ -46,26 +45,6 @@ func TestScopedHostEnforcesManifest(t *testing.T) {
 	}
 }
 
-type stub struct {
-	m       Manifest
-	stopped *bool
-}
-
-func (s stub) Manifest() Manifest               { return s.m }
-func (s stub) Init(context.Context, Host) error { return nil }
-func (s stub) Routes(mux *http.ServeMux, prefix string) {
-	mux.HandleFunc("GET "+prefix+"/ping", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("pong")) })
-	mux.HandleFunc("GET "+PublicPrefix+"/"+s.m.Name+"/open", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("public")) })
-}
-func (s stub) UI() fs.FS {
-	return fstest.MapFS{"index.js": {Data: []byte("export function mount() {}")}}
-}
-func (s stub) Stop() {
-	if s.stopped != nil {
-		*s.stopped = true
-	}
-}
-
 func get(t *testing.T, mux http.Handler, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -73,69 +52,90 @@ func get(t *testing.T, mux http.Handler, method, path string) *httptest.Response
 	return rec
 }
 
-func TestRegistry(t *testing.T) {
+type copyBin struct{ bin string }
+
+func (c copyBin) Fetch(_ context.Context, _ CatalogItem, dest string) (string, error) {
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return "", err
+	}
+	out := filepath.Join(dest, "vartio-plugin")
+	b, err := os.ReadFile(c.bin)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(out, b, 0o755); err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+func TestRegistryDownloadsAndStarts(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "hello")
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd.Dir = "testdata/hello"
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build hello plugin: %v\n%s", err, out)
+	}
+
 	r := NewRegistry(hub.NewHub(""))
-	stopped := false
-	if err := r.Add(context.Background(), stub{m: Manifest{Name: "a", Primitives: []string{entities.CapTunnelTCP}}, stopped: &stopped}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Add(context.Background(), stub{m: Manifest{Name: "a"}}); err == nil {
-		t.Fatal("duplicate name accepted")
-	}
-	if err := r.Add(context.Background(), stub{m: Manifest{Name: "b", Primitives: []string{"warp.drive"}}}); err == nil {
-		t.Fatal("unknown primitive accepted")
-	}
-	state := filepath.Join(t.TempDir(), "plugins.json")
+	r.Dir = filepath.Join(dir, "plugins")
+	r.fetch = copyBin{bin}
+	r.catalog = []CatalogItem{{
+		Name: "hello", Git: "unused",
+		Manifest: Manifest{Name: "hello", Title: "Hello", Version: "0.0.1", Primitives: []string{entities.CapTunnelTCP}},
+	}}
+	state := filepath.Join(dir, "plugins.json")
 	if err := r.Load(state, nil); err != nil {
 		t.Fatal(err)
-	}
-	// Both host page styles: probe-hub's "GET /" and vm-server's "/".
-	for _, root := range []string{"GET /", "/"} {
-		mux := http.NewServeMux()
-		mux.HandleFunc(root, http.NotFound)
-		r.Mount(mux)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", http.NotFound)
 	r.Mount(mux)
 
-	if rec := get(t, mux, http.MethodGet, PathPrefix+"/a/ping"); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "plugin_not_installed") {
-		t.Fatalf("uninstalled route: %d %s", rec.Code, rec.Body.String())
+	var before []listItem
+	if err := json.Unmarshal(get(t, mux, http.MethodGet, PathPrefix).Body.Bytes(), &before); err != nil || len(before) != 1 || before[0].Installed || before[0].Name != "hello" {
+		t.Fatalf("catalog: %+v", before)
 	}
-	if rec := get(t, mux, http.MethodPost, PathPrefix+"/a"); rec.Code != http.StatusOK {
+	if rec := get(t, mux, http.MethodGet, PathPrefix+"/hello/ping"); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "plugin_not_installed") {
+		t.Fatalf("before install: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := get(t, mux, http.MethodPost, PathPrefix+"/hello"); rec.Code != http.StatusOK {
 		t.Fatalf("install: %d %s", rec.Code, rec.Body.String())
 	}
-	if b, _ := os.ReadFile(state); !strings.Contains(string(b), `"a"`) {
+	if b, _ := os.ReadFile(state); !strings.Contains(string(b), `"hello"`) {
 		t.Fatalf("state not saved: %s", b)
 	}
-	for path, want := range map[string]string{PathPrefix + "/a/ping": "pong", PublicPrefix + "/a/open": "public", UIPrefix + "/a/index.js": "export function mount() {}"} {
+	for path, want := range map[string]string{
+		PathPrefix + "/hello/ping":   "pong",
+		UIPrefix + "/hello/index.js": "export function mount() {}",
+	} {
 		if rec := get(t, mux, http.MethodGet, path); rec.Body.String() != want {
 			t.Fatalf("%s: %d %q", path, rec.Code, rec.Body.String())
 		}
 	}
-	var list []listItem
-	if err := json.Unmarshal(get(t, mux, http.MethodGet, PathPrefix).Body.Bytes(), &list); err != nil || len(list) != 1 || !list[0].Installed || list[0].UI != UIPrefix+"/a/index.js" {
-		t.Fatalf("list %+v", list)
-	}
 	if rec := get(t, mux, http.MethodPost, PathPrefix+"/zzz"); rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown plugin: %d", rec.Code)
+		t.Fatalf("unknown plugin: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := get(t, mux, http.MethodDelete, PathPrefix+"/hello"); rec.Code != http.StatusOK {
+		t.Fatalf("uninstall: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := get(t, mux, http.MethodGet, UIPrefix+"/hello/index.js"); rec.Code != http.StatusNotFound {
+		t.Fatalf("UI after uninstall: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(r.Dir, "hello")); !os.IsNotExist(err) {
+		t.Fatalf("plugin dir still there: %v", err)
 	}
 
-	if rec := get(t, mux, http.MethodDelete, PathPrefix+"/a"); rec.Code != http.StatusOK || !stopped {
-		t.Fatalf("uninstall: %d stopped=%v", rec.Code, stopped)
-	}
-	if rec := get(t, mux, http.MethodGet, UIPrefix+"/a/index.js"); rec.Code != http.StatusNotFound {
-		t.Fatalf("UI of uninstalled plugin: %d", rec.Code)
-	}
-
-	// A fresh registry picks the saved state up.
 	r2 := NewRegistry(hub.NewHub(""))
-	_ = r2.Add(context.Background(), stub{m: Manifest{Name: "a"}})
-	if err := r2.Load(state, []string{"a"}); err != nil {
+	if err := r2.Load(state, []string{"hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if r2.find("a").installed {
-		t.Fatal("saved uninstall ignored in favour of defaults")
+	r2.mu.Lock()
+	wanted := append([]string(nil), r2.wanted...)
+	r2.mu.Unlock()
+	if len(wanted) != 0 {
+		t.Fatalf("saved uninstall ignored: %v", wanted)
 	}
 }
 
