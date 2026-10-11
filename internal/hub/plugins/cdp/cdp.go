@@ -28,7 +28,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 	"govmomi-wmks/internal/plugin"
 )
@@ -185,7 +185,7 @@ type browsersResult struct {
 func (p *Plugin) agent(w http.ResponseWriter, r *http.Request) (guest.SessionInfo, bool) {
 	info, ok := p.host.Agent(r.PathValue("id"))
 	if !ok {
-		plugin.WriteError(w, esxi.ErrGuestOffline())
+		plugin.WriteError(w, common.ErrOffline())
 		return info, false
 	}
 	return info, true
@@ -471,7 +471,7 @@ func (p *Plugin) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req launchRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		plugin.WriteError(w, esxi.ErrBad("invalid json"))
+		plugin.WriteError(w, common.ErrBad("invalid json"))
 		return
 	}
 	res, err := p.launch(r, id, info.OS, req)
@@ -499,7 +499,7 @@ func (p *Plugin) launch(r *http.Request, id, goos string, req launchRequest) (la
 			}
 		}
 		if path == "" {
-			return launchResult{}, &esxi.Error{Status: http.StatusNotFound, Code: "browser_not_found", Message: "no installed browser matches " + strconv.Quote(req.Browser)}
+			return launchResult{}, &common.Error{Status: http.StatusNotFound, Code: "browser_not_found", Message: "no installed browser matches " + strconv.Quote(req.Browser)}
 		}
 	}
 	if key == "" {
@@ -507,7 +507,7 @@ func (p *Plugin) launch(r *http.Request, id, goos string, req launchRequest) (la
 	}
 	port := req.Port
 	if port < 0 || port > 65535 {
-		return launchResult{}, esxi.ErrBad("port must be 1-65535")
+		return launchResult{}, common.ErrBad("port must be 1-65535")
 	}
 	if port == 0 {
 		ls, err := p.listeners(ctx, id, nil)
@@ -563,7 +563,7 @@ func (p *Plugin) launch(r *http.Request, id, goos string, req launchRequest) (la
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			res.Endpoint.Port = port
-			return res, &esxi.Error{Status: http.StatusGatewayTimeout, Code: "launch_timeout", Message: fmt.Sprintf(
+			return res, &common.Error{Status: http.StatusGatewayTimeout, Code: "launch_timeout", Message: fmt.Sprintf(
 				"pid %d started but port %d did not answer /json/version within %s; another instance may already use %s (it then ignores the debugging flag)", sp.PID, port, launchWait, dir)}
 		}
 		time.Sleep(400 * time.Millisecond)
@@ -584,7 +584,7 @@ func firstNonEmpty(v ...string) string {
 func portOf(r *http.Request) (int, error) {
 	n, err := strconv.Atoi(r.PathValue("port"))
 	if err != nil || n < 1 || n > 65535 {
-		return 0, esxi.ErrBad("port must be 1-65535")
+		return 0, common.ErrBad("port must be 1-65535")
 	}
 	return n, nil
 }
@@ -634,11 +634,11 @@ func (p *Plugin) handleClose(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) closeBrowser(ctx context.Context, r *http.Request, id string, port int) error {
 	ep, err := p.version(ctx, r, id, "127.0.0.1", port, 5*time.Second)
 	if err != nil {
-		return esxi.ErrBad("port has no /json/version; only browsers started with --remote-debugging-port can be closed here")
+		return common.ErrBad("port has no /json/version; only browsers started with --remote-debugging-port can be closed here")
 	}
 	u, err := url.Parse(ep.LocalWebSocketURL)
 	if err != nil || !strings.HasPrefix(u.Path, "/devtools/browser/") {
-		return esxi.ErrBad("browser did not report a browser-level WebSocket")
+		return common.ErrBad("browser did not report a browser-level WebSocket")
 	}
 	t := target("127.0.0.1", port)
 	d := websocket.Dialer{
@@ -757,7 +757,7 @@ func (p *Plugin) handleDevtools(w http.ResponseWriter, r *http.Request) {
 
 func (p *Plugin) serveWS(w http.ResponseWriter, r *http.Request, t wsTicket) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		plugin.WriteError(w, esxi.ErrBad("expected a WebSocket upgrade"))
+		plugin.WriteError(w, common.ErrBad("expected a WebSocket upgrade"))
 		return
 	}
 	p.host.Audit(r, t.Agent, "connect", fmt.Sprintf("port=%d %s", t.Port, t.Path), nil)
@@ -777,14 +777,14 @@ func (p *Plugin) handleTicket(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
-		plugin.WriteError(w, esxi.ErrBad("invalid json"))
+		plugin.WriteError(w, common.ErrBad("invalid json"))
 		return
 	}
 	if u, err := url.Parse(body.Path); err == nil && u.Scheme != "" {
 		body.Path = u.Path
 	}
 	if !strings.HasPrefix(body.Path, "/devtools/") || strings.Contains(body.Path, "..") {
-		plugin.WriteError(w, esxi.ErrBad("path must be a /devtools/... target path"))
+		plugin.WriteError(w, common.ErrBad("path must be a /devtools/... target path"))
 		return
 	}
 	id, exp := p.tickets.Issue(wsTicket{Agent: r.PathValue("id"), Port: port, Path: body.Path})

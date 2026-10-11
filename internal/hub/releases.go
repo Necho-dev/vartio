@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/release"
 )
 
@@ -90,7 +90,7 @@ func (h *Hub) agentAuthed(w http.ResponseWriter, r *http.Request) bool {
 	if h.agentAuthorized(r).ok() {
 		return true
 	}
-	writeAPIErr(w, &esxi.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "invalid or missing guest token"})
+	writeAPIErr(w, &common.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "invalid or missing guest token"})
 	return false
 }
 
@@ -119,12 +119,12 @@ func (h *Hub) handleAgentDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := h.Releases.Get(r.PathValue("version"))
 	if err != nil {
-		writeAPIErr(w, &esxi.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()})
+		writeAPIErr(w, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()})
 		return
 	}
 	a := m.Find(r.PathValue("os"), r.PathValue("arch"))
 	if a == nil {
-		writeAPIErr(w, &esxi.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no build for this platform"})
+		writeAPIErr(w, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no build for this platform"})
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -215,14 +215,14 @@ func (h *Hub) Upgrade(ctx context.Context, key, version string) (UpgradeResult, 
 		return UpgradeResult{}, err
 	}
 	if s == nil {
-		return UpgradeResult{}, esxi.ErrGuestOffline()
+		return UpgradeResult{}, common.ErrOffline()
 	}
 	id := s.hello.Key()
 	now := time.Now()
 	h.mu.Lock()
 	if p := h.upgrades[id]; p != nil && !upgradeFinal(p.Stage) && time.Since(p.Updated) < 5*time.Minute {
 		h.mu.Unlock()
-		return UpgradeResult{}, &esxi.Error{Status: http.StatusConflict, Code: "upgrade_busy", Message: "该主机已有升级在进行"}
+		return UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "upgrade_busy", Message: "该主机已有升级在进行"}
 	}
 	h.upgrades[id] = &UpgradeProgress{ID: id, From: s.hello.Version, To: version, Stage: UpgradeQueued, Started: now, Updated: now}
 	h.mu.Unlock()
@@ -233,7 +233,7 @@ func (h *Hub) Upgrade(ctx context.Context, key, version string) (UpgradeResult, 
 		}
 		if err != nil {
 			p.Stage, p.Message = UpgradeFailed, err.Error()
-			var api *esxi.Error
+			var api *common.Error
 			if errors.As(err, &api) {
 				p.Message = api.Message
 			}
@@ -248,24 +248,24 @@ func (h *Hub) upgrade(ctx context.Context, s *session, version string) (UpgradeR
 	key := s.hello.Key()
 	hello := s.hello
 	if !hello.Has(CapUpgrade) {
-		return UpgradeResult{}, &esxi.Error{Status: http.StatusConflict, Code: "upgrade_unsupported",
+		return UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "upgrade_unsupported",
 			Message: fmt.Sprintf("agent %s 不支持远程升级，需手动更新一次到支持远程升级的版本", hello.Version)}
 	}
 	var m *release.Manifest
 	var err error
 	if version == "" {
 		if m = h.Releases.Latest(); m == nil {
-			return UpgradeResult{}, &esxi.Error{Status: http.StatusNotFound, Code: "not_found", Message: "hub 上没有已签名的 agent 版本"}
+			return UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: "hub 上没有已签名的 agent 版本"}
 		}
 	} else if m, err = h.Releases.Get(version); err != nil {
-		return UpgradeResult{}, &esxi.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()}
+		return UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()}
 	}
 	if m.Version == hello.Version {
-		return UpgradeResult{}, &esxi.Error{Status: http.StatusConflict, Code: "already_current", Message: "已是 " + m.Version}
+		return UpgradeResult{}, &common.Error{Status: http.StatusConflict, Code: "already_current", Message: "已是 " + m.Version}
 	}
 	a := m.Find(hello.OS, hello.Arch)
 	if a == nil {
-		return UpgradeResult{}, &esxi.Error{Status: http.StatusNotFound, Code: "not_found",
+		return UpgradeResult{}, &common.Error{Status: http.StatusNotFound, Code: "not_found",
 			Message: fmt.Sprintf("%s 没有 %s/%s 的构建", m.Version, hello.OS, hello.Arch)}
 	}
 	h.progress(key, func(p *UpgradeProgress) { p.To, p.Stage, p.Total = m.Version, UpgradeDownload, a.Size })
@@ -278,7 +278,7 @@ func (h *Hub) upgrade(ctx context.Context, s *session, version string) (UpgradeR
 		return UpgradeResult{}, err
 	}
 	if !res.OK {
-		return res, &esxi.Error{Status: http.StatusBadGateway, Code: "upgrade_failed", Message: res.Message}
+		return res, &common.Error{Status: http.StatusBadGateway, Code: "upgrade_failed", Message: res.Message}
 	}
 	return res, nil
 }
@@ -290,7 +290,7 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request) error {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if !confirmed(r, body.Confirm) {
-		return &esxi.Error{Status: http.StatusForbidden, Code: "confirm_required", Message: "upgrade requires confirm=true"}
+		return &common.Error{Status: http.StatusForbidden, Code: "confirm_required", Message: "upgrade requires confirm=true"}
 	}
 	from := h.versionOf(r.PathValue("id"))
 	res, err := h.Upgrade(r.Context(), r.PathValue("id"), body.Version)
@@ -320,7 +320,7 @@ func (h *Hub) handleUpgradeBatch(w http.ResponseWriter, r *http.Request) error {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if !confirmed(r, body.Confirm) {
-		return &esxi.Error{Status: http.StatusForbidden, Code: "confirm_required", Message: "upgrade requires confirm=true"}
+		return &common.Error{Status: http.StatusForbidden, Code: "confirm_required", Message: "upgrade requires confirm=true"}
 	}
 	ids := body.IDs
 	if len(ids) == 0 {
@@ -351,7 +351,7 @@ func (h *Hub) handleUpgradeBatch(w http.ResponseWriter, r *http.Request) error {
 			out[i] = BatchResult{ID: id, OK: err == nil, From: from, To: res.To}
 			if err != nil {
 				out[i].Message = err.Error()
-				var api *esxi.Error
+				var api *common.Error
 				if errors.As(err, &api) {
 					out[i].Message = api.Message
 				}

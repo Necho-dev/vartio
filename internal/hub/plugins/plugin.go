@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 )
 
@@ -243,7 +243,7 @@ func (r *Registry) live(w http.ResponseWriter, name string) *entry {
 	on := e.installed
 	r.mu.Unlock()
 	if !on {
-		WriteError(w, &esxi.Error{Status: http.StatusNotFound, Code: "plugin_not_installed", Message: "plugin " + name + " is not installed"})
+		WriteError(w, &common.Error{Status: http.StatusNotFound, Code: "plugin_not_installed", Message: "plugin " + name + " is not installed"})
 		return nil
 	}
 	return e
@@ -414,11 +414,11 @@ func targetAllowed(allowed []string, target string) bool {
 }
 
 func errForbidden(msg string) error {
-	return &esxi.Error{Status: http.StatusForbidden, Code: "plugin_forbidden", Message: msg}
+	return &common.Error{Status: http.StatusForbidden, Code: "plugin_forbidden", Message: msg}
 }
 
 func errNotFound(name string) error {
-	return &esxi.Error{Status: http.StatusNotFound, Code: "plugin_not_found", Message: "no plugin named " + name}
+	return &common.Error{Status: http.StatusNotFound, Code: "plugin_not_found", Message: "no plugin named " + name}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -433,9 +433,9 @@ func WriteJSON(w http.ResponseWriter, status int, v any) { writeJSON(w, status, 
 
 // WriteError writes err in the shared {code, message} shape.
 func WriteError(w http.ResponseWriter, err error) {
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) {
-		api = &esxi.Error{Status: http.StatusBadGateway, Code: "error", Message: err.Error()}
+		api = &common.Error{Status: http.StatusBadGateway, Code: "error", Message: err.Error()}
 	}
 	writeJSON(w, api.Status, map[string]any{"code": api.Code, "message": api.Message})
 }

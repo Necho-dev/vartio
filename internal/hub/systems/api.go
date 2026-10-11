@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 )
 
@@ -86,7 +86,7 @@ func (m *Monitor) Register(mux *http.ServeMux, authRequired bool) {
 			Tags []string `json:"tags"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeErr(w, esxi.ErrBad("invalid json"))
+			writeErr(w, common.ErrBad("invalid json"))
 			return
 		}
 		sys, err := m.Update(r.Context(), r.PathValue("id"), clientIP(r), body.Name, body.Tags)
@@ -173,7 +173,7 @@ func RequireToken(token string, next http.Handler) http.Handler {
 				got = r.Header.Get("X-Admin-Token")
 			}
 			if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-				writeErr(w, &esxi.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "admin token required"})
+				writeErr(w, &common.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "admin token required"})
 				return
 			}
 		}
@@ -189,13 +189,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeErr(w http.ResponseWriter, err error) {
-	var api *esxi.Error
+	var api *common.Error
 	switch {
 	case errors.As(err, &api):
 	case errors.Is(err, errNotFound):
-		api = &esxi.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()}
+		api = &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: err.Error()}
 	default:
-		api = &esxi.Error{Status: http.StatusInternalServerError, Code: "error", Message: err.Error()}
+		api = &common.Error{Status: http.StatusInternalServerError, Code: "error", Message: err.Error()}
 	}
 	writeJSON(w, api.Status, map[string]string{"code": api.Code, "message": api.Message})
 }

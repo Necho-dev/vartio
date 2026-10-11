@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 // tunnelStall bounds how long a consumer that stopped reading may hold up the
@@ -65,7 +65,7 @@ func (s *session) attachTunnel(id, target, owner string, idle time.Duration) (*t
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.tunnels) >= MaxTunnels {
-		return nil, &esxi.Error{Status: http.StatusConflict, Code: "too_many_tunnels", Message: fmt.Sprintf("at most %d tunnels per guest", MaxTunnels)}
+		return nil, &common.Error{Status: http.StatusConflict, Code: "too_many_tunnels", Message: fmt.Sprintf("at most %d tunnels per guest", MaxTunnels)}
 	}
 	s.tunnels[id] = t
 	return t, nil
@@ -150,7 +150,7 @@ func (t *tunnelSink) run(s *session, p net.Conn) {
 }
 
 func errCapMissing(c string) error {
-	return &esxi.Error{Status: http.StatusConflict, Code: "cap_missing", Message: "agent does not support " + c + "; upgrade the probe agent"}
+	return &common.Error{Status: http.StatusConflict, Code: "cap_missing", Message: "agent does not support " + c + "; upgrade the probe agent"}
 }
 
 // DialTCP opens a TCP connection from the agent to target (host:port as the
@@ -162,7 +162,7 @@ func (h *Hub) DialTCP(ctx context.Context, key, target, owner string) (net.Conn,
 
 func (h *Hub) dialTCP(ctx context.Context, key, target, owner string, idle time.Duration) (net.Conn, error) {
 	if _, _, err := net.SplitHostPort(target); err != nil {
-		return nil, esxi.ErrBad("target must be host:port")
+		return nil, common.ErrBad("target must be host:port")
 	}
 	if err := h.CheckBound(key); err != nil {
 		return nil, err
@@ -172,7 +172,7 @@ func (h *Hub) dialTCP(ctx context.Context, key, target, owner string, idle time.
 		return nil, err
 	}
 	if s == nil {
-		return nil, esxi.ErrGuestOffline()
+		return nil, common.ErrOffline()
 	}
 	if !s.hello.Has(CapTunnelTCP) {
 		return nil, errCapMissing(CapTunnelTCP)
@@ -238,14 +238,14 @@ func (h *Hub) CloseTunnels(owner string) int {
 func (h *Hub) CallPrimitive(ctx context.Context, key, primitive string, params any) (json.RawMessage, error) {
 	method, ok := PrimitiveMethods[primitive]
 	if !ok {
-		return nil, esxi.ErrBad("%s is not an RPC primitive", primitive)
+		return nil, common.ErrBad("%s is not an RPC primitive", primitive)
 	}
 	s, err := h.lookup(key)
 	if err != nil {
 		return nil, err
 	}
 	if s == nil {
-		return nil, esxi.ErrGuestOffline()
+		return nil, common.ErrOffline()
 	}
 	if !s.hello.Has(primitive) {
 		return nil, errCapMissing(primitive)

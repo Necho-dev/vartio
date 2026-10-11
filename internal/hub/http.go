@@ -16,7 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -27,9 +27,9 @@ func writeJSON(w http.ResponseWriter, v any) error {
 }
 
 func writeAPIErr(w http.ResponseWriter, err error) {
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) {
-		api = &esxi.Error{Status: http.StatusBadGateway, Code: "error", Message: err.Error()}
+		api = &common.Error{Status: http.StatusBadGateway, Code: "error", Message: err.Error()}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(api.Status)
@@ -52,7 +52,7 @@ func confirmed(r *http.Request, bodyConfirm bool) bool {
 func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	auth := h.agentAuthorized(r)
 	if !auth.ok() {
-		writeAPIErr(w, &esxi.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "invalid or missing guest token"})
+		writeAPIErr(w, &common.Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "invalid or missing guest token"})
 		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -172,7 +172,7 @@ func (h *Hub) handleSessions(w http.ResponseWriter, r *http.Request) error {
 func (h *Hub) handleSessionInfo(w http.ResponseWriter, r *http.Request) error {
 	info, ok := h.Info(r.PathValue("id"))
 	if !ok {
-		return esxi.ErrGuestOffline()
+		return common.ErrOffline()
 	}
 	return writeJSON(w, info)
 }
@@ -267,7 +267,7 @@ func (h *Hub) handleServicesPost(w http.ResponseWriter, r *http.Request) error {
 func (h *Hub) handleExec(w http.ResponseWriter, r *http.Request) error {
 	var req ExecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		return esxi.ErrBad("invalid json")
+		return common.ErrBad("invalid json")
 	}
 	out, err := h.Exec(r.Context(), r.PathValue("id"), req)
 	detail := execLine(req)
@@ -287,7 +287,7 @@ func (h *Hub) handleExec(w http.ResponseWriter, r *http.Request) error {
 func (h *Hub) handleTerm(w http.ResponseWriter, r *http.Request) error {
 	var target TermOpenRequest
 	if err := json.NewDecoder(r.Body).Decode(&target); err != nil && !errors.Is(err, io.EOF) {
-		return esxi.ErrBad("invalid json")
+		return common.ErrBad("invalid json")
 	}
 	out, err := h.IssueTerm(r.PathValue("id"), target)
 	if err != nil {
@@ -349,7 +349,7 @@ func (h *Hub) handleFilesContent(w http.ResponseWriter, r *http.Request) error {
 func (h *Hub) handleFilesOp(w http.ResponseWriter, r *http.Request) error {
 	var req FilesOpRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return esxi.ErrBad("invalid json")
+		return common.ErrBad("invalid json")
 	}
 	req.Confirm = confirmed(r, req.Confirm)
 	out, err := h.FilesOp(r.Context(), r.PathValue("id"), req)
@@ -377,7 +377,7 @@ func (h *Hub) handleTrashList(w http.ResponseWriter, r *http.Request) error {
 func (h *Hub) handleTrashOp(w http.ResponseWriter, r *http.Request) error {
 	var req TrashRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return esxi.ErrBad("invalid json")
+		return common.ErrBad("invalid json")
 	}
 	req.Confirm = confirmed(r, req.Confirm)
 	out, err := h.Trash(r.Context(), r.PathValue("id"), req)
@@ -400,7 +400,7 @@ func (h *Hub) handleTrashOp(w http.ResponseWriter, r *http.Request) error {
 func (h *Hub) handleFilesPut(w http.ResponseWriter, r *http.Request) error {
 	path := r.URL.Query().Get("path")
 	if path == "" {
-		return esxi.ErrBad("path required")
+		return common.ErrBad("path required")
 	}
 	qConfirm, _ := strconv.ParseBool(r.URL.Query().Get("confirm"))
 	sha := strings.TrimSpace(r.Header.Get("X-Content-SHA256"))

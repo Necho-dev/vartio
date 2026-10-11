@@ -14,7 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 // tunnelAgent answers tunnel.open, echoes bytes upper-cased, closes the tunnel
@@ -116,7 +116,7 @@ func TestTunnelErrors(t *testing.T) {
 	h, conn := tunnelHub(t, "tun-old", nil)
 	go fakeAgent(t, conn, nil)
 	_, err := h.DialTCP(context.Background(), "tun-old", "127.0.0.1:9", "test")
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "cap_missing" {
 		t.Fatalf("old agent: %v", err)
 	}

@@ -11,7 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 func TestHubHealthAndReplaceAndOffline(t *testing.T) {
@@ -73,7 +73,7 @@ func TestHubHealthAndReplaceAndOffline(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected offline")
 	}
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "guest_offline" {
 		t.Fatalf("want guest_offline, got %v", err)
 	}
@@ -114,7 +114,7 @@ func TestHubDeviceIDAndSharedBIOS(t *testing.T) {
 		t.Fatalf("device id should route: %+v %v", got, err)
 	}
 	_, err := h.Health(context.Background(), "same")
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "guest_unbound" {
 		t.Fatalf("shared bios want guest_unbound, got %v", err)
 	}
@@ -136,7 +136,7 @@ func TestDeviceFactsMatches(t *testing.T) {
 func TestHubFilesOffline(t *testing.T) {
 	h := NewHub("")
 	_, err := h.Call(context.Background(), "x", MethodFilesGet, nil)
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "guest_offline" {
 		t.Fatalf("want guest_offline, got %v", err)
 	}
@@ -168,7 +168,7 @@ func TestHubAmbiguous(t *testing.T) {
 	h := NewHub("")
 	h.Ambiguous = func(bios string) bool { return bios == "shared" }
 	_, err := h.Health(context.Background(), "shared")
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "guest_unbound" {
 		t.Fatalf("want guest_unbound, got %v", err)
 	}
@@ -201,7 +201,7 @@ func TestHubTimeout(t *testing.T) {
 func TestConfirmRequired(t *testing.T) {
 	h := NewHub("")
 	_, err := h.Power(context.Background(), "x", "reboot", false)
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "confirm_required" {
 		t.Fatalf("got %v", err)
 	}

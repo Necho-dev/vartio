@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 	"govmomi-wmks/internal/plugin"
 )
@@ -125,7 +125,7 @@ type Status struct {
 func (p *Plugin) handleStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := p.host.Agent(id); !ok {
-		plugin.WriteError(w, esxi.ErrGuestOffline())
+		plugin.WriteError(w, common.ErrOffline())
 		return
 	}
 	st := Status{Agent: id, Target: p.target}
@@ -161,12 +161,12 @@ func (p *Plugin) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 	op := p.ops[r.PathValue("op")]
 	if op == nil {
-		plugin.WriteError(w, &esxi.Error{Status: http.StatusNotFound, Code: "not_found", Message: "unknown operation " + r.PathValue("op")})
+		plugin.WriteError(w, &common.Error{Status: http.StatusNotFound, Code: "not_found", Message: "unknown operation " + r.PathValue("op")})
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
-		plugin.WriteError(w, esxi.ErrBad("read body: %v", err))
+		plugin.WriteError(w, common.ErrBad("read body: %v", err))
 		return
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
@@ -174,7 +174,7 @@ func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	var params map[string]any
 	if err := json.Unmarshal(body, &params); err != nil {
-		plugin.WriteError(w, esxi.ErrBad("body must be a JSON object"))
+		plugin.WriteError(w, common.ErrBad("body must be a JSON object"))
 		return
 	}
 	var missing []string
@@ -184,7 +184,7 @@ func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(missing) > 0 {
-		plugin.WriteError(w, esxi.ErrBad("%s requires %s", op.ID, strings.Join(missing, ", ")))
+		plugin.WriteError(w, common.ErrBad("%s requires %s", op.ID, strings.Join(missing, ", ")))
 		return
 	}
 	p.forward(w, r, op, http.MethodPost, op.Path, "", body)
@@ -193,7 +193,7 @@ func (p *Plugin) handleCall(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
-		plugin.WriteError(w, esxi.ErrBad("read body: %v", err))
+		plugin.WriteError(w, common.ErrBad("read body: %v", err))
 		return
 	}
 	path := "/" + r.PathValue("path")
@@ -204,7 +204,7 @@ func (p *Plugin) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) forward(w http.ResponseWriter, r *http.Request, op *Operation, method, path, query string, body []byte) {
 	id := r.PathValue("id")
 	if op != nil && op.Confirm && !confirmed(r) {
-		plugin.WriteError(w, esxi.RequireConfirm(false))
+		plugin.WriteError(w, common.RequireConfirm(false))
 		return
 	}
 	key := strings.TrimSpace(r.Header.Get("X-Api-Key"))
@@ -240,7 +240,7 @@ func (p *Plugin) send(ctx context.Context, id, method, path, query string, body 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, esxi.ErrBad("%v", err)
+		return 0, nil, common.ErrBad("%v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if key != "" {
@@ -251,12 +251,12 @@ func (p *Plugin) send(ctx context.Context, id, method, path, query string, body 
 		if api := asAPI(err); api != nil {
 			return 0, nil, api
 		}
-		return 0, nil, &esxi.Error{Status: http.StatusBadGateway, Code: "upstream", Message: err.Error()}
+		return 0, nil, &common.Error{Status: http.StatusBadGateway, Code: "upstream", Message: err.Error()}
 	}
 	defer resp.Body.Close()
 	out, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
 	if err != nil {
-		return 0, nil, &esxi.Error{Status: http.StatusBadGateway, Code: "upstream", Message: err.Error()}
+		return 0, nil, &common.Error{Status: http.StatusBadGateway, Code: "upstream", Message: err.Error()}
 	}
 	return resp.StatusCode, out, nil
 }
@@ -301,8 +301,8 @@ func confirmed(r *http.Request) bool {
 	return false
 }
 
-func asAPI(err error) *esxi.Error {
-	var api *esxi.Error
+func asAPI(err error) *common.Error {
+	var api *common.Error
 	if errors.As(err, &api) {
 		return api
 	}

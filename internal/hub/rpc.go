@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 func (h *Hub) Health(ctx context.Context, bios string) (Health, error) {
@@ -28,14 +28,14 @@ func (h *Hub) Metrics(ctx context.Context, bios string) (Metrics, error) {
 func (h *Hub) DockerInspect(ctx context.Context, key, container string) (json.RawMessage, error) {
 	container = strings.TrimSpace(container)
 	if container == "" {
-		return nil, esxi.ErrBad("container required")
+		return nil, common.ErrBad("container required")
 	}
 	s, err := h.lookup(key)
 	if err != nil {
 		return nil, err
 	}
 	if s == nil {
-		return nil, esxi.ErrGuestOffline()
+		return nil, common.ErrOffline()
 	}
 	if !s.hello.Has(CapDockerInspect) {
 		return nil, errCapMissing(CapDockerInspect)
@@ -49,7 +49,7 @@ func (h *Hub) dockerReady(key string) (*session, error) {
 		return nil, err
 	}
 	if s == nil {
-		return nil, esxi.ErrGuestOffline()
+		return nil, common.ErrOffline()
 	}
 	if !s.hello.Has(CapDocker) {
 		return nil, errCapMissing(CapDocker)
@@ -61,7 +61,7 @@ func (h *Hub) dockerReady(key string) (*session, error) {
 func (h *Hub) DockerLogs(ctx context.Context, key, container string, tail int, since, until int64) (DockerLogsResult, error) {
 	container = strings.TrimSpace(container)
 	if container == "" {
-		return DockerLogsResult{}, esxi.ErrBad("container required")
+		return DockerLogsResult{}, common.ErrBad("container required")
 	}
 	if _, err := h.dockerReady(key); err != nil {
 		return DockerLogsResult{}, err
@@ -77,7 +77,7 @@ func (h *Hub) DockerLogs(ctx context.Context, key, container string, tail int, s
 func (h *Hub) DockerCompose(ctx context.Context, key, project string) (DockerComposeResult, error) {
 	project = strings.TrimSpace(project)
 	if project == "" {
-		return DockerComposeResult{}, esxi.ErrBad("project required")
+		return DockerComposeResult{}, common.ErrBad("project required")
 	}
 	if _, err := h.dockerReady(key); err != nil {
 		return DockerComposeResult{}, err
@@ -98,16 +98,16 @@ func (h *Hub) Procs(ctx context.Context, bios string) ([]ProcInfo, error) {
 }
 
 func (h *Hub) ProcAction(ctx context.Context, bios, name, action string, confirm bool) (ActionResult, error) {
-	if err := esxi.RequireConfirm(confirm); err != nil {
+	if err := common.RequireConfirm(confirm); err != nil {
 		return ActionResult{}, err
 	}
 	switch action {
 	case "start", "stop", "kill":
 	default:
-		return ActionResult{}, esxi.ErrBad("action must be start, stop, or kill")
+		return ActionResult{}, common.ErrBad("action must be start, stop, or kill")
 	}
 	if name == "" {
-		return ActionResult{}, esxi.ErrBad("name required")
+		return ActionResult{}, common.ErrBad("name required")
 	}
 	raw, err := h.Call(ctx, bios, MethodProcsAction, ActionRequest{Name: name, Action: action})
 	if err != nil {
@@ -125,16 +125,16 @@ func (h *Hub) Services(ctx context.Context, bios string) ([]ServiceInfo, error) 
 }
 
 func (h *Hub) ServiceAction(ctx context.Context, bios, name, action string, confirm bool) (ActionResult, error) {
-	if err := esxi.RequireConfirm(confirm); err != nil {
+	if err := common.RequireConfirm(confirm); err != nil {
 		return ActionResult{}, err
 	}
 	switch action {
 	case "start", "stop", "restart":
 	default:
-		return ActionResult{}, esxi.ErrBad("action must be start, stop, or restart")
+		return ActionResult{}, common.ErrBad("action must be start, stop, or restart")
 	}
 	if name == "" {
-		return ActionResult{}, esxi.ErrBad("name required")
+		return ActionResult{}, common.ErrBad("name required")
 	}
 	raw, err := h.Call(ctx, bios, MethodServicesAction, ActionRequest{Name: name, Action: action})
 	if err != nil {
@@ -145,7 +145,7 @@ func (h *Hub) ServiceAction(ctx context.Context, bios, name, action string, conf
 
 func (h *Hub) Exec(ctx context.Context, bios string, req ExecRequest) (ExecResult, error) {
 	if req.Command == "" {
-		return ExecResult{}, esxi.ErrBad("command required")
+		return ExecResult{}, common.ErrBad("command required")
 	}
 	raw, err := h.Call(ctx, bios, MethodExec, req)
 	if err != nil {
@@ -155,13 +155,13 @@ func (h *Hub) Exec(ctx context.Context, bios string, req ExecRequest) (ExecResul
 }
 
 func (h *Hub) Power(ctx context.Context, bios, action string, confirm bool) (PowerResult, error) {
-	if err := esxi.RequireConfirm(confirm); err != nil {
+	if err := common.RequireConfirm(confirm); err != nil {
 		return PowerResult{}, err
 	}
 	switch action {
 	case "shutdown", "reboot":
 	default:
-		return PowerResult{}, esxi.ErrBad("action must be shutdown or reboot")
+		return PowerResult{}, common.ErrBad("action must be shutdown or reboot")
 	}
 	raw, err := h.Call(ctx, bios, MethodPower, PowerRequest{Action: action})
 	if err != nil {
@@ -187,7 +187,7 @@ func (h *Hub) FilesList(ctx context.Context, bios, path string) (FilesListResult
 
 func (h *Hub) FileStat(ctx context.Context, bios, path string) (FilesGetResult, error) {
 	if path == "" {
-		return FilesGetResult{}, esxi.ErrBad("path required")
+		return FilesGetResult{}, common.ErrBad("path required")
 	}
 	raw, err := h.Call(ctx, bios, MethodFilesGet, FilesGetRequest{Path: path, Stat: true})
 	if err != nil {

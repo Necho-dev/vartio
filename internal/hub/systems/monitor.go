@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 )
 
@@ -752,7 +752,7 @@ func rate(a, b uint64, dt float64) float64 {
 }
 
 func isNotImplemented(err error) bool {
-	var api *esxi.Error
+	var api *common.Error
 	return errors.As(err, &api) && api.Code == "not_implemented"
 }
 
@@ -870,7 +870,7 @@ func (m *Monitor) Delete(ctx context.Context, id string) error {
 		return errNotFound
 	}
 	if m.Hub.Online(key) {
-		return esxi.ErrBad("system is online; stop the agent first")
+		return common.ErrBad("system is online; stop the agent first")
 	}
 	if m.Store != nil {
 		if err := m.Store.Delete(ctx, key); err != nil {

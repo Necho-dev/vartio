@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 // Forward publishes a TCP service on an agent's machine as a port on the hub
@@ -96,7 +96,7 @@ func (f *forward) info(h *Hub) ForwardInfo {
 }
 
 func errPortTaken(format string, args ...any) error {
-	return &esxi.Error{Status: http.StatusConflict, Code: "port_taken", Message: fmt.Sprintf(format, args...)}
+	return &common.Error{Status: http.StatusConflict, Code: "port_taken", Message: fmt.Sprintf(format, args...)}
 }
 
 // portBusy reports whether something on this machine already accepts on
@@ -119,23 +119,23 @@ func normForward(req *ForwardRequest) error {
 	req.Bind = strings.TrimSpace(req.Bind)
 	req.Note = strings.TrimSpace(req.Note)
 	if req.Agent == "" {
-		return esxi.ErrBad("agent is required")
+		return common.ErrBad("agent is required")
 	}
 	if req.Bind == "" {
 		req.Bind = ForwardBinds[0]
 	}
 	if !slices.Contains(ForwardBinds, req.Bind) {
-		return esxi.ErrBad("bind must be one of %s", strings.Join(ForwardBinds, ", "))
+		return common.ErrBad("bind must be one of %s", strings.Join(ForwardBinds, ", "))
 	}
 	if req.Port < 0 || req.Port > 65535 {
-		return esxi.ErrBad("port must be 1-65535, or 0 for any free port")
+		return common.ErrBad("port must be 1-65535, or 0 for any free port")
 	}
 	host, port, err := net.SplitHostPort(req.Target)
 	if err != nil || host == "" {
-		return esxi.ErrBad("target must be host:port, e.g. 127.0.0.1:8080")
+		return common.ErrBad("target must be host:port, e.g. 127.0.0.1:8080")
 	}
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return esxi.ErrBad("target port must be 1-65535")
+		return common.ErrBad("target port must be 1-65535")
 	}
 	if len(req.Note) > 200 {
 		req.Note = req.Note[:200]
@@ -154,7 +154,7 @@ func (h *Hub) AddForward(ctx context.Context, req ForwardRequest) (ForwardInfo, 
 		return ForwardInfo{}, err
 	}
 	if s == nil {
-		return ForwardInfo{}, esxi.ErrGuestOffline()
+		return ForwardInfo{}, common.ErrOffline()
 	}
 	info := s.info()
 	if !s.hello.Has(CapTunnelTCP) {
@@ -182,7 +182,7 @@ func (h *Hub) AddForward(ctx context.Context, req ForwardRequest) (ForwardInfo, 
 	h.fw.mu.Lock()
 	defer h.fw.mu.Unlock()
 	if len(h.fw.list) >= MaxForwards {
-		return ForwardInfo{}, &esxi.Error{Status: http.StatusConflict, Code: "too_many_forwards", Message: fmt.Sprintf("at most %d forwards", MaxForwards)}
+		return ForwardInfo{}, &common.Error{Status: http.StatusConflict, Code: "too_many_forwards", Message: fmt.Sprintf("at most %d forwards", MaxForwards)}
 	}
 	if err := h.portFreeLocked(f.Port); err != nil {
 		return ForwardInfo{}, err
@@ -286,7 +286,7 @@ func (h *Hub) RemoveForward(id string) (Forward, error) {
 	i := slices.IndexFunc(h.fw.list, func(f *forward) bool { return f.ID == id })
 	if i < 0 {
 		h.fw.mu.Unlock()
-		return Forward{}, &esxi.Error{Status: http.StatusNotFound, Code: "forward_not_found", Message: "no forward " + id}
+		return Forward{}, &common.Error{Status: http.StatusNotFound, Code: "forward_not_found", Message: "no forward " + id}
 	}
 	f := h.fw.list[i]
 	h.fw.list = slices.Delete(h.fw.list, i, i+1)
@@ -386,7 +386,7 @@ func (h *Hub) registerForwards(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+PathForwards, h.wrap(func(w http.ResponseWriter, r *http.Request) error {
 		var req ForwardRequest
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-			return esxi.ErrBad("invalid json")
+			return common.ErrBad("invalid json")
 		}
 		out, err := h.AddForward(r.Context(), req)
 		detail := fmt.Sprintf("%s:%d -> %s", out.Bind, out.Port, out.Target)

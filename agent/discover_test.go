@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 )
 
@@ -95,7 +95,7 @@ func TestLivePrimitives(t *testing.T) {
 		t.Fatalf("spawned process did not run: %q", got)
 	}
 	_, err = call[guest.SpawnResult](t, h, "live-prims", guest.CapProcSpawn, guest.SpawnRequest{Path: "/no/such/program"})
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "not_found" {
 		t.Fatalf("missing program: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestLiveSpawnDisabled(t *testing.T) {
 	t.Setenv("GUEST_SPAWN", "off")
 	h, _ := startLiveAgent(t, "live-spawn-off")
 	_, err := h.CallPrimitive(context.Background(), "live-spawn-off", guest.CapProcSpawn, guest.SpawnRequest{Path: "sh"})
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "cap_missing" {
 		t.Fatalf("want cap_missing, got %v", err)
 	}

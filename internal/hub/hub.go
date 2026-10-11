@@ -12,7 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 // Hub holds outbound agent sessions keyed by device id (Hello.Key). Control plane
@@ -114,7 +114,7 @@ func (h *Hub) lookup(key string) (*session, error) {
 			continue
 		}
 		if hit != nil {
-			return nil, esxi.ErrGuestUnbound("biosUuid %q is reported by more than one online agent; use the device id", key)
+			return nil, common.ErrUnbound("biosUuid %q is reported by more than one online agent; use the device id", key)
 		}
 		hit = s
 	}
@@ -221,7 +221,7 @@ func (h *Hub) audit(key, kind, detail, actor string, err error) {
 
 func (h *Hub) CheckBound(biosUUID string) error {
 	if h.Ambiguous != nil && h.Ambiguous(biosUUID) {
-		return esxi.ErrGuestUnbound("guest agent biosUuid %q is unbound or ambiguous; use display name or moref", biosUUID)
+		return common.ErrUnbound("guest agent biosUuid %q is unbound or ambiguous; use display name or moref", biosUUID)
 	}
 	return nil
 }
@@ -235,7 +235,7 @@ func (h *Hub) Call(ctx context.Context, key, method string, params any) (json.Ra
 		return nil, err
 	}
 	if s == nil {
-		return nil, esxi.ErrGuestOffline()
+		return nil, common.ErrOffline()
 	}
 	execSec := 0
 	if req, ok := params.(ExecRequest); ok {
@@ -267,10 +267,10 @@ func (h *Hub) IssueTerm(key string, target TermOpenRequest) (map[string]string, 
 		target = TermOpenRequest{}
 	case TermLogs, TermExec:
 		if target.Container == "" {
-			return nil, esxi.ErrBad("container required")
+			return nil, common.ErrBad("container required")
 		}
 	default:
-		return nil, esxi.ErrBad("mode must be logs or exec")
+		return nil, common.ErrBad("mode must be logs or exec")
 	}
 	return h.issueStream(key, "term", PathTermWS, "open in a browser; one-shot, expires in 2 minutes. view/type shell only. ESXi WSS is never used.", func(s *session) (TermOpenRequest, error) {
 		switch {
@@ -278,7 +278,7 @@ func (h *Hub) IssueTerm(key string, target TermOpenRequest) (map[string]string, 
 		case !s.hello.Has(CapDocker):
 			return target, errCapMissing(CapDocker)
 		case target.Mode == TermExec && !s.hello.Has(CapDockerExec):
-			return target, &esxi.Error{Status: http.StatusForbidden, Code: "agent_policy", Message: "探针未开放容器终端（需 GUEST_DOCKER=rw）"}
+			return target, &common.Error{Status: http.StatusForbidden, Code: "agent_policy", Message: "探针未开放容器终端（需 GUEST_DOCKER=rw）"}
 		}
 		return target, nil
 	})
@@ -297,7 +297,7 @@ func (h *Hub) issueStream(key, kind, path, note string, check func(*session) (Te
 		return nil, err
 	}
 	if s == nil {
-		return nil, esxi.ErrGuestOffline()
+		return nil, common.ErrOffline()
 	}
 	var target TermOpenRequest
 	if check != nil {

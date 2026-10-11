@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 var errOffline = errors.New("guest agent not connected")
@@ -30,10 +30,10 @@ func APIError(err error) error {
 		return nil
 	}
 	if errors.Is(err, errOffline) {
-		return esxi.ErrGuestOffline()
+		return common.ErrOffline()
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return &esxi.Error{Status: http.StatusGatewayTimeout, Code: "timeout", Message: "guest rpc timeout"}
+		return &common.Error{Status: http.StatusGatewayTimeout, Code: "timeout", Message: "guest rpc timeout"}
 	}
 	var rpc *RPCError
 	if errors.As(err, &rpc) {
@@ -56,7 +56,7 @@ func APIError(err error) error {
 		case "confirm_required":
 			status = http.StatusForbidden
 		}
-		return &esxi.Error{Status: status, Code: rpc.Code, Message: rpc.Message}
+		return &common.Error{Status: status, Code: rpc.Code, Message: rpc.Message}
 	}
-	return &esxi.Error{Status: http.StatusBadGateway, Code: "guest_rpc", Message: err.Error()}
+	return &common.Error{Status: http.StatusBadGateway, Code: "guest_rpc", Message: err.Error()}
 }

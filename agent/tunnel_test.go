@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 )
 
@@ -153,7 +153,7 @@ func TestLiveTunnelHTTP(t *testing.T) {
 	}
 
 	_, err = h.DialTCP(context.Background(), "live-tunnel", "10.255.255.1:80", "test")
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "agent_policy" || api.Status != http.StatusForbidden {
 		t.Fatalf("non-loopback target: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestLiveTunnelDisabled(t *testing.T) {
 	t.Setenv("GUEST_TUNNEL_ALLOW", "off")
 	h, _ := startLiveAgent(t, "live-tunnel-off")
 	_, err := h.DialTCP(context.Background(), "live-tunnel-off", "127.0.0.1:54345", "test")
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "cap_missing" {
 		t.Fatalf("want cap_missing, got %v", err)
 	}

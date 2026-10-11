@@ -13,7 +13,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 )
 
@@ -35,7 +35,7 @@ func TestTargetAllowed(t *testing.T) {
 func TestScopedHostEnforcesManifest(t *testing.T) {
 	h := &scopedHost{hub: guest.NewHub(""), m: Manifest{Name: "x", Primitives: []string{guest.CapTunnelTCP}, Targets: []string{"127.0.0.1:1"}}}
 	_, err := h.DialTCP(context.Background(), "a", "127.0.0.1:2")
-	var api *esxi.Error
+	var api *common.Error
 	if !errors.As(err, &api) || api.Code != "plugin_forbidden" {
 		t.Fatalf("undeclared target: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestRegistry(t *testing.T) {
 
 func TestScopedHostCall(t *testing.T) {
 	h := &scopedHost{hub: guest.NewHub(""), m: Manifest{Name: "x", Primitives: []string{guest.CapFsWhich}}}
-	var api *esxi.Error
+	var api *common.Error
 	if _, err := h.Call(context.Background(), "a", guest.CapProcSpawn, nil); !errors.As(err, &api) || api.Code != "plugin_forbidden" {
 		t.Fatalf("undeclared primitive: %v", err)
 	}

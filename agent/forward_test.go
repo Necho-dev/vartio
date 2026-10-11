@@ -17,7 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 	"govmomi-wmks/internal/guest"
 )
 
@@ -82,7 +82,7 @@ func TestLiveForward(t *testing.T) {
 		t.Fatalf("stats %+v", got)
 	}
 
-	var api *esxi.Error
+	var api *common.Error
 	_, err = h.AddForward(ctx, guest.ForwardRequest{Agent: "live-forward", Target: target, Port: f.Port})
 	if !errors.As(err, &api) || api.Code != "port_taken" || api.Status != http.StatusConflict {
 		t.Fatalf("duplicate port: %v", err)

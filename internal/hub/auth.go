@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 // Auth adds two things on top of the shared GUEST_TOKEN:
@@ -296,10 +296,10 @@ func (h *Hub) handleCredentialReset(w http.ResponseWriter, r *http.Request) erro
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if !confirmed(r, body.Confirm) {
-		return &esxi.Error{Status: http.StatusForbidden, Code: "confirm_required", Message: "credential reset requires confirm=true"}
+		return &common.Error{Status: http.StatusForbidden, Code: "confirm_required", Message: "credential reset requires confirm=true"}
 	}
 	if h.Auth == nil {
-		return &esxi.Error{Status: http.StatusConflict, Code: "auth_disabled", Message: "hub has no device credentials"}
+		return &common.Error{Status: http.StatusConflict, Code: "auth_disabled", Message: "hub has no device credentials"}
 	}
 	key := normUUID(r.PathValue("id"))
 	removed := h.Auth.Forget(key)

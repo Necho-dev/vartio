@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 func (h *Hub) CollectFile(ctx context.Context, bios, path string, max int64) ([]byte, FilesGetResult, error) {
@@ -20,13 +20,13 @@ func (h *Hub) CollectFile(ctx context.Context, bios, path string, max int64) ([]
 		return nil, FilesGetResult{}, err
 	}
 	if st.IsDir {
-		return nil, st, esxi.ErrBad("path is a directory")
+		return nil, st, common.ErrBad("path is a directory")
 	}
 	if max > 0 && st.Size > max {
 		return nil, st, nil
 	}
 	if st.Size > FileMaxBytes {
-		return nil, st, esxi.ErrTooLarge("file exceeds %d bytes", FileMaxBytes)
+		return nil, st, common.ErrTooLarge("file exceeds %d bytes", FileMaxBytes)
 	}
 	var buf []byte
 	var offset int64
@@ -54,10 +54,10 @@ func (h *Hub) FilesOp(ctx context.Context, bios string, req FilesOpRequest) (Fil
 	switch req.Op {
 	case FileOpMkdir, FileOpRename, FileOpDelete, FileOpTrash, FileOpZip:
 	default:
-		return FilesOpResult{}, esxi.ErrBad("op must be mkdir, rename, delete, trash, or zip")
+		return FilesOpResult{}, common.ErrBad("op must be mkdir, rename, delete, trash, or zip")
 	}
 	if strings.TrimSpace(req.Path) == "" {
-		return FilesOpResult{}, esxi.ErrBad("path required")
+		return FilesOpResult{}, common.ErrBad("path required")
 	}
 	raw, err := h.Call(ctx, bios, MethodFilesOp, req)
 	if err != nil {
@@ -71,10 +71,10 @@ func (h *Hub) Trash(ctx context.Context, bios string, req TrashRequest) (TrashRe
 	case TrashList, TrashEmpty:
 	case TrashRestore, TrashPurge:
 		if len(req.IDs) == 0 {
-			return TrashResult{}, esxi.ErrBad("ids required")
+			return TrashResult{}, common.ErrBad("ids required")
 		}
 	default:
-		return TrashResult{}, esxi.ErrBad("op must be list, restore, purge, or empty")
+		return TrashResult{}, common.ErrBad("op must be list, restore, purge, or empty")
 	}
 	raw, err := h.Call(ctx, bios, MethodTrash, req)
 	if err != nil {
@@ -87,7 +87,7 @@ func (h *Hub) Trash(ctx context.Context, bios string, req TrashRequest) (TrashRe
 // the temporary archive is removed afterwards.
 func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path string) error {
 	if path == "" {
-		return esxi.ErrBad("path required")
+		return common.ErrBad("path required")
 	}
 	st, err := h.FileStat(ctx, bios, path)
 	if err != nil {
@@ -106,7 +106,7 @@ func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path s
 		return h.WriteFile(w, ctx, bios, z.Path)
 	}
 	if st.Size > FileMaxBytes {
-		return esxi.ErrTooLarge("file exceeds %d bytes", FileMaxBytes)
+		return common.ErrTooLarge("file exceeds %d bytes", FileMaxBytes)
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", contentDisposition(baseName(st.Path)))
@@ -145,10 +145,10 @@ func (h *Hub) WriteFile(w http.ResponseWriter, ctx context.Context, bios, path s
 
 func (h *Hub) ReadFile(ctx context.Context, bios, path string, r io.Reader, size int64, shaHex string, confirm bool) (FilesPutResult, error) {
 	if path == "" {
-		return FilesPutResult{}, esxi.ErrBad("path required")
+		return FilesPutResult{}, common.ErrBad("path required")
 	}
 	if size > FileMaxBytes {
-		return FilesPutResult{}, esxi.ErrTooLarge("upload exceeds %d bytes", FileMaxBytes)
+		return FilesPutResult{}, common.ErrTooLarge("upload exceeds %d bytes", FileMaxBytes)
 	}
 	sum := sha256.New()
 	var offset int64

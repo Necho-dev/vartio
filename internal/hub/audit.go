@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 // record audits an operator action from the probe API. Requests turned away before
@@ -20,7 +20,7 @@ func (h *Hub) Record(r *http.Request, key, kind, detail string, err error) {
 	if h.OnAudit == nil {
 		return
 	}
-	var api *esxi.Error
+	var api *common.Error
 	if errors.As(err, &api) {
 		switch api.Code {
 		case "bad_request", "confirm_required", "guest_offline", "guest_unbound":

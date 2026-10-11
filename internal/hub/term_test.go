@@ -10,7 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"govmomi-wmks/internal/esxi"
+	"govmomi-wmks/internal/common"
 )
 
 func TestIssueTermContainer(t *testing.T) {
@@ -24,7 +24,7 @@ func TestIssueTermContainer(t *testing.T) {
 	waitOnline(t, h, "plain-1")
 
 	code := func(err error) string {
-		var api *esxi.Error
+		var api *common.Error
 		if errors.As(err, &api) {
 			return api.Code
 		}
