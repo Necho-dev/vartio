@@ -28,9 +28,11 @@ func cpuSeconds(p *process.Process) (float64, bool) {
 	return t.User + t.System, true
 }
 
-// listProcs samples CPU time twice so cpuPct is the current share of all cores,
-// not the lifetime average gopsutil reports.
-func listProcs() ([]entities.ProcInfo, error) {
+// listProcsGopsutil samples CPU time twice so cpuPct is the current share of
+// all cores, not the lifetime average gopsutil reports. macOS does not use
+// this path: Status shells out to ps once per process, and Cmdline is a
+// sysctl per process.
+func listProcsGopsutil() ([]entities.ProcInfo, error) {
 	ps, err := process.Processes()
 	if err != nil {
 		return nil, err

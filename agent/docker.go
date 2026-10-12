@@ -76,8 +76,11 @@ type engineInfo struct {
 var engines sync.Map
 
 // docker returns the engine to talk to, or nil when none is configured or found.
+// The macOS binary is the menu-bar host. It does not probe docker.sock or
+// honour DOCKER_HOST: container metrics belong to the agent in the Docker
+// image, which has the engine socket mounted inside the container.
 func docker() *dockerEngine {
-	if dockerMode() == dockerOff {
+	if runtime.GOOS == "darwin" || dockerMode() == dockerOff {
 		return nil
 	}
 	network, addr := dockerAddr()

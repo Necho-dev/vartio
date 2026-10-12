@@ -198,11 +198,11 @@ dist/probe-agent/
 
 ## Docker
 
-agent ≥ 1.17.0 支持两件事：任何平台上的探针都能监控本机的 Docker / Podman 容器；探针本身也可以跑在容器里。hub 也提供镜像。
+agent ≥ 1.17.0 支持两件事：Linux 与 Windows 上的探针可以监控本机的 Docker / Podman 容器；探针本身也可以跑在容器里。macOS 菜单栏探针不访问本机引擎，容器监控只由 Docker 镜像里的探针做。hub 也提供镜像。
 
 ### 容器监控
 
-探针直接调 Docker Engine API（不依赖 docker CLI）。引擎地址按顺序找：`DOCKER_HOST`（`unix://` 或不带 TLS 的 `tcp://`）、`/var/run/docker.sock`、`/run/podman/podman.sock`、`$XDG_RUNTIME_DIR/{docker.sock,podman/podman.sock}`、`~/.docker/run`、`~/.orbstack/run`、`~/.colima/default`、`~/.rd` 下的 `docker.sock`。Windows 不支持 named pipe，需要 `DOCKER_HOST=tcp://…`。
+探针直接调 Docker Engine API（不依赖 docker CLI）。macOS 宿主机不探测 `docker.sock`，也不认 `DOCKER_HOST`。Linux（含跑在 Docker 镜像里的探针）按顺序找：`DOCKER_HOST`（`unix://` 或不带 TLS 的 `tcp://`）、`/var/run/docker.sock`、`/run/podman/podman.sock`、`$XDG_RUNTIME_DIR/{docker.sock,podman/podman.sock}`、`~/.docker/run`、`~/.orbstack/run`、`~/.colima/default`、`~/.rd` 下的 `docker.sock`。Windows 不支持 named pipe，需要 `DOCKER_HOST=tcp://…`。
 
 | `GUEST_DOCKER` | 能力 | 说明 |
 |----------------|------|------|
