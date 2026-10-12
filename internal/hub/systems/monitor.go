@@ -551,7 +551,9 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 	if rtt, ok := m.Hub.RTT(id); ok {
 		latency = rtt
 	}
+	scrubInfo(&met.Info)
 	smp := m.derive(id, met, latency)
+	scrubSample(&smp)
 
 	m.mu.Lock()
 	sys := m.systems[id]

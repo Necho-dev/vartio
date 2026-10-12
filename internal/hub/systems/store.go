@@ -1,6 +1,7 @@
 package systems
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -228,13 +229,47 @@ func (s *Store) Disconnect(ctx context.Context, id string, at time.Time) error {
 
 func (s *Store) AddEvent(ctx context.Context, id string, e Event) error {
 	_, err := s.db.Exec(ctx, `INSERT INTO probe_events (device_id, ts, kind, category, level, ip, agent_version, actor, detail)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, id, e.TS, e.Kind, e.Category, e.Level, e.IP, e.Version, e.Actor, e.Detail)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, id, e.TS, scrub(e.Kind), scrub(e.Category), scrub(e.Level), scrub(e.IP), scrub(e.Version), scrub(e.Actor), scrub(e.Detail))
 	return err
 }
 
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// postgresJSON drops \u0000. PostgreSQL json/jsonb cannot store a null byte,
+// and one such string would otherwise reject the whole metrics sample.
+func postgresJSON(b []byte) []byte {
+	nul := []byte(`\u0000`)
+	if !bytes.Contains(b, nul) {
+		return b
+	}
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); {
+		if i+len(nul) <= len(b) && bytes.Equal(b[i:i+len(nul)], nul) && !jsonEscapePrefixed(b, i) {
+			i += len(nul)
+			continue
+		}
+		out = append(out, b[i])
+		i++
+	}
+	return out
+}
+
+// jsonEscapePrefixed reports whether the backslash at i is itself escaped,
+// so a literal \u0000 typed by a program is left alone.
+func jsonEscapePrefixed(b []byte, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && b[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
+}
+
 func (s *Store) Record(ctx context.Context, id string, info entities.SysInfo, smp Sample) error {
-	infoJSON, _ := json.Marshal(info)
-	latestJSON, _ := json.Marshal(smp)
+	infoJSON := postgresJSON(mustJSON(info))
+	latestJSON := postgresJSON(mustJSON(smp))
 	b := &pgx.Batch{}
 	b.Queue(`UPDATE probe_systems SET info = $2, latest = $3, last_seen = $4, hostname = COALESCE(NULLIF($5, ''), hostname) WHERE device_id = $1`,
 		id, infoJSON, latestJSON, smp.TS, info.HostName)
@@ -248,7 +283,7 @@ func (s *Store) Record(ctx context.Context, id string, info entities.SysInfo, sm
 		for _, d := range smp.Disks {
 			used[d.Mount] = d.Used
 		}
-		parts, _ = json.Marshal(used)
+		parts = postgresJSON(mustJSON(used))
 	}
 	var nics []byte
 	if len(smp.NetNICs) > 0 {
@@ -256,10 +291,10 @@ func (s *Store) Record(ctx context.Context, id string, info entities.SysInfo, sm
 		for _, n := range smp.NetNICs {
 			m[n.Name] = nicPoint{Rx: n.RxBps, Tx: n.TxBps, Rb: n.RxBytes, Tb: n.TxBytes}
 		}
-		nics, _ = json.Marshal(m)
+		nics = postgresJSON(mustJSON(m))
 	}
-	gpuJSON := gpuUtilsJSON(smp.GPUs)
-	tempJSON := tempSensorsJSON(smp.Temps)
+	gpuJSON := postgresJSON(gpuUtilsJSON(smp.GPUs))
+	tempJSON := postgresJSON(tempSensorsJSON(smp.Temps))
 	var estab, tw, listen, cTCP, cUDP, cOther *int
 	if t := smp.TCP; t != nil {
 		estab, tw, listen = &t.Established, &t.TimeWait, &t.Listen

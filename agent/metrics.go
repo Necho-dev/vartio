@@ -22,35 +22,63 @@ import (
 
 const maxTemps = 12
 
-var sysInfoOnce struct {
-	sync.Once
-	v entities.SysInfo
-}
-
+// staticInfo is read on every sample. A long-lived cache was observed to lose
+// the first byte of platform and CPU model (replaced by NUL) while the process
+// kept running, which then made PostgreSQL reject the sample.
 func staticInfo() entities.SysInfo {
-	sysInfoOnce.Do(func() {
-		v := entities.SysInfo{HostName: hostname(), OS: runtime.GOOS, Arch: runtime.GOARCH}
-		if hi, err := host.Info(); err == nil {
-			v.Platform = hi.Platform
-			v.PlatformVersion = hi.PlatformVersion
-			v.Kernel = hi.KernelVersion
-			if hi.KernelArch != "" {
-				v.Arch = hi.KernelArch
-			}
-		}
-		if info, err := cpu.Info(); err == nil && len(info) > 0 {
-			v.CPUModel = strings.TrimSpace(info[0].ModelName)
-		}
-		v.Vendor, v.Product, v.Virt = virtualization()
-		v.Cores, _ = cpu.Counts(false)
-		v.Threads, _ = cpu.Counts(true)
-		sysInfoOnce.v = v
-	})
-	v := sysInfoOnce.v
+	v := readStaticInfo()
+	if identitySmashed(v) {
+		v = readStaticInfo()
+	}
+	v.HostName = scrubNUL(v.HostName)
+	v.Platform = scrubNUL(v.Platform)
+	v.PlatformVersion = scrubNUL(v.PlatformVersion)
+	v.Kernel = scrubNUL(v.Kernel)
+	v.Arch = scrubNUL(v.Arch)
+	v.CPUModel = scrubNUL(v.CPUModel)
+	v.Vendor = scrubNUL(v.Vendor)
+	v.Product = scrubNUL(v.Product)
+	v.Virt = scrubNUL(v.Virt)
 	v.HostName = hostname()
 	if bt, err := host.BootTime(); err == nil {
 		v.BootTime = int64(bt)
 	}
+	return v
+}
+
+func identitySmashed(v entities.SysInfo) bool {
+	for _, s := range []string{v.Platform, v.PlatformVersion, v.Kernel, v.CPUModel, v.Product, v.Vendor} {
+		if strings.IndexByte(s, 0) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func scrubNUL(s string) string {
+	if strings.IndexByte(s, 0) < 0 {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
+func readStaticInfo() entities.SysInfo {
+	v := entities.SysInfo{HostName: hostname(), OS: runtime.GOOS, Arch: runtime.GOARCH}
+	if hi, err := host.Info(); err == nil {
+		v.Platform = strings.Clone(hi.Platform)
+		v.PlatformVersion = strings.Clone(hi.PlatformVersion)
+		v.Kernel = strings.Clone(hi.KernelVersion)
+		if hi.KernelArch != "" {
+			v.Arch = strings.Clone(hi.KernelArch)
+		}
+	}
+	if info, err := cpu.Info(); err == nil && len(info) > 0 {
+		v.CPUModel = strings.Clone(strings.TrimSpace(info[0].ModelName))
+	}
+	vendor, product, virt := virtualization()
+	v.Vendor, v.Product, v.Virt = strings.Clone(vendor), strings.Clone(product), strings.Clone(virt)
+	v.Cores, _ = cpu.Counts(false)
+	v.Threads, _ = cpu.Counts(true)
 	return v
 }
 
@@ -75,7 +103,7 @@ func collectMetrics() entities.Metrics {
 func collectSnapshot() entities.Metrics {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	out := entities.Metrics{TimeMs: time.Now().UnixMilli(), Info: staticInfo()}
+	out := entities.Metrics{TimeMs: time.Now().UnixMilli()}
 	var containers chan *entities.DockerInfo
 	if docker() != nil {
 		containers = make(chan *entities.DockerInfo, 1)
@@ -113,6 +141,9 @@ func collectSnapshot() entities.Metrics {
 	if containers != nil {
 		out.Docker = <-containers
 	}
+	// Identity is read after the native collectors. A smashed cached string
+	// must not be what this sample sends.
+	out.Info = staticInfo()
 	return out
 }
 
