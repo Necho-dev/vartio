@@ -87,6 +87,7 @@ type Registry struct {
 	repos        []repoEntry
 	pins         []pinEntry
 	keys         map[string][]byte
+	configs      []configEntry
 	remote       []CatalogItem
 	repoProblems map[string]string
 	running      map[string]*proc
@@ -114,6 +115,7 @@ type stateFile struct {
 	Manual    []manualEntry `json:"manual,omitempty"`
 	Repos     []repoEntry   `json:"repos,omitempty"`
 	Pins      []pinEntry    `json:"pins,omitempty"`
+	Configs   []configEntry `json:"configs,omitempty"`
 }
 
 // Load reads which plugins are installed. Without the file, defaults is that
@@ -137,6 +139,7 @@ func (r *Registry) Load(path string, defaults []string) error {
 	r.repos = r.keepRepos(cleanRepos(st.Repos))
 	r.manual = r.keepManual(cleanManual(st.Manual))
 	r.pins = cleanPins(st.Pins)
+	r.configs = cleanConfigs(st.Configs)
 	r.mu.Unlock()
 	return nil
 }
@@ -234,6 +237,8 @@ func (r *Registry) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE "+PathPrefix+"/_sources/{id}", r.handleDelRepo)
 	mux.HandleFunc("POST "+PathPrefix+"/_manual", r.handleAddManual)
 	mux.HandleFunc("DELETE "+PathPrefix+"/_manual/{name}", r.handleDelManual)
+	mux.HandleFunc("GET "+PathPrefix+"/{name}/config", r.handleGetConfig)
+	mux.HandleFunc("PUT "+PathPrefix+"/{name}/config", r.handlePutConfig)
 	mux.HandleFunc("GET "+PathPrefix+"/{name}", r.handleGet)
 	mux.HandleFunc("POST "+PathPrefix+"/{name}", r.handleInstall(true))
 	mux.HandleFunc("DELETE "+PathPrefix+"/{name}", r.handleInstall(false))
@@ -270,6 +275,7 @@ type AgentReadiness struct {
 	ID       string   `json:"id"`
 	HostName string   `json:"hostname,omitempty"`
 	OS       string   `json:"os,omitempty"`
+	Runner   string   `json:"runner,omitempty"`
 	Version  string   `json:"version,omitempty"`
 	Ready    bool     `json:"ready"`
 	Missing  []string `json:"missing,omitempty"`
@@ -288,8 +294,13 @@ type listItem struct {
 	// Official is set for plugins shipped with the hub.
 	Official bool `json:"official,omitempty"`
 	// Origin is the catalog label: Vartio 官方, a custom repository name, or 手动安装.
-	Origin string           `json:"origin,omitempty"`
-	Agents []AgentReadiness `json:"agents"`
+	Origin string `json:"origin,omitempty"`
+	// Size is the package size in bytes for this hub's platform.
+	Size int64 `json:"size,omitempty"`
+	// UpdateTo is set when the catalog package differs from the installed pin.
+	UpdateTo   string           `json:"updateTo,omitempty"`
+	UpdateSize int64            `json:"updateSize,omitempty"`
+	Agents     []AgentReadiness `json:"agents"`
 }
 
 func (r *Registry) item(name string, sessions []entities.SessionInfo) (listItem, bool) {
@@ -306,10 +317,21 @@ func (r *Registry) item(name string, sessions []entities.SessionInfo) (listItem,
 		m.Name = name
 	}
 	it := listItem{Manifest: m, Installed: wanted, Repo: repoWeb(m.Source), Official: cat.Official, Origin: cat.Origin, Agents: []AgentReadiness{}}
+	if art, err := pickArtifact(cat); err == nil {
+		it.Size = art.Size
+		if wanted && art.SHA256 != "" && pinSHA(r.pins, name) != art.SHA256 {
+			it.UpdateTo = cat.Version
+			it.UpdateSize = art.Size
+		}
+	}
 	switch {
 	case p != nil:
 		it.Status = "ready"
+		icon := it.Icon
 		it.Manifest = p.manifest
+		if it.Icon == "" {
+			it.Icon = icon
+		}
 		if src := repoWeb(p.manifest.Source); src != "" {
 			it.Repo = src
 		}
@@ -405,12 +427,21 @@ func (r *Registry) handleInstall(on bool) http.HandlerFunc {
 	}
 }
 
+func pinSHA(pins []pinEntry, name string) string {
+	for _, p := range pins {
+		if p.Name == name {
+			return p.SHA256
+		}
+	}
+	return ""
+}
+
 func readiness(m Manifest, s entities.SessionInfo) AgentReadiness {
-	a := AgentReadiness{ID: s.DeviceID, HostName: s.HostName, OS: s.OS, Version: s.Version}
+	a := AgentReadiness{ID: s.DeviceID, HostName: s.HostName, OS: s.OS, Runner: s.Runner, Version: s.Version}
 	if a.ID == "" {
 		a.ID = s.BiosUUID
 	}
-	if !sdk.MachineMatch(m.Machines, s.OS, s.Caps) {
+	if !sdk.MachineMatch(m.Machines, s.OS, s.Runner, s.Caps) {
 		a.Missing = append(a.Missing, "machine")
 	}
 	for _, c := range m.Primitives {
@@ -424,14 +455,15 @@ func readiness(m Manifest, s entities.SessionInfo) AgentReadiness {
 
 // scopedHost enforces the plugin's manifest on every agent operation.
 type scopedHost struct {
-	hub *hub.Hub
-	m   Manifest
+	hub    *hub.Hub
+	m      Manifest
+	values func(agent string) map[string]string
 }
 
 func (h *scopedHost) Agents() []entities.SessionInfo {
 	var out []entities.SessionInfo
 	for _, s := range h.hub.List() {
-		if sdk.MachineMatch(h.m.Machines, s.OS, s.Caps) {
+		if sdk.MachineMatch(h.m.Machines, s.OS, s.Runner, s.Caps) {
 			out = append(out, s)
 		}
 	}
@@ -448,7 +480,7 @@ func (h *scopedHost) allowAgent(id string) error {
 	if !ok || !info.Online {
 		return common.ErrOffline()
 	}
-	if !sdk.MachineMatch(h.m.Machines, info.OS, info.Caps) {
+	if !sdk.MachineMatch(h.m.Machines, info.OS, info.Runner, info.Caps) {
 		return errForbidden(h.m.Name + " is not for this machine")
 	}
 	return nil
@@ -458,7 +490,7 @@ func (h *scopedHost) DialTCP(ctx context.Context, id, target string) (net.Conn, 
 	if !slices.Contains(h.m.Primitives, entities.CapTunnelTCP) {
 		return nil, errForbidden(h.m.Name + " did not declare " + entities.CapTunnelTCP)
 	}
-	if !targetAllowed(h.m.Targets, target) {
+	if !targetAllowed(h.m.Targets, target) && !h.configuredPort(id, target) {
 		return nil, errForbidden(h.m.Name + " may not dial " + target)
 	}
 	if err := h.allowAgent(id); err != nil {
@@ -492,6 +524,18 @@ func (h *scopedHost) Call(ctx context.Context, id, primitive string, params any)
 
 func (h *scopedHost) Audit(r *http.Request, id, kind, detail string, err error) {
 	h.hub.Record(r, id, "plugin."+h.m.Name+"."+kind, detail, err)
+}
+
+// configuredPort allows a loopback dial to the port an admin saved for this agent.
+func (h *scopedHost) configuredPort(agent, target string) bool {
+	if h.values == nil || !portSetting(h.m.Name) {
+		return false
+	}
+	host, port, err := net.SplitHostPort(target)
+	if err != nil || (host != "127.0.0.1" && host != "::1") {
+		return false
+	}
+	return strings.TrimSpace(h.values(agent)["port"]) == port && port != ""
 }
 
 func targetAllowed(allowed []string, target string) bool {

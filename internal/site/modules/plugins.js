@@ -8,8 +8,8 @@ import { icon } from "./icons.js";
 import { openDrawer, openModal, closeModal } from "./ui.js";
 
 /**
- * @typedef {{ id: string, hostname?: string, os?: string, version?: string, ready: boolean, missing?: string[] }} PluginAgent
- * @typedef {{ name: string, title: string, version: string, description?: string, primitives: string[], targets?: string[], machines?: string[], installed: boolean, status?: string, error?: string, ui?: string, repo?: string, official?: boolean, origin?: string, agents: PluginAgent[] }} PluginItem
+ * @typedef {{ id: string, hostname?: string, os?: string, runner?: string, version?: string, ready: boolean, missing?: string[] }} PluginAgent
+ * @typedef {{ name: string, title: string, version: string, description?: string, icon?: string, primitives: string[], targets?: string[], machines?: string[], installed: boolean, status?: string, error?: string, ui?: string, repo?: string, official?: boolean, origin?: string, size?: number, updateTo?: string, updateSize?: number, agents: PluginAgent[] }} PluginItem
  * @typedef {{ id: string, name: string, url: string, keyId?: string, plugins: number, error?: string }} PluginRepo
  * @typedef {{ official?: { name: string }, repos: PluginRepo[], manual: { name: string, url: string, sha256?: string, signingKeyId?: string }[] }} PluginSources
  * @typedef {{ name: string, agent: string, embedded: boolean, params: URLSearchParams,
@@ -19,6 +19,13 @@ import { openDrawer, openModal, closeModal } from "./ui.js";
 const PRIM_NAMES = /** @type {Record<string, string>} */ ({
   "tunnel.tcp": "TCP 隧道", "fs.which": "程序查找", "fs.read": "读小文件", "proc.spawn": "进程启动", "net.listeners": "端口监听",
   machine: "不适用这台机器",
+});
+const PERM_HELP = /** @type {Record<string, string>} */ ({
+  "tunnel.tcp": "经探针连接这台机器上的回环地址",
+  "fs.which": "在探针上查找程序是否存在",
+  "fs.read": "读取探针上的小文件",
+  "proc.spawn": "在探针上启动进程",
+  "net.listeners": "查看探针上正在监听的端口",
 });
 const MACHINE_NAMES = /** @type {Record<string, string>} */ ({
   mac: "Mac", windows: "Windows", linux: "Linux", docker: "Docker", vmware: "VMware",
@@ -52,6 +59,8 @@ let catalog = [];
 /** @type {PluginSources} */
 let sources = { repos: [], manual: [] };
 let centerPoll = 0;
+/** Plugin selected on the installed tab. */
+let manageName = "";
 
 function tabFromHash() {
   const t = new URLSearchParams((location.hash.split("?")[1]) || "").get("tab");
@@ -154,7 +163,7 @@ function paintCenter() {
   $("#plugTabs").querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", /** @type {HTMLElement} */ (b).dataset.tab === centerTab));
   const installedN = catalog.filter((p) => p.installed).length;
   if (nEl) nEl.textContent = installedN ? String(installedN) : "";
-  if (note) note.hidden = centerTab === "settings";
+  if (note) note.hidden = centerTab !== "all";
   if (centerTab === "settings") { paintSettings(box); return; }
   const q = centerQuery.trim().toLowerCase();
   const list = catalog.filter((p) => {
@@ -168,57 +177,221 @@ function paintCenter() {
     box.innerHTML = `<div class="empty">${centerTab === "installed" && !q ? "还没有安装插件" : "没有匹配的插件"}</div>`;
     return;
   }
+  if (centerTab === "installed") { paintInstalled(box, list); return; }
   box.innerHTML = `<div class="plug-grid">${list.map(cardHTML).join("")}</div>`;
   box.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => onPluginAct(/** @type {HTMLElement} */ (b))));
   clampTags(box);
 }
 
 /** @param {PluginItem} p */
-function cardHTML(p) {
-  const n = readyCount(p);
-  const badge = p.status === "installing" ? "安装中" : p.status === "error" ? "安装失败" : p.installed ? "已安装" : "";
-  const badgeCls = p.status === "ready" ? "up" : p.status === "error" ? "down" : "";
-  const buttons = p.status === "installing"
-    ? `<button class="btn sm" disabled>安装中…</button>`
-    : p.status === "ready"
-      ? `${p.ui ? `<a class="btn primary sm" href="${pluginHref(p.name)}">${icon("external-link")}打开</a>` : ""}<button class="btn sm" data-act="uninstall">卸载</button>`
-      : `${p.status === "error" ? `<button class="btn sm" data-act="install">重试</button>` : `<button class="btn primary sm" data-act="install">安装</button>`}${p.installed ? `<button class="btn sm" data-act="uninstall">卸载</button>` : ""}`;
-  const repo = p.repo ? `<a class="icon-btn" href="${esc(p.repo)}" target="_blank" rel="noopener" title="GitHub">${icon("github")}</a>` : "";
-  const origin = p.official
+function plugIcon(p) {
+  const mark = p.icon && p.icon.trim().startsWith("<svg")
+    ? p.icon
+    : icon(p.name === "cdp" ? "globe" : p.name === "bitbrowser" ? "grid-2x2-plus" : "package");
+  return `<span class="plug-ic tone-${esc(p.name)}">${mark}</span>`;
+}
+
+/** @param {number | undefined} n */
+function formatSize(n) {
+  if (!n) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+/** @param {PluginAgent} a */
+function agentKind(a) {
+  if (a.runner === "docker") return "Docker";
+  if (a.os === "darwin") return "Mac";
+  if (a.os === "windows") return "Windows";
+  if (a.os === "linux") return "Linux";
+  return a.os || "";
+}
+
+/** @param {PluginItem} p */
+function originHTML(p) {
+  return p.official
     ? `<span class="plug-official">${icon("badge-check")}Vartio 官方</span>`
     : `<span class="faint">${esc(p.origin || "自定义")}</span>`;
-  const ver = p.version ? `v${esc(p.version)} · ` : "";
+}
+
+/** @param {PluginItem} p */
+function tagsHTML(p) {
   const machines = (p.machines || []).map((c) => `<span class="tag">${esc(MACHINE_NAMES[c] || c)}</span>`).join("");
   const prims = (p.primitives || []).map((c) => `<span class="tag" title="${esc(PRIM_NAMES[c] || c)}">${esc(PRIM_NAMES[c] || c)}</span>`).join("");
-  const blocked = p.agents.filter((a) => !a.ready);
-  const needUpgrade = blocked.some((a) => (a.missing || []).some((c) => c !== "machine"));
+  return machines + prims;
+}
+
+/** Catalog card. Install lives here; uninstall and per-plugin management do not. */
+function cardHTML(/** @type {PluginItem} */ p) {
+  const n = readyCount(p);
+  const repo = p.repo ? `<a class="plug-ext" href="${esc(p.repo)}" target="_blank" rel="noopener" title="仓库">${icon("github")}</a>` : "";
+  const open = p.installed && p.status === "ready" && p.ui
+    ? `<a class="btn sm" href="${pluginHref(p.name)}" title="打开">${icon("external-link")}打开</a>`
+    : "";
+  const action = p.status === "installing"
+    ? `<button class="btn sm" disabled>安装中…</button>`
+    : p.installed
+      ? `${open}<span class="plug-state">已安装</span>`
+      : p.status === "error"
+        ? `<button class="btn sm" data-act="install">重试</button>`
+        : `<button class="btn primary sm" data-act="install">安装</button>`;
+  const ver = p.version ? `v${esc(p.version)}` : "";
+  const size = formatSize(p.size);
+  const avail = p.agents.length ? `${n}/${p.agents.length} 台可用` : "暂无在线探针";
   return `<article class="plug-card" data-name="${esc(p.name)}">
-    <div class="plug-top"><span class="plug-ic tone-${esc(p.name)}">${icon(p.name === "cdp" ? "globe" : p.name === "bitbrowser" ? "grid-2x2-plus" : "package")}</span>
-      <div class="plug-title"><b>${esc(p.title)}</b>${origin}</div>
-      ${badge ? `<span class="badge ${badgeCls}">${badge}</span>` : ""}
+    <div class="plug-top">${plugIcon(p)}
+      <div class="plug-title"><b>${esc(p.title)}</b>${originHTML(p)}</div>
       ${repo}</div>
-    <div class="plug-prims">${machines}${prims}</div>
+    <div class="plug-prims">${tagsHTML(p)}</div>
     <p class="plug-desc" title="${esc(p.description || "")}">${esc(p.description || "")}</p>
-    ${p.error ? `<p class="plug-err">${esc(p.error)}</p>` : ""}
-    <div class="plug-foot"><span class="faint">${ver}${p.agents.length ? `${n} / ${p.agents.length} 台可用` : "暂无在线探针"}</span>
-      <span class="plug-btns">${buttons}</span></div>
-    ${blocked.length ? `<details class="plug-miss"><summary class="faint">${blocked.length} 台探针不可用</summary>${blocked.map((a) => `<div class="faint">${esc(a.hostname || a.id)}（${esc(a.version || "?")}）缺 ${esc((a.missing || []).map((c) => PRIM_NAMES[c] || c).join("、"))}</div>`).join("")}${needUpgrade ? `<div class="faint">升级探针到 1.16.0 或以上</div>` : ""}</details>` : ""}
+    ${p.error && !p.installed ? `<p class="plug-err">${esc(p.error)}</p>` : ""}
+    <div class="plug-foot"><span class="faint">${ver}${size ? " · " + size : ""}${ver || size ? " · " : ""}${avail}</span>
+      <span class="plug-btns">${action}</span></div>
   </article>`;
+}
+
+/** @param {PluginItem[]} list */
+function paintInstalled(/** @type {HTMLElement} */ box, list) {
+  if (!list.some((p) => p.name === manageName)) manageName = list[0] ? list[0].name : "";
+  const current = list.find((p) => p.name === manageName) || list[0];
+  box.innerHTML = `<div class="plug-manage">
+    <div class="plug-side">${list.map((p) => `<button type="button" class="plug-side-item${p.name === current.name ? " on" : ""}" data-manage="${esc(p.name)}">
+      ${plugIcon(p)}<span class="plug-side-meta"><b>${esc(p.title)}</b><span>${esc(sideStatus(p))}</span></span></button>`).join("")}</div>
+    ${detailHTML(current)}
+  </div>`;
+  box.querySelectorAll("[data-manage]").forEach((b) => b.addEventListener("click", () => {
+    manageName = /** @type {HTMLElement} */ (b).dataset.manage || "";
+    paintInstalled(box, list);
+  }));
+  box.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => onPluginAct(/** @type {HTMLElement} */ (b))));
+  void loadConfig(box, current);
+}
+
+/** @param {PluginItem} p */
+function sideStatus(p) {
+  if (p.status === "installing") return "安装中";
+  if (p.status === "error") return "需要处理";
+  return p.version ? "v" + p.version : "已安装";
+}
+
+/** @param {PluginItem} p */
+function detailHTML(p) {
+  const n = readyCount(p);
+  const open = p.status === "ready" && p.ui ? `<a class="btn primary sm" href="${pluginHref(p.name)}">${icon("external-link")}打开</a>` : "";
+  const update = p.updateTo ? `<button class="btn sm" data-act="update">更新${p.updateTo && p.updateTo !== p.version ? "到 v" + esc(p.updateTo) : ""}</button>` : "";
+  const retry = p.status === "error" ? `<button class="btn sm" data-act="install">重试</button>` : "";
+  const rows = p.agents.length
+    ? p.agents.map((a) => {
+      const kind = agentKind(a);
+      const why = a.ready ? "可用" : ((a.missing || []).map((c) => PRIM_NAMES[c] || c).join("、") || "不可用");
+      return `<div class="plug-agent-row"><span class="plug-agent-name">${esc(a.hostname || a.id)}</span>${kind ? `<span class="tag">${esc(kind)}</span>` : ""}<span class="plug-pill ${a.ready ? "ok" : "no"}">${esc(why)}</span></div>`;
+    }).join("")
+    : `<p class="faint">暂无在线探针</p>`;
+  const perms = (p.primitives || []).map((c) => `<li><b>${esc(PRIM_NAMES[c] || c)}</b><span>${esc(PERM_HELP[c] || "")}</span></li>`).join("");
+  const size = formatSize(p.size);
+  return `<section class="card plug-detail" data-name="${esc(p.name)}">
+    <div class="plug-detail-head">${plugIcon(p)}
+      <div class="grow"><h2>${esc(p.title)}</h2>${originHTML(p)}</div>
+      <div class="plug-detail-actions">${open}${update}${retry}<button class="btn danger sm" data-act="uninstall">卸载</button></div>
+    </div>
+    <p class="plug-desc plug-detail-desc">${esc(p.description || "")}</p>
+    ${p.error ? `<p class="plug-err">${esc(p.error)}</p>` : ""}
+    <div class="plug-meta">
+      <div><span>版本</span><b>${p.version ? "v" + esc(p.version) : "未知"}</b></div>
+      <div><span>大小</span><b>${size || "未知"}</b></div>
+      <div><span>权限</span><b>${(p.primitives || []).length} 项</b></div>
+    </div>
+    <div class="plug-sec"><h3>权限</h3><ul class="plug-perms">${perms}</ul></div>
+    <div class="plug-sec"><h3>适用机器</h3><div class="plug-prims plug-prims-open">${(p.machines || []).map((c) => `<span class="tag">${esc(MACHINE_NAMES[c] || c)}</span>`).join("")}</div></div>
+    <div class="plug-sec" id="plugConfig"></div>
+    <div class="plug-sec"><h3>探针 ${p.agents.length ? `${n} / ${p.agents.length} 台可用` : ""}</h3><div class="plug-agents">${rows}</div></div>
+    ${p.repo ? `<div class="plug-sec"><h3>来源</h3><p class="faint"><a href="${esc(p.repo)}" target="_blank" rel="noopener">仓库</a></p></div>` : ""}
+  </section>`;
+}
+
+/**
+ * @param {HTMLElement} box
+ * @param {PluginItem} p
+ */
+async function loadConfig(box, p) {
+  const slot = box.querySelector("#plugConfig");
+  if (!slot) return;
+  /** @type {{ fields: { key: string, title: string, help: string, kind: string, default?: string }[], values: { agent: string, values: Record<string, string> }[] }} */
+  let cfg;
+  try {
+    cfg = await api("/plugins/" + encodeURIComponent(p.name) + "/config");
+  } catch {
+    slot.remove();
+    return;
+  }
+  if (!cfg.fields || !cfg.fields.length) { slot.remove(); return; }
+  const usable = p.agents.filter((a) => !(a.missing || []).includes("machine"));
+  const agents = usable.length ? usable : p.agents;
+  if (!agents.length) {
+    slot.innerHTML = `<h3>配置</h3><p class="faint">没有在线探针，连上之后可以按机器分别配置。</p>`;
+    return;
+  }
+  const saved = new Map((cfg.values || []).map((v) => [v.agent, v.values || {}]));
+  const pick = agents[0].id;
+  const fieldHTML = (/** @type {string} */ agent) => {
+    const vals = saved.get(agent) || {};
+    return cfg.fields.map((f) => {
+      const value = vals[f.key] != null ? vals[f.key] : (f.default || "");
+      const control = f.kind === "lines"
+        ? `<textarea class="input" data-key="${esc(f.key)}" rows="4" spellcheck="false" placeholder="${esc(f.help)}">${esc(value)}</textarea>`
+        : `<input class="input" data-key="${esc(f.key)}" value="${esc(value)}" inputmode="numeric" autocomplete="off" spellcheck="false">`;
+      return `<label class="plug-field"><span>${esc(f.title)}</span>${control}<small>${esc(f.help)}</small></label>`;
+    }).join("");
+  };
+  const draw = (/** @type {string} */ agent) => {
+    slot.innerHTML = `<h3>配置</h3>
+      <label class="plug-field"><span>探针</span><select class="input" id="plugCfgAgent">${agents.map((a) => `<option value="${esc(a.id)}"${a.id === agent ? " selected" : ""}>${esc(a.hostname || a.id)} · ${esc(agentKind(a))}</option>`).join("")}</select></label>
+      <div id="plugCfgFields">${fieldHTML(agent)}</div>
+      <div class="plug-detail-actions"><button class="btn sm" id="plugCfgSave" type="button">保存</button></div>`;
+    const sel = /** @type {HTMLSelectElement} */ (slot.querySelector("#plugCfgAgent"));
+    sel.addEventListener("change", () => draw(sel.value));
+    slot.querySelector("#plugCfgSave").addEventListener("click", async () => {
+      /** @type {Record<string, string>} */
+      const values = {};
+      slot.querySelectorAll("[data-key]").forEach((el) => {
+        const key = /** @type {HTMLElement} */ (el).dataset.key || "";
+        values[key] = /** @type {HTMLInputElement} */ (el).value;
+      });
+      const btn = /** @type {HTMLButtonElement} */ (slot.querySelector("#plugCfgSave"));
+      btn.disabled = true;
+      try {
+        const next = await api("/plugins/" + encodeURIComponent(p.name) + "/config", { method: "PUT", json: { agent: sel.value, values } });
+        cfg.values = next.values || [];
+        saved.clear();
+        for (const v of cfg.values) saved.set(v.agent, v.values || {});
+        btn.disabled = false;
+        btn.textContent = "已保存";
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "保存";
+        await tell("无法保存", err.message);
+      }
+    });
+  };
+  draw(pick);
 }
 
 /** @param {HTMLElement} b */
 async function onPluginAct(b) {
-  const card = /** @type {HTMLElement} */ (b.closest(".plug-card"));
+  const card = /** @type {HTMLElement} */ (b.closest("[data-name]"));
   const name = card.dataset.name || "";
   const p = catalog.find((x) => x.name === name);
   const title = p ? p.title : name;
-  const install = b.dataset.act === "install";
-  const yes = await askChoice(install
+  const install = b.dataset.act === "install" || b.dataset.act === "update";
+  const yes = await askChoice(b.dataset.act === "update"
+    ? { title: `更新${title}`, body: `将下载「${title}」的新安装包，核对 SHA-256 和签名后替换正在运行的版本。`, ok: "更新" }
+    : install
     ? { title: `安装${title}`, body: `将下载「${title}」的已签名安装包，核对 SHA-256 和签名后启动。`, ok: "安装" }
     : { title: `卸载${title}`, body: `「${title}」的进程会停掉，已下载的安装包会被删除，正在进行的连接会被断开。`, ok: "卸载", danger: true });
   if (!yes) return;
   b.disabled = true;
-  b.textContent = install ? "安装中…" : "卸载中…";
+  b.textContent = b.dataset.act === "update" ? "更新中…" : install ? "安装中…" : "卸载中…";
   try {
     await api("/plugins/" + encodeURIComponent(name), { method: install ? "POST" : "DELETE" });
     await drawCenter();

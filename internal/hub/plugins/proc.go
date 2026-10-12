@@ -225,7 +225,9 @@ func (r *Registry) hostAPI(p *proc) http.Handler {
 			next(w, req)
 		}
 	}
-	h := &scopedHost{hub: r.hub, m: p.manifest}
+	h := &scopedHost{hub: r.hub, m: p.manifest, values: func(agent string) map[string]string {
+		return r.configValues(p.manifest.Name, agent)
+	}}
 	mux.HandleFunc("GET /agents", auth(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, h.Agents())
 	}))
@@ -235,7 +237,7 @@ func (r *Registry) hostAPI(p *proc) http.Handler {
 			WriteError(w, common.ErrOffline())
 			return
 		}
-		if !sdk.MachineMatch(h.m.Machines, info.OS, info.Caps) {
+		if !sdk.MachineMatch(h.m.Machines, info.OS, info.Runner, info.Caps) {
 			WriteError(w, errForbidden(h.m.Name+" is not for this machine"))
 			return
 		}
@@ -282,6 +284,9 @@ func (r *Registry) hostAPI(p *proc) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(raw)
+	}))
+	mux.HandleFunc("GET /config", auth(func(w http.ResponseWriter, req *http.Request) {
+		writeJSON(w, http.StatusOK, h.values(req.URL.Query().Get("agent")))
 	}))
 	mux.HandleFunc("POST /audit", auth(func(w http.ResponseWriter, req *http.Request) {
 		var body struct {

@@ -223,4 +223,11 @@ func TestReadiness(t *testing.T) {
 	if a := readiness(m, entities.SessionInfo{DeviceID: "d", OS: "linux", Caps: []string{"docker"}, Primitives: map[string]int{entities.CapTunnelTCP: 1}}); !a.Ready {
 		t.Fatalf("docker cap should not hide linux: %+v", a)
 	}
+	if a := readiness(m, entities.SessionInfo{DeviceID: "d", OS: "linux", Runner: "docker", Primitives: map[string]int{entities.CapTunnelTCP: 1}}); a.Ready || a.Runner != "docker" {
+		t.Fatalf("container must not count as linux: %+v", a)
+	}
+	dock := Manifest{Machines: []string{"docker"}, Primitives: []string{entities.CapTunnelTCP}}
+	if a := readiness(dock, entities.SessionInfo{DeviceID: "d", OS: "linux", Runner: "docker", Primitives: map[string]int{entities.CapTunnelTCP: 1}}); !a.Ready {
+		t.Fatalf("container should match docker: %+v", a)
+	}
 }

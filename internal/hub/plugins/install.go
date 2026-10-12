@@ -198,6 +198,7 @@ func (r *Registry) saveLocked() error {
 		Manual:    append([]manualEntry(nil), r.manual...),
 		Repos:     append([]repoEntry(nil), r.repos...),
 		Pins:      append([]pinEntry(nil), r.pins...),
+		Configs:   append([]configEntry(nil), r.configs...),
 	}
 	if st.Installed == nil {
 		st.Installed = []string{}

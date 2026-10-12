@@ -54,6 +54,9 @@ type Manifest struct {
 	Targets         []string `json:"targets,omitempty"`
 	Machines        []string `json:"machines"`
 	UI              bool     `json:"ui"`
+	// Icon is an inline SVG the catalog and the package may carry.
+	// It is display metadata and is not part of SameManifest.
+	Icon string `json:"icon,omitempty"`
 }
 
 type Engines struct {
@@ -111,38 +114,83 @@ func ParseManifest(raw []byte) (Manifest, error) {
 	if m.Targets == nil {
 		m.Targets = []string{}
 	}
+	icon, err := CleanIcon(m.Icon)
+	if err != nil {
+		return Manifest{}, err
+	}
+	m.Icon = icon
 	return m, nil
 }
 
 // SameManifest reports whether two parsed manifests describe the same contract.
+// Icon is left out: a catalog may show an icon the installed package does not carry yet.
 func SameManifest(a, b Manifest) bool {
+	a.Icon, b.Icon = "", ""
 	ab, errA := json.Marshal(a)
 	bb, errB := json.Marshal(b)
 	return errA == nil && errB == nil && bytes.Equal(ab, bb)
 }
 
+// CleanIcon accepts an empty string or one inline SVG. Script, handlers and
+// external references are rejected.
+func CleanIcon(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", nil
+	}
+	if len(s) > 8192 || !strings.HasPrefix(strings.ToLower(s), "<svg") || !strings.HasSuffix(strings.ToLower(s), "</svg>") {
+		return "", fmt.Errorf("manifest: icon 需要是一段 svg")
+	}
+	low := strings.ToLower(s)
+	for _, bad := range []string{"<script", "<foreignobject", "<iframe", "<image", "<use", "javascript:", "data:", "href=", "xlink:"} {
+		if strings.Contains(low, bad) {
+			return "", fmt.Errorf("manifest: icon 含有不允许的内容")
+		}
+	}
+	for _, tag := range []string{"onload", "onerror", "onclick", "onmouseover"} {
+		if strings.Contains(low, tag) {
+			return "", fmt.Errorf("manifest: icon 含有不允许的内容")
+		}
+	}
+	return s, nil
+}
+
 // AgentLabels are the machine tags a probe carries.
-// mac stands for os=darwin. docker and vmware come from capabilities,
-// not from the guest firmware virt field.
-func AgentLabels(os string, caps []string) []string {
+// mac stands for os=darwin. An agent whose runner is docker is a container,
+// so the container OS is not also a machine label. docker and vmware
+// capabilities are extra labels on a host that can manage them.
+func AgentLabels(os, runner string, caps []string) []string {
 	var out []string
-	switch os {
-	case "darwin":
-		out = append(out, "mac")
-	case "windows", "linux":
-		out = append(out, os)
+	if runner == "docker" {
+		out = append(out, "docker")
+	} else {
+		switch os {
+		case "darwin":
+			out = append(out, "mac")
+		case "windows", "linux":
+			out = append(out, os)
+		}
 	}
 	for _, c := range caps {
-		if c == "docker" || c == "vmware" {
+		if (c == "docker" || c == "vmware") && !hasLabel(out, c) {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
+}
+
 // MachineMatch is true when the agent carries any machine the plugin declared.
-func MachineMatch(machines []string, os string, caps []string) bool {
-	have := AgentLabels(os, caps)
+func MachineMatch(machines []string, os, runner string, caps []string) bool {
+	have := AgentLabels(os, runner, caps)
 	for _, m := range machines {
 		for _, h := range have {
 			if m == h {

@@ -38,11 +38,17 @@ func TestPackVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Name != "hello" || !MachineMatch(m.Machines, "linux", nil) || MachineMatch(m.Machines, "windows", nil) {
+	if m.Name != "hello" || !MachineMatch(m.Machines, "linux", "", nil) || MachineMatch(m.Machines, "windows", "", nil) {
 		t.Fatalf("%+v", m)
 	}
-	if !MachineMatch(m.Machines, "darwin", []string{"docker"}) {
+	if !MachineMatch(m.Machines, "darwin", "", []string{"docker"}) {
 		t.Fatal("darwin should match mac")
+	}
+	if MachineMatch([]string{"linux"}, "linux", "docker", nil) {
+		t.Fatal("container runner must not match linux")
+	}
+	if !MachineMatch([]string{"docker"}, "linux", "docker", nil) {
+		t.Fatal("container runner should match docker")
 	}
 	pkg.Binary = []byte("tampered")
 	if _, err := pkg.Verify(key.Public(), key.ID); err == nil {
