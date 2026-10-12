@@ -27,7 +27,7 @@ ICONS = [
     "folder-plus", "upload", "folder-up", "download", "pencil-line", "trash", "plus", "rotate-ccw",
     "triangle-alert", "folder", "file", "file-text", "file-image", "file-archive",
     # events
-    "network", "package", "user", "copy", "check", "circle-arrow-up",
+    "network", "ethernet-port", "app-window", "package", "user", "copy", "check", "circle-arrow-up",
     # plugins
     "grid-2x2-plus", "globe", "play", "send", "external-link", "camera", "gallery-thumbnails",
 ]

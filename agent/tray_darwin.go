@@ -3,7 +3,6 @@
 package agent
 
 import (
-	_ "embed"
 	"errors"
 	"fmt"
 	"html"
@@ -14,39 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"fyne.io/systray"
 	"golang.org/x/sys/unix"
 )
 
-var (
-	//go:embed trayicons/mac-ok.png
-	macOK []byte
-	//go:embed trayicons/mac-off.png
-	macOff []byte
-	//go:embed trayicons/mac-up.png
-	macUp []byte
-)
-
-// trayFallbackPosition puts a first-run icon just left of the system items
-// (clock, Control Center) so the notch cannot hide it; ⌘-drag moves it and the
-// new place survives restarts and upgrades.
-const trayFallbackPosition = 250
-
-func init() { systray.SetAutosaveName(launchLabel, trayFallbackPosition) }
-
-// trayBeforeExit drops the status item ahead of an in-place exec; otherwise the
-// new image inherits the old item and ignores the saved position.
-func trayBeforeExit() { systray.RemoveStatusItem() }
-
-func setTrayIcon(state string) {
-	icon := map[string][]byte{"ok": macOK, "off": macOff, "up": macUp}[state]
-	systray.SetTemplateIcon(icon, icon)
-}
-
-// trayWanted: a menu bar item needs the user's GUI session, so not as root
-// (LaunchDaemon) and not from a plain SSH login.
+// trayWanted: a menu bar item needs the cgo build and the user's GUI session,
+// so not as root (LaunchDaemon) and not from a plain SSH login. GUEST_TRAY=off
+// keeps the icon out of a build that still has it.
 func trayWanted() bool {
-	if getenv("VARTIO_AGENT_TRAY", "GUEST_TRAY") == "off" || os.Geteuid() == 0 {
+	if !trayLinked() || getenv("VARTIO_AGENT_TRAY", "GUEST_TRAY") == "off" || os.Geteuid() == 0 {
 		return false
 	}
 	return os.Getenv("SSH_CONNECTION") == "" || runnerName() == "launchd"

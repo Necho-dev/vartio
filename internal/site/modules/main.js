@@ -28,13 +28,37 @@ $("#logoutBtn").addEventListener("click", () => {
 });
 
 // ---------- theme / clock / search ----------
-const theme = localStorage.getItem("probeHubTheme") || "dark";
-document.documentElement.dataset.theme = theme;
+const THEME_KEY = "probeHubTheme";
+const THEME_CYCLE = ["system", "light", "dark"];
+const themeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+function themeMode() {
+  const saved = localStorage.getItem(THEME_KEY);
+  return saved === "light" || saved === "dark" ? saved : "system";
+}
+
+/** @param {string} mode */
+function applyTheme(mode) {
+  const theme = mode === "system" ? (themeQuery.matches ? "dark" : "light") : mode;
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.themeMode = mode;
+  const label = mode === "system" ? "跟随系统" : mode === "light" ? "浅色" : "深色";
+  $("#themeBtn").setAttribute("title", "主题：" + label + "，点击切换");
+}
+
+applyTheme(themeMode());
 $("#forwardsBtn").addEventListener("click", () => openForwardDrawer(null));
 $("#themeBtn").addEventListener("click", () => {
-  const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  document.documentElement.dataset.theme = t;
-  localStorage.setItem("probeHubTheme", t);
+  const mode = themeMode();
+  const next = THEME_CYCLE[(THEME_CYCLE.indexOf(mode) + 1) % THEME_CYCLE.length];
+  if (next === "system") localStorage.removeItem(THEME_KEY);
+  else localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+  if (location.hash.startsWith("#/system/")) route();
+});
+themeQuery.addEventListener("change", () => {
+  if (themeMode() !== "system") return;
+  applyTheme("system");
   if (location.hash.startsWith("#/system/")) route();
 });
 setInterval(() => ($("#clock").textContent = new Date().toLocaleString()), 1000);

@@ -1,6 +1,12 @@
 // @ts-check
-import { $, esc, osLabel, ip, api } from "./core.js";
+import { $, esc, osLabel, ip, api, state } from "./core.js";
+import { renderChart } from "./charts.js";
 import { openDrawer } from "./ui.js";
+
+/** @type {Record<string, number>} */
+const SPAN = { "1h": 3600e3, "6h": 6 * 3600e3, "24h": 86400e3, "7d": 7 * 86400e3, "30d": 30 * 86400e3 };
+/** @type {Record<string, string>} */
+const RANGE_LABEL = { "1h": "最近 1 小时", "6h": "最近 6 小时", "24h": "最近 24 小时", "7d": "最近 7 天", "30d": "最近 30 天" };
 
 /** @type {[key: string, label: string, sortKey: (p: ProcInfo) => string | number, numeric: boolean][]} */
 const PROC_COLS = [
@@ -22,6 +28,10 @@ export function openProcs(s) {
       <button class="btn" id="procReload">刷新</button>
     </div>
     <div class="drawer-scroll" id="procList"><div class="empty">加载中…</div></div>
+    <div class="proc-hist" id="procHist" hidden>
+      <div class="proc-hist-head"><span>进程数</span><span id="procHistRange"></span></div>
+      <div class="chart" id="c-procHist"></div>
+    </div>
     <div class="drawer-foot" id="procFoot">CPU 为约 0.7 秒内占全部核心的比例；内存为 “—” 表示探针无权读取，以管理员或服务方式运行可看到全部。</div>`,
     () => { if (timer) clearInterval(timer); });
 
@@ -77,5 +87,30 @@ export function openProcs(s) {
   $("#procAuto").addEventListener("change", auto);
   auto();
   load();
+  loadProcHist(s);
   setTimeout(() => { const q = $("#procQ"); if (q) q.focus(); }, 50);
+}
+
+/** History for the page's current range. The live total stays in the drawer subtitle. */
+async function loadProcHist(s) {
+  const wrap = $("#procHist");
+  const box = $("#c-procHist");
+  if (!wrap || !box || !state.config?.history) return;
+  try {
+    /** @type {Series} */
+    const d = await api(`/monitor/systems/${encodeURIComponent(s.id)}/series?range=${state.range}`);
+    const to = Date.now();
+    const from = to - (SPAN[state.range] || SPAN["1h"]);
+    renderChart(box, {
+      t: d.t, stepSec: d.stepSec, from, to,
+      fmt: (v) => (v == null ? "—" : Math.round(v) + ""),
+      series: [{ label: "进程", color: "#f97316", data: d.procs || [] }],
+      empty: "暂无历史",
+    });
+    const lab = $("#procHistRange");
+    if (lab) lab.textContent = RANGE_LABEL[state.range] || "";
+    wrap.hidden = !(d.t || []).length;
+  } catch {
+    wrap.hidden = true;
+  }
 }

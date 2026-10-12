@@ -54,6 +54,11 @@ interface NicInfo {
 interface Sample {
   ts: string;
   cpuPct: number;
+  cpuUserPct?: number;
+  cpuSystemPct?: number;
+  cpuWaitPct?: number;
+  /** live logical processors; kind is p or e when the machine has both */
+  cores?: { pct: number; kind?: string }[];
   memUsed: number;
   memTotal: number;
   memPct: number;
@@ -233,6 +238,9 @@ interface Series {
   t: number[];
   cpu: number[];
   cpuMax: number[];
+  cpuUser: (number | null)[];
+  cpuSystem: (number | null)[];
+  cpuWait: (number | null)[];
   mem: number[];
   memTotal: number[];
   swap: number[];
@@ -275,6 +283,33 @@ interface Series {
   diskParts: Record<string, (number | null)[]>;
   /** per-NIC rates; missing until the agent reports counters */
   netNics?: Record<string, { rx: (number | null)[]; tx: (number | null)[]; rxBytes: (number | null)[]; txBytes: (number | null)[] }>;
+}
+
+/** guest.PortInfo. proto is tcp (listening) or udp (bound). */
+interface PortInfo {
+  proto: string;
+  ip: string;
+  port: number;
+  pid?: number;
+  name?: string;
+}
+
+/** guest.AppInfo. Graphical desktop applications; empty on servers and containers. */
+interface AppInfo {
+  id?: string;
+  name: string;
+  version?: string;
+  publisher?: string;
+  arch?: string;
+  source?: string;
+  path?: string;
+  size?: number;
+  installed?: string;
+  lastUsed?: string;
+  running?: boolean;
+  procs?: number;
+  cpuPct?: number;
+  memMB?: number;
 }
 
 /** guest.ProcInfo */

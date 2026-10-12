@@ -7,7 +7,6 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
-	"strings"
 
 	"vartio/internal/entities"
 )
@@ -42,7 +41,7 @@ func parseLsof(b []byte) []entities.Listener {
 			n, _ := strconv.Atoi(v)
 			pid, name = int32(n), ""
 		case 'c':
-			name = strings.ReplaceAll(v, `\x20`, " ")
+			name = unescapeLsof(v)
 		case 'n':
 			host, port, err := net.SplitHostPort(v)
 			if err != nil {

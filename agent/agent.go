@@ -62,7 +62,7 @@ func Run() {
 	}
 	logFile := setupLog()
 	cfg := loadConfig()
-	log.Printf("vartio-agent %s control=%s device=%s bios=%s runner=%s", agentVersion, cfg.URL, cfg.DeviceID, cfg.BiosUUID, runnerName())
+	log.Printf("vartio-agent %s control=%s device=%s bios=%s runner=%s tray=%t", agentVersion, cfg.URL, cfg.DeviceID, cfg.BiosUUID, runnerName(), trayMode)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if trayMode {

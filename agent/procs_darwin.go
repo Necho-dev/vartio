@@ -2,28 +2,28 @@
 
 package agent
 
-/*
-#include <libproc.h>
-#include <mach/mach_time.h>
-*/
-import "C"
-
 import (
 	"bytes"
 	"errors"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 
 	"vartio/internal/entities"
 )
 
-// listProcs reads every process through libproc. gopsutil on darwin forks ps
-// once per process for the state, and reads the full argument vector with a
-// sysctl per pid. One proc_pidinfo plus the executable path is enough for the
-// drawer; arguments are not collected.
+// listProcs reads every process through libproc. The calls go through purego,
+// so this stays in the CGO_ENABLED=0 build. gopsutil on darwin forks ps once
+// per process for the state and reads the full argument vector per pid.
+// Arguments are not collected; Cmdline is the executable path.
 func listProcs() ([]entities.ProcInfo, error) {
+	if err := libprocOpen(); err != nil {
+		return nil, err
+	}
 	scale := machCPUScale()
 	before := map[int32]float64{}
 	pids, err := darwinPids()
@@ -43,7 +43,7 @@ func listProcs() ([]entities.ProcInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	pathBuf := make([]byte, C.PROC_PIDPATHINFO_MAXSIZE)
+	pathBuf := make([]byte, procPathMax)
 	out := make([]entities.ProcInfo, 0, len(pids))
 	for _, pid := range pids {
 		info, cpu, ok := darwinProc(pid, scale, pathBuf)
@@ -58,9 +58,78 @@ func listProcs() ([]entities.ProcInfo, error) {
 	return out, nil
 }
 
+const (
+	procAllPids    = 1
+	procTaskAll    = 2
+	procPathMax    = 4096 // PROC_PIDPATHINFO_MAXSIZE
+	procTaskAllLen = 232  // sizeof(struct proc_taskallinfo) on this OS
+)
+
+type procBSDInfo struct {
+	flags, status, xstatus, pid, ppid  uint32
+	uid, gid, ruid, rgid, svuid, svgid uint32
+	rfu                                uint32
+	comm                               [16]byte
+	name                               [32]byte
+	nfiles, pgid, pjobc, tdev, tpgid   uint32
+	nice                               int32
+	startSec, startUsec                uint64
+}
+
+type procTaskInfo struct {
+	virtual, resident, user, system, threadsUser, threadsSystem uint64
+	policy, faults, pageins, cow                                int32
+	msgSent, msgRecv, sysMach, sysUnix                          int32
+	csw, threads, running, priority                             int32
+}
+
+type procTaskAllInfo struct {
+	bsd  procBSDInfo
+	task procTaskInfo
+}
+
+func init() {
+	if unsafe.Sizeof(procTaskAllInfo{}) != procTaskAllLen || unsafe.Sizeof(procBSDInfo{}) != 136 {
+		panic("proc_taskallinfo layout does not match libproc")
+	}
+}
+
+var (
+	libprocOnce             sync.Once
+	libprocErr              error
+	symListpids, symPidinfo uintptr
+	symPidpath, symTimebase uintptr
+)
+
+func libprocOpen() error {
+	libprocOnce.Do(func() {
+		h, err := purego.Dlopen("/usr/lib/libSystem.B.dylib", purego.RTLD_LAZY)
+		if err != nil {
+			libprocErr = err
+			return
+		}
+		for _, bind := range []struct {
+			dst  *uintptr
+			name string
+		}{
+			{&symListpids, "proc_listpids"},
+			{&symPidinfo, "proc_pidinfo"},
+			{&symPidpath, "proc_pidpath"},
+			{&symTimebase, "mach_timebase_info"},
+		} {
+			*bind.dst, err = purego.Dlsym(h, bind.name)
+			if err != nil {
+				libprocErr = err
+				return
+			}
+		}
+	})
+	return libprocErr
+}
+
 func machCPUScale() float64 {
-	var info C.mach_timebase_info_data_t
-	C.mach_timebase_info(&info)
+	var info struct{ numer, denom uint32 }
+	purego.SyscallN(symTimebase, uintptr(unsafe.Pointer(&info)))
 	if info.denom == 0 {
 		return 0
 	}
@@ -70,28 +139,28 @@ func machCPUScale() float64 {
 }
 
 func darwinPids() ([]int32, error) {
-	intSize := int(unsafe.Sizeof(C.int(0)))
-	need := int(C.proc_listpids(C.uint32_t(C.PROC_ALL_PIDS), 0, nil, 0))
-	if need < 0 {
+	intSize := int(unsafe.Sizeof(int32(0)))
+	need, _, _ := purego.SyscallN(symListpids, procAllPids, 0, 0, 0)
+	if int32(need) < 0 {
 		return nil, errors.New("proc_listpids")
 	}
-	slots := need/intSize + 256
+	slots := int(need)/intSize + 256
 	if slots < 1 {
 		slots = 1
 	}
-	buf := make([]C.int, slots)
-	n := int(C.proc_listpids(C.uint32_t(C.PROC_ALL_PIDS), 0, unsafe.Pointer(&buf[0]), C.int(slots*intSize)))
-	if n < 0 {
+	buf := make([]int32, slots)
+	n, _, _ := purego.SyscallN(symListpids, procAllPids, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(slots*intSize))
+	if int32(n) < 0 {
 		return nil, errors.New("proc_listpids")
 	}
-	count := n / intSize
+	count := int(n) / intSize
 	if count > len(buf) {
 		count = len(buf)
 	}
 	out := make([]int32, 0, count)
 	for i := 0; i < count; i++ {
 		if buf[i] > 0 {
-			out = append(out, int32(buf[i]))
+			out = append(out, buf[i])
 		}
 	}
 	return out, nil
@@ -116,58 +185,55 @@ func darwinProc(pid int32, scale float64, pathBuf []byte) (entities.ProcInfo, fl
 		name = ""
 	}
 	if name == "" {
-		name = cChars(info.pbsd.pbi_name[:])
+		name = cBytes(info.bsd.name[:])
 	}
 	if name == "" {
-		name = cChars(info.pbsd.pbi_comm[:])
+		name = cBytes(info.bsd.comm[:])
 	}
 	row := entities.ProcInfo{
 		PID:     pid,
 		Name:    name,
-		Status:  darwinStatus(uint32(info.pbsd.pbi_status)),
-		MemMB:   float64(info.ptinfo.pti_resident_size) / 1024 / 1024,
+		Status:  darwinStatus(info.bsd.status),
+		MemMB:   float64(info.task.resident) / 1024 / 1024,
 		Cmdline: exe,
 	}
 	return row, taskCPU(info, scale), true
 }
 
-func darwinTask(pid int32) (C.struct_proc_taskallinfo, bool) {
-	var info C.struct_proc_taskallinfo
-	n := C.proc_pidinfo(C.int(pid), C.PROC_PIDTASKALLINFO, 0, unsafe.Pointer(&info), C.int(unsafe.Sizeof(info)))
-	return info, int(n) == int(unsafe.Sizeof(info))
+func darwinTask(pid int32) (procTaskAllInfo, bool) {
+	var info procTaskAllInfo
+	n, _, _ := purego.SyscallN(symPidinfo, uintptr(pid), procTaskAll, 0, uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info))
+	return info, int(int32(n)) == int(unsafe.Sizeof(info))
 }
 
-func taskCPU(info C.struct_proc_taskallinfo, scale float64) float64 {
-	return (float64(info.ptinfo.pti_total_user) + float64(info.ptinfo.pti_total_system)) * scale
+func taskCPU(info procTaskAllInfo, scale float64) float64 {
+	return (float64(info.task.user) + float64(info.task.system)) * scale
 }
 
 func procExe(pid int32, buf []byte) string {
 	if len(buf) == 0 {
 		return ""
 	}
-	n := int(C.proc_pidpath(C.int(pid), unsafe.Pointer(&buf[0]), C.uint32_t(len(buf))))
-	if n <= 0 {
+	n, _, _ := purego.SyscallN(symPidpath, uintptr(pid), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if int32(n) <= 0 {
 		return ""
 	}
-	if n > len(buf) {
-		n = len(buf)
+	got := int(int32(n))
+	if got > len(buf) {
+		got = len(buf)
 	}
-	b := buf[:n]
+	b := buf[:got]
 	if i := bytes.IndexByte(b, 0); i >= 0 {
 		b = b[:i]
 	}
 	return string(b)
 }
 
-func cChars(s []C.char) string {
-	b := make([]byte, 0, len(s))
-	for _, c := range s {
-		if c == 0 {
-			break
-		}
-		b = append(b, byte(c))
+func cBytes(s []byte) string {
+	if i := bytes.IndexByte(s, 0); i >= 0 {
+		s = s[:i]
 	}
-	return string(b)
+	return string(s)
 }
 
 // pbi_status is the BSD p_stat: SIDL, SRUN, SSLEEP, SSTOP, SZOMB.

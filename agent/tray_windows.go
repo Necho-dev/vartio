@@ -95,7 +95,11 @@ func notifyUser(msg string) {
 	_, _, _ = procMessageBox.Call(0, uintptr(unsafe.Pointer(m)), uintptr(unsafe.Pointer(t)), mbIconInformation)
 }
 
-func openURL(u string) { _ = exec.Command("rundll32", "url.dll,FileProtocolHandler", u).Start() }
+func openURL(u string) {
+	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
+	quiet(cmd)
+	_ = cmd.Start()
+}
 
 func openPath(p string) { _ = exec.Command("notepad.exe", p).Start() }
 

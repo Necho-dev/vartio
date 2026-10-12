@@ -7,21 +7,25 @@ import (
 
 // Series is columnar so a week of buckets stays a small JSON payload.
 type Series struct {
-	StepSec   int       `json:"stepSec"`
-	T         []int64   `json:"t"`
-	CPU       []float64 `json:"cpu"`
-	CPUMax    []float64 `json:"cpuMax"`
-	Mem       []float64 `json:"mem"`
-	MemTotal  []float64 `json:"memTotal"`
-	Swap      []float64 `json:"swap"`
-	Disk      []float64 `json:"disk"`
-	DiskTotal []float64 `json:"diskTotal"`
-	DiskRead  []float64 `json:"diskRead"`
-	DiskWrite []float64 `json:"diskWrite"`
-	NetRx     []float64 `json:"netRx"`
-	NetTx     []float64 `json:"netTx"`
-	NetRxMax  []float64 `json:"netRxMax"`
-	NetTxMax  []float64 `json:"netTxMax"`
+	StepSec int       `json:"stepSec"`
+	T       []int64   `json:"t"`
+	CPU     []float64 `json:"cpu"`
+	CPUMax  []float64 `json:"cpuMax"`
+	// CPUUser/CPUSystem/CPUWait are nil before the agent reports the split.
+	CPUUser   []*float64 `json:"cpuUser"`
+	CPUSystem []*float64 `json:"cpuSystem"`
+	CPUWait   []*float64 `json:"cpuWait"`
+	Mem       []float64  `json:"mem"`
+	MemTotal  []float64  `json:"memTotal"`
+	Swap      []float64  `json:"swap"`
+	Disk      []float64  `json:"disk"`
+	DiskTotal []float64  `json:"diskTotal"`
+	DiskRead  []float64  `json:"diskRead"`
+	DiskWrite []float64  `json:"diskWrite"`
+	NetRx     []float64  `json:"netRx"`
+	NetTx     []float64  `json:"netTx"`
+	NetRxMax  []float64  `json:"netRxMax"`
+	NetTxMax  []float64  `json:"netTxMax"`
 	// NetRxBytes/NetTxBytes are bytes moved within each bucket.
 	NetRxBytes []float64 `json:"netRxBytes"`
 	NetTxBytes []float64 `json:"netTxBytes"`
@@ -50,6 +54,10 @@ type Series struct {
 	ConnOther []*float64 `json:"connOther"`
 	// DiskParts maps mount point -> used bytes per bucket (nil = no sample).
 	DiskParts map[string][]*float64 `json:"diskParts"`
+	// GPUs maps device name -> utilization per bucket (nil = no sample).
+	GPUs map[string][]*float64 `json:"gpus,omitempty"`
+	// TempBy maps sensor name -> Celsius per bucket (nil = no sample).
+	TempBy map[string][]*float64 `json:"tempBy,omitempty"`
 	// NetNics is per-interface throughput; missing until the agent reports NIC counters.
 	NetNics map[string]NicLine `json:"netNics,omitempty"`
 }
@@ -65,7 +73,7 @@ type NicLine struct {
 func newSeries(step time.Duration) *Series {
 	return &Series{
 		StepSec: int(step / time.Second),
-		T:       []int64{}, CPU: []float64{}, CPUMax: []float64{}, Mem: []float64{}, MemTotal: []float64{},
+		T:       []int64{}, CPU: []float64{}, CPUMax: []float64{}, CPUUser: []*float64{}, CPUSystem: []*float64{}, CPUWait: []*float64{}, Mem: []float64{}, MemTotal: []float64{},
 		Swap: []float64{}, Disk: []float64{}, DiskTotal: []float64{}, DiskRead: []float64{}, DiskWrite: []float64{},
 		NetRx: []float64{}, NetTx: []float64{}, NetRxMax: []float64{}, NetTxMax: []float64{}, NetRxBytes: []float64{}, NetTxBytes: []float64{},
 		Load1: []float64{}, Load5: []*float64{}, Load15: []*float64{}, Temp: []*float64{}, Procs: []float64{},
@@ -74,6 +82,8 @@ func newSeries(step time.Duration) *Series {
 		TCPOutSegs: []*float64{}, TCPRetransSegs: []*float64{},
 		ConnTCP: []*float64{}, ConnUDP: []*float64{}, ConnOther: []*float64{},
 		DiskParts: map[string][]*float64{},
+		GPUs:      map[string][]*float64{},
+		TempBy:    map[string][]*float64{},
 		NetNics:   map[string]NicLine{},
 	}
 }
@@ -81,6 +91,7 @@ func newSeries(step time.Duration) *Series {
 // bucket is one row of the Series query.
 type bucket struct {
 	cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw float64
+	cpuUser, cpuSystem, cpuWait                       *float64
 	rx, tx, rxMax, txMax, rxBytes, txBytes, l1, procs float64
 	l5, l15, temp, rxPps, txPps, errs, drops          *float64
 	estab, tw, listen, retrans, latency               *float64
@@ -91,6 +102,9 @@ func (s *Series) add(t time.Time, b bucket) {
 	s.T = append(s.T, t.UnixMilli())
 	s.CPU = append(s.CPU, b.cpu)
 	s.CPUMax = append(s.CPUMax, b.cpuMax)
+	s.CPUUser = append(s.CPUUser, b.cpuUser)
+	s.CPUSystem = append(s.CPUSystem, b.cpuSystem)
+	s.CPUWait = append(s.CPUWait, b.cpuWait)
 	s.Mem = append(s.Mem, b.mem)
 	s.MemTotal = append(s.MemTotal, b.memT)
 	s.Swap = append(s.Swap, b.swap)

@@ -54,6 +54,7 @@ func runExec(req entities.ExecRequest) entities.ExecResult {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	quiet(cmd)
 	err := cmd.Run()
 	out := entities.ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if ctx.Err() == context.DeadlineExceeded {

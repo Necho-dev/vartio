@@ -67,9 +67,7 @@ func collectMetrics() entities.Metrics {
 			containers <- dockerMetrics(c)
 		}()
 	}
-	if pct, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pct) > 0 {
-		out.CPUPct = pct[0]
-	}
+	out.CPUPct, out.CPUUserPct, out.CPUSystemPct, out.CPUWaitPct, out.Cores = sampleCPU(ctx)
 	if l, ok := loadAvg(ctx); ok {
 		out.Load = l
 	}
@@ -88,6 +86,9 @@ func collectMetrics() entities.Metrics {
 	}
 	out.NICs = nicList(ctx)
 	out.Temps = temps(ctx)
+	out.GPUs = gpus(ctx)
+	out.Battery = readBattery()
+	out.Temps = appendGPUTemps(out.Temps, out.GPUs)
 	if pids, err := process.PidsWithContext(ctx); err == nil {
 		out.Procs = len(pids)
 	}
@@ -282,20 +283,21 @@ var tempsState struct {
 	last []entities.TempSensor
 }
 
-// temps is best effort and cached for a minute. Windows reads WMI thermal zones (often
-// admin-only or empty), so the first failure disables it. On macOS gopsutil reaches IOKit
-// through purego and segfaults the process, so it is opt-in via GUEST_TEMPS=1.
+// temps is best effort and cached for a minute. Windows reads ACPI thermal zones,
+// which a desktop often does not publish, so an empty read is retried next minute
+// instead of turning the sensor off. macOS reads IOHID sensors (CPU die, GPU, NAND,
+// battery); GUEST_TEMPS=0 turns that off. GPU core temperature is added separately.
 func temps(ctx context.Context) []entities.TempSensor {
 	tempsState.Lock()
 	defer tempsState.Unlock()
 	if tempsState.off {
-		return nil
+		return tempsState.last
 	}
-	if runtime.GOOS == "darwin" && getenv("VARTIO_AGENT_TEMPS", "GUEST_TEMPS") != "1" {
+	if runtime.GOOS == "darwin" && getenv("VARTIO_AGENT_TEMPS", "GUEST_TEMPS") == "0" {
 		tempsState.off = true
 		return nil
 	}
-	if time.Since(tempsState.at) < time.Minute {
+	if time.Since(tempsState.at) < time.Minute && tempsState.last != nil {
 		return tempsState.last
 	}
 	tempsState.at = time.Now()
@@ -303,11 +305,7 @@ func temps(ctx context.Context) []entities.TempSensor {
 	defer cancel()
 	ts, err := sensors.TemperaturesWithContext(ctx)
 	if err != nil && len(ts) == 0 {
-		if runtime.GOOS == "windows" {
-			tempsState.off = true
-		}
-		tempsState.last = nil
-		return nil
+		return tempsState.last
 	}
 	var out []entities.TempSensor
 	for _, t := range ts {
@@ -322,4 +320,32 @@ func temps(ctx context.Context) []entities.TempSensor {
 	}
 	tempsState.last = out
 	return out
+}
+
+// appendGPUTemps adds each graphics device's own temperature. A desktop often
+// publishes no ACPI zone, while nvidia-smi still reports the GPU.
+func appendGPUTemps(ts []entities.TempSensor, gs []entities.GPUInfo) []entities.TempSensor {
+	have := map[string]bool{}
+	for _, t := range ts {
+		have[t.Name] = true
+	}
+	for _, g := range gs {
+		if g.TempC == nil || *g.TempC <= 0 || *g.TempC > 150 {
+			continue
+		}
+		name := g.Name
+		if name == "" {
+			name = "GPU"
+		}
+		if have[name] {
+			continue
+		}
+		have[name] = true
+		ts = append(ts, entities.TempSensor{Name: name, C: *g.TempC})
+	}
+	sort.Slice(ts, func(i, j int) bool { return ts[i].C > ts[j].C })
+	if len(ts) > maxTemps {
+		ts = ts[:maxTemps]
+	}
+	return ts
 }

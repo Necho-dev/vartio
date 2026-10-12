@@ -7,6 +7,8 @@ import { route } from "./nav.js";
 import { openTerm } from "./term.js";
 import { openScreen } from "./screen.js";
 import { openProcs } from "./procs.js";
+import { openPorts } from "./ports.js";
+import { openApps } from "./apps.js";
 import { openFiles } from "./files/index.js";
 import { openPluginDrawer } from "./plugins.js";
 import { openForwardDrawer } from "./forwards.js";
@@ -32,21 +34,22 @@ export async function detail(id) {
     return;
   }
   const docker = isDockerRunner(sys);
+  const coresCard = `<div class="card panel" id="p-cores" hidden><span class="now" id="now-cores"></span><h3>CPU 核心</h3><p class="desc" id="desc-cores"></p><div id="cores"></div></div>`;
+  const cpuId = docker ? "hcpu" : "cpu";
   const hostCharts = `
-      ${docker ? "" : panel("cpu", "CPU 使用率", "全部核心平均值")}
+      <div class="grid-pair wide">${panel(cpuId, "CPU 使用率", "全部核心平均值")}${coresCard}</div>
+      ${docker ? "" : panel("gpu", "GPU 使用率", "设备占用", true)}
       ${docker ? "" : panel("mem", "内存使用", "已用物理内存（总量 - 可用）与交换区")}
-      ${panel("disk", "磁盘使用", docker ? "宿主机分区已用空间。容器没有独立容量，Docker 只提供读写吞吐" : "系统盘已用空间")}
-      ${docker ? "" : panel("dio", "磁盘 I/O", "全部物理磁盘读写吞吐")}
-      ${docker ? "" : panel("procs", "进程数", "运行中的进程总数")}
-      ${panel("load", "系统负载", "")}
+      ${docker ? `<div class="grid-pair wide">${panel("disk", "磁盘使用", "宿主机分区已用空间。容器没有独立容量，Docker 只提供读写吞吐")}${panel("load", "系统负载", "")}</div>` : `${panel("disk", "磁盘使用", "系统盘已用空间")}
+      ${panel("dio", "磁盘 I/O", "全部物理磁盘读写吞吐")}
+      <div class="grid-pair wide">${panel("load", "系统负载", "")}${panel("temp", "系统温度", "每个传感器一条曲线", true)}</div>`}
       <div class="card panel wide" id="p-net">
         <div class="panel-head"><h3>网络带宽</h3><select class="nic-pick" id="netNic" hidden></select><span class="now" id="now-net"></span></div>
         <p class="desc" id="desc-net">物理网卡收发情况（已排除回环/虚拟网卡）</p>
         <div class="chart" id="c-net"></div><div class="legend" id="lg-net"></div><div class="net-sum" id="net-sum"></div></div>
       ${panel("conn", "网络连接数", "按协议统计的套接字数量（堆积）", true)}
       ${panel("tcp", "TCP 连接状态", "各状态的 TCP 连接数", true)}
-      ${panel("nerr", "网卡错误与丢包", "区间内收发错误包与丢弃包数量", true)}
-      ${panel("temp", "温度", "传感器最高温度", true)}`;
+      ${panel("nerr", "网卡错误与丢包", "区间内收发错误包与丢弃包数量", true)}`;
   $("#d").innerHTML = `
     <section class="card hero" id="hero"></section>
     ${docker ? containersSection({ inset: false }) : ""}
@@ -85,6 +88,7 @@ export async function detail(id) {
       sys = await api("/monitor/systems/" + encodeURIComponent(id));
       latest = await latestAgent();
       renderHero(sys);
+      renderCores(sys);
       renderInfo(sys);
       renderContainers(sys);
       if (state.evCat) loadEvents(sys); else renderEvents(sys.events || []);
@@ -255,6 +259,30 @@ function paintHostNet() {
   renderNetSum(d, hasPps, errs, drops);
 }
 
+/** @param {SystemView} s */
+function renderCores(s) {
+  const panel = $("#p-cores");
+  const box = $("#cores");
+  if (!panel || !box) return;
+  const cores = s.latest?.cores || [];
+  const was = panel.hidden;
+  panel.hidden = cores.length === 0;
+  const row = panel.parentElement;
+  const refit = () => { if (row && row.classList.contains("grid-pair")) spanRows(row); if (was !== panel.hidden) spanRows($("#charts")); };
+  if (!cores.length) { refit(); return; }
+  const rows = cores.map((c, i) => ({ n: i + 1, pct: c.pct || 0, kind: c.kind || "" }));
+  const grouped = rows.some((c) => c.kind === "p" || c.kind === "e");
+  /** @type {[string, typeof rows][]} */
+  const groups = grouped
+    ? [["性能核心", rows.filter((c) => c.kind === "p")], ["能效核心", rows.filter((c) => c.kind === "e")]]
+    : [["", rows]];
+  $("#desc-cores").textContent = `${cores.length} 个逻辑处理器`;
+  $("#now-cores").textContent = "";
+  const bar = (c) => `<div class="core"><span>核心 ${c.n}</span><span class="bar"><i style="width:${Math.min(100, Math.max(0, c.pct)).toFixed(1)}%"></i></span><span class="pct">${c.pct.toFixed(1)}%</span></div>`;
+  box.innerHTML = groups.filter((g) => g[1].length).map(([title, list]) => `<div class="core-group">${title ? `<h4>${esc(title)}</h4>` : ""}<div class="core-grid">${list.map(bar).join("")}</div></div>`).join("");
+  refit();
+}
+
 /** Stretch a half-width panel that would sit alone before a wide card or at the end. */
 function spanRows(grid) {
   if (!grid) return;
@@ -300,6 +328,17 @@ function latText(ms) {
   return n + " ms";
 }
 
+const BATTERY_STATE = { charging: "充电中", full: "已充满", discharging: "使用电池", ac: "已接电源" };
+
+/** Current pack, e.g. "100%（充电中）". Empty when the machine has no battery. */
+function batteryText(l) {
+  const b = l && l.battery;
+  if (!b || typeof b.percent !== "number" || !Number.isFinite(b.percent)) return "";
+  const n = Math.round(b.percent);
+  const state = BATTERY_STATE[b.state];
+  return state ? `${n}%（${state}）` : `${n}%`;
+}
+
 /** @param {SystemView} s */
 function renderHero(s) {
   const i = s.info || {}, l = s.latest;
@@ -326,6 +365,7 @@ function renderHero(s) {
         ${fact("虚拟化", virtLabel(i))}
         ${fact("CPU", i.cpuModel ? `${i.cpuModel} (${i.cores || "?"}C/${i.threads || "?"}T)` : "")}
         ${fact("内存", l ? bytes(l.memTotal) : "")}
+        ${fact("电量", batteryText(l))}
         ${s.online ? fact("运行", dur(up)) : fact("最后在线", ago(s.lastSeen))}
         ${fact("探针", s.version)}${outdated(s, latest) && !canUpgrade(s) && s.online ? `<span class="faint">可更新至 ${esc(latest)}，${s.runner === "docker" ? "请拉取新镜像后重建容器" : "当前版本需手动更新一次"}</span>` : ""}
       </div>
@@ -335,6 +375,8 @@ function renderHero(s) {
       ${docker ? "" : `<button class="btn" id="termBtn" ${s.online ? "" : "disabled"}>${icon("square-terminal")}终端</button>
       <button class="btn" id="screenBtn" ${s.online ? "" : "disabled"}>${icon("monitor")}实时画面</button>`}
       <button class="btn" id="procBtn" ${s.online ? "" : "disabled"}>${icon("list")}进程</button>
+      <button class="btn" id="portBtn" ${s.online ? "" : "disabled"}>${icon("ethernet-port")}端口</button>
+      <button class="btn" id="appBtn" ${s.online ? "" : "disabled"}>${icon("app-window")}应用</button>
       <button class="btn" id="filesBtn" ${s.online ? "" : "disabled"}>${icon("folder-open")}文件</button>
       <button class="btn" id="pluginBtn" ${s.online ? "" : "disabled"}>${icon("grid-2x2-plus")}插件</button>
       <button class="btn" id="fwBtn">${icon("arrow-right-left")}隧道转发</button>
@@ -351,6 +393,8 @@ function renderHero(s) {
   $("#termBtn")?.addEventListener("click", () => openTerm(s));
   $("#screenBtn")?.addEventListener("click", () => openScreen(s));
   $("#procBtn").addEventListener("click", () => openProcs(s));
+  $("#portBtn").addEventListener("click", () => openPorts(s));
+  $("#appBtn").addEventListener("click", () => openApps(s));
   $("#filesBtn").addEventListener("click", () => openFiles(s));
   $("#pluginBtn").addEventListener("click", () => openPluginDrawer(s));
   $("#fwBtn").addEventListener("click", () => openForwardDrawer(s));
@@ -404,7 +448,13 @@ async function loadSeries(s) {
   const docker = isDockerRunner(s);
   loadContainerSeries(s);
   if (!state.config.history) {
-    (docker ? ["disk", "load", "net"] : ["cpu", "mem", "disk", "dio", "procs", "net", "load"]).forEach((k) => chart(k, { t: [], series: [], fmt: (v) => String(v), empty: "未配置 PROBE_HUB_DSN，无历史数据" }));
+    (docker ? ["hcpu", "disk", "load", "net"] : ["cpu", "gpu", "mem", "disk", "dio", "net", "load", "temp"]).forEach((k) => chart(k, { t: [], series: [], fmt: (v) => String(v), empty: "未配置 PROBE_HUB_DSN，无历史数据" }));
+    const gpu = $("#p-gpu");
+    if (gpu) gpu.hidden = !(s.latest && s.latest.gpus && s.latest.gpus.length);
+    const tempPanel = $("#p-temp");
+    if (tempPanel) tempPanel.hidden = !(s.latest && ((s.latest.temps && s.latest.temps.length) || s.latest.tempMax));
+    renderCores(s);
+    document.querySelectorAll(".grid-pair").forEach(spanRows);
     return;
   }
   /** @type {Series} */
@@ -418,14 +468,39 @@ async function loadSeries(s) {
   const memMax = Math.max(0, ...d.memTotal) || l.memTotal || null;
   const diskMax = Math.max(0, ...d.diskTotal) || l.diskTotal || null;
 
-  if (!docker) {
-    chart("cpu", { ...base, max: 100, fmt: pct, series: [
-      { label: "平均", color: C.blue, data: d.cpu },
-      { label: "峰值", color: C.faint, data: d.cpuMax, area: false, dash: true, width: 1 }] }, s.online && l.cpuPct != null ? pct(l.cpuPct) : "");
-    chart("mem", { ...base, max: memMax, fmt: bytes, series: [
-      { label: "已用", color: C.green, data: d.mem },
-      ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: C.orange, data: d.swap, fill: 0.2 }] : [])] },
-      s.online && l.memTotal ? `${bytes(l.memUsed)} / ${bytes(l.memTotal)}` : "");
+  {
+    const cpuId = docker ? "hcpu" : "cpu";
+    const user = d.cpuUser || [], system = d.cpuSystem || [], waitA = d.cpuWait || [];
+    const present = (data) => data.some((v) => v != null);
+    const busyAt = (i) => user[i] == null && system[i] == null ? (d.cpu || [])[i] : (user[i] || 0) + (system[i] || 0) + (waitA[i] || 0);
+    const hist = (d.cpu || []).map((v, i) => (user[i] == null && system[i] == null ? v : null));
+    const usedTip = d.t.map((_, i) => (user[i] == null && system[i] == null ? null : busyAt(i)));
+    const idle = d.t.map((_, i) => { const b = busyAt(i); return b == null || isNaN(b) ? null : Math.max(0, 100 - b); });
+    const cpuSeries = [
+      ...(present(hist) ? [{ label: "已用", color: C.blue, data: hist, legend: false }] : []),
+      ...(present(user) ? [{ label: "用户", color: C.blue, data: user }] : []),
+      ...(present(system) ? [{ label: "系统", color: "#ef4444", data: system }] : []),
+      ...(waitA.some((v) => v > 0.5) ? [{ label: "等待", color: C.orange, data: waitA }] : []),
+      { label: "已用", color: C.blue, data: usedTip, tipOnly: true },
+      { label: "空闲", color: C.faint, data: idle, tipOnly: true },
+      { label: "峰值", color: C.faint, data: d.cpuMax, area: false, dash: true, width: 1 },
+    ];
+    chart(cpuId, { ...base, stacked: true, max: 100, fmt: pct, series: cpuSeries }, s.online && l.cpuPct != null ? pct(l.cpuPct) : "");
+    const cpuDesc = $("#desc-" + cpuId);
+    if (cpuDesc) {
+      if (s.online && l.cpuUserPct != null && l.cpuSystemPct != null) {
+        const idle = Math.max(0, 100 - (l.cpuPct || 0));
+        const wait = l.cpuWaitPct > 0.5 ? ` · 等待 ${pct(l.cpuWaitPct)}` : "";
+        cpuDesc.textContent = `已用 ${pct(l.cpuPct)} · 用户 ${pct(l.cpuUserPct)} · 系统 ${pct(l.cpuSystemPct)}${wait} · 空闲 ${pct(idle)}`;
+      } else cpuDesc.textContent = "全部核心平均值";
+    }
+    if (!docker) {
+      renderGPU(s, d, base);
+      chart("mem", { ...base, max: memMax, fmt: bytes, series: [
+        { label: "已用", color: C.green, data: d.mem },
+        ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: C.orange, data: d.swap, fill: 0.2 }] : [])] },
+        s.online && l.memTotal ? `${bytes(l.memUsed)} / ${bytes(l.memTotal)}` : "");
+    }
   }
   const parts = diskParts(d, l);
   const nDisk = poolDisks(l).disks.length;
@@ -462,13 +537,21 @@ async function loadSeries(s) {
 
   const hasLoad = d.load1.some((v) => v > 0);
   const winLoad = s.info?.os === "windows";
-  const hasTemp = d.temp.some((v) => v != null);
+  const tempBy = d.tempBy || {};
+  const tempNames = [];
+  for (const t of (l.temps || [])) if (t.name && !tempNames.includes(t.name)) tempNames.push(t.name);
+  for (const n of Object.keys(tempBy)) if (!tempNames.includes(n)) tempNames.push(n);
+  const hasTempSeries = tempNames.some((n) => (tempBy[n] || []).some((v) => v != null));
+  const hasTemp = hasTempSeries || d.temp.some((v) => v != null) || (l.temps || []).length > 0;
   $("#p-load").hidden = !hasLoad;
-  $("#p-temp").hidden = !hasTemp;
+  const tempPanel = $("#p-temp");
+  if (tempPanel) tempPanel.hidden = !hasTemp;
   $("#p-nerr").hidden = !hasErr;
   $("#p-tcp").hidden = !hasTCP;
   $("#p-conn").hidden = !hasConn;
+  renderCores(s);
   spanRows($("#charts"));
+  document.querySelectorAll(".grid-pair").forEach(spanRows);
   if (docker) spanRows($("#ctr-charts"));
   $("#p-load").querySelector("h3").textContent = winLoad ? "系统负载（估算）" : "系统负载";
   $("#desc-load").textContent = winLoad
@@ -479,13 +562,132 @@ async function loadSeries(s) {
     { label: "load5", color: C.violet, data: d.load5, fill: 0.18, width: 1.3 },
     { label: "load15", color: C.cyan, data: d.load15, fill: 0.12, width: 1.3 }] },
     s.online && l.load ? l.load.map((x) => x.toFixed(2)).join(" / ") : "");
-  if (!docker) chart("procs", { ...base, fmt: (v) => (v == null ? "—" : Math.round(v) + ""), series: [{ label: "进程", color: C.orange, data: d.procs }] },
-    s.online && l.procs ? l.procs + " 个" : "");
 
   if (hasTemp) {
-    chart("temp", { ...base, fmt: (v) => (v == null ? "—" : v.toFixed(0) + "°C"), series: [{ label: "最高", color: C.yellow, data: d.temp }] },
-      s.online && l.tempMax ? l.tempMax.toFixed(0) + "°C" : "");
-    $("#lg-temp").innerHTML = (l.temps || []).slice(0, 8).map((t) => `<span>${esc(t.name)} <b>${t.c.toFixed(0)}°C</b></span>`).join("");
+    const tempFmt = (v, axis) => (v == null ? "—" : (axis && Math.abs(v - Math.round(v)) > 0.05 ? v.toFixed(1) : v.toFixed(0)) + "°C");
+    const liveC = new Map((l.temps || []).map((t) => [t.name, t.c]));
+    const series = hasTempSeries
+      ? tempNames.filter((n) => (tempBy[n] || []).some((v) => v != null) || liveC.has(n)).map((n, i) => ({
+        label: n, color: PART_COLORS[i % PART_COLORS.length], data: tempBy[n] || [], fill: 0.22, width: 1.5,
+      }))
+      : [{ label: "最高", color: C.yellow, data: d.temp }];
+    chart("temp", { ...base, fit: "band", fmt: tempFmt, series }, s.online ? tempNow(l.temps, l.tempMax) : "");
+    $("#lg-temp").innerHTML = series.map((se) => {
+      const c = liveC.get(se.label);
+      return `<span><i style="background:${se.color}"></i>${esc(se.label)}${c != null ? " " + c.toFixed(0) + "°C" : ""}</span>`;
+    }).join("");
+  }
+}
+
+/** Current corner text: hottest sensor and the mean of the live readings. */
+function tempNow(temps, tempMax) {
+  const vals = (temps || []).map((t) => t.c).filter((c) => c > 0);
+  if (!vals.length) return tempMax ? tempMax.toFixed(0) + "°C" : "";
+  const max = Math.max(...vals);
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  return `最高 ${max.toFixed(0)}°C · 平均 ${avg.toFixed(0)}°C`;
+}
+
+const GPU_COLORS = [C.green, C.blue, C.orange, C.violet, C.cyan, C.pink];
+
+/** @param {GPUInfo[]} gpus */
+function gpuHeadline(gpus) {
+  if (!gpus.length) return "";
+  if (gpus.length === 1) {
+    const g = gpus[0];
+    const bits = ["利用率 " + pct(g.utilPct)];
+    if (g.renderPct != null) bits.push("渲染利用率 " + pct(g.renderPct));
+    if (g.tilerPct != null) bits.push("Tiler 利用率 " + pct(g.tilerPct));
+    return bits.join(" · ");
+  }
+  return "";
+}
+
+/** Highest point of the series currently on screen. */
+function seriesPeak(series) {
+  let m = null;
+  for (const s of series) {
+    for (const v of s.data || []) {
+      if (v == null || isNaN(v)) continue;
+      m = m == null ? v : Math.max(m, v);
+    }
+  }
+  return m;
+}
+
+/** An unnamed adapter left behind in history, with no live device of that name. */
+function phantomGPU(name, live) {
+  return /^GPU(?: \d+)?$/.test(name) && !live.has(name);
+}
+
+/** History keys for one device: utilization, then Apple renderer and tiler. */
+function gpuTracks(name, g, hist, color) {
+  const tracks = [{ key: name, label: "利用率", color, fill: 0.28, cur: g ? g.utilPct : null }];
+  const renderKey = name + " 渲染";
+  const tilerKey = name + " Tiler";
+  if ((g && g.renderPct != null) || hist[renderKey]) tracks.push({ key: renderKey, label: "渲染利用率", color: C.orange, fill: 0.2, cur: g && g.renderPct != null ? g.renderPct : null });
+  if ((g && g.tilerPct != null) || hist[tilerKey]) tracks.push({ key: tilerKey, label: "Tiler 利用率", color: C.cyan, fill: 0.16, cur: g && g.tilerPct != null ? g.tilerPct : null });
+  return tracks;
+}
+
+/** @param {GPUInfo | undefined} g */
+function gpuMeta(g) {
+  if (!g) return "";
+  const mem = g.memUsed ? (g.memTotal ? `${bytes(g.memUsed)} / ${bytes(g.memTotal)}` : bytes(g.memUsed)) : "";
+  return [mem, g.tempC != null ? g.tempC.toFixed(0) + "°C" : "", g.cores ? g.cores + " 核" : ""].filter(Boolean).join(" · ");
+}
+
+/** @param {SystemView} s @param {Series} d @param {object} base */
+function renderGPU(s, d, base) {
+  const panel = $("#p-gpu");
+  if (!panel) return;
+  const l = s.latest || /** @type {Partial<Sample>} */ ({});
+  const live = l.gpus || [];
+  const hist = d.gpus || {};
+  const liveNames = new Set(live.map((g) => g.name).filter(Boolean));
+  const named = [];
+  for (const g of live) if (g.name && !named.includes(g.name)) named.push(g.name);
+  for (const n of Object.keys(hist)) {
+    const baseName = n.replace(/ 渲染$| Tiler$/, "");
+    if (phantomGPU(baseName, liveNames) || named.includes(baseName)) continue;
+    named.push(baseName);
+  }
+  panel.hidden = named.length === 0;
+  if (!named.length) return;
+  const several = named.length > 1;
+  const series = [];
+  named.forEach((name, i) => {
+    const g = live.find((x) => x.name === name);
+    const color = several ? GPU_COLORS[i % GPU_COLORS.length] : C.green;
+    const tracks = gpuTracks(name, g, hist, color);
+    for (const t of tracks) {
+      const lone = !several && t.label === "利用率" && tracks.length === 1;
+      series.push({
+        label: several ? (tracks.length === 1 ? name : `${name} ${t.label}`) : (lone ? name : t.label),
+        color: t.color, fill: t.fill, data: hist[t.key] || [], cur: t.cur,
+      });
+    }
+  });
+  const peak = several ? seriesPeak(series) : null;
+  // One GPU lists each live reading in the legend, so the corner stays empty.
+  const corner = several && peak != null ? "最高 " + pct(peak) : (!several && series.length > 1 ? "" : gpuHeadline(live));
+  chart("gpu", { ...base, fit: "ceil", fitMin: 10, fmt: pct, series }, corner);
+  const legend = $("#lg-gpu");
+  legend.classList.toggle("cards", several);
+  if (several) {
+    legend.innerHTML = named.map((name, i) => {
+      const g = live.find((x) => x.name === name);
+      const mem = g && g.memUsed ? (g.memTotal ? `${bytes(g.memUsed)} / ${bytes(g.memTotal)}` : bytes(g.memUsed)) : "";
+      return `<span><i style="background:${GPU_COLORS[i % GPU_COLORS.length]}"></i><b class="nm">${esc(name)}</b>${mem ? `<span class="mem">${esc(mem)}</span>` : ""}</span>`;
+    }).join("");
+    $("#desc-gpu").textContent = "每张卡一条曲线";
+  } else {
+    legend.innerHTML = series.map((se) => `<span><i style="background:${se.color}"></i>${esc(se.label)}${se.cur != null ? " " + pct(se.cur) : ""}</span>`).join("");
+    const bits = live.map((g) => {
+      const extra = gpuMeta(g);
+      return extra ? `${g.name}（${extra}）` : g.name;
+    });
+    $("#desc-gpu").textContent = bits.length ? bits.join("；") : "设备占用";
   }
 }
 
@@ -606,7 +808,7 @@ function chart(id, opts, now, extra) {
   if (now !== undefined) $("#now-" + id).textContent = now || "";
   const lg = $("#lg-" + id);
   if (lg && id !== "temp") {
-    const solid = opts.series.filter((s) => !s.dash);
+    const solid = opts.series.filter((s) => !s.dash && !s.tipOnly && s.legend !== false);
     const peak = solid.length < opts.series.length ? `<span><i class="dash"></i>虚线为区间峰值</span>` : "";
     lg.innerHTML = html`${solid.map((s) => html`<span><i style="background:${s.color}"></i>${s.label}</span>`)}` + peak + (extra || "");
   }

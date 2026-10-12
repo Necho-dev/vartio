@@ -19,6 +19,7 @@ func doPower(action string) (entities.PowerResult, *entities.FrameError) {
 		return entities.PowerResult{}, bad("action must be shutdown or reboot")
 	}
 	cmd := exec.Command("shutdown.exe", args...)
+	quiet(cmd)
 	if err := cmd.Start(); err != nil {
 		return entities.PowerResult{}, asRPC(err)
 	}

@@ -72,7 +72,11 @@ export function bytes(v, axis) {
 /** @param {number | null | undefined} v @param {boolean} [axis] */
 export const rate = (v, axis) => (v == null ? "—" : bytes(v, axis) + "/s");
 /** @param {number | null | undefined} v @param {boolean} [axis] */
-export const pct = (v, axis) => (v == null || isNaN(v) ? "—" : (axis ? v.toFixed(0) : v.toFixed(1)) + "%");
+export const pct = (v, axis) => {
+  if (v == null || isNaN(v)) return "—";
+  const digits = axis ? (Math.abs(v - Math.round(v)) > 0.05 && v < 10 ? 1 : 0) : 1;
+  return v.toFixed(digits) + "%";
+};
 /** @param {number} sec */
 export function dur(sec) {
   if (!(sec > 0)) return "—";

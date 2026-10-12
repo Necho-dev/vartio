@@ -316,7 +316,9 @@ func stage(ctx context.Context, cfg config, req entities.UpgradeRequest, dst str
 func selfTest(ctx context.Context, bin, want string) error {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "version").CombinedOutput()
+	cmd := exec.CommandContext(ctx, bin, "version")
+	quiet(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("自检失败：%v %s", err, bytes.TrimSpace(out))
 	}

@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -63,15 +64,32 @@ func (h *Hub) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 	var hello entities.Hello
-	if err := conn.ReadJSON(&hello); err != nil {
-		_ = conn.WriteJSON(entities.Frame{Error: &entities.FrameError{Code: "bad_request", Message: "hello required"}})
+	_, msg, err := conn.ReadMessage()
+	if err == nil {
+		err = json.Unmarshal(msg, &hello)
+	}
+	if err != nil {
+		at := bytes.IndexByte(msg, 0)
+		lo, hi := at-40, at+40
+		if lo < 0 {
+			lo = 0
+		}
+		if hi > len(msg) || at < 0 {
+			hi = len(msg)
+		}
+		if at < 0 {
+			lo = 0
+		}
+		log.Printf("guest hello: %v n=%d nul=%d around=%q", err, len(msg), at, msg[lo:hi])
+		_ = conn.WriteJSON(entities.HelloOK{OK: false, Code: "bad_request", Message: "hello required: " + err.Error()})
 		_ = conn.Close()
 		return
 	}
 	hello.BiosUUID = normUUID(hello.BiosUUID)
 	hello.DeviceID = normUUID(hello.DeviceID)
 	if hello.BiosUUID == "" {
-		_ = conn.WriteJSON(entities.Frame{Error: &entities.FrameError{Code: "bad_request", Message: "biosUuid required"}})
+		log.Printf("guest hello missing bios device=%s host=%s", hello.DeviceID, hello.HostName)
+		_ = conn.WriteJSON(entities.HelloOK{OK: false, Code: "bad_request", Message: "biosUuid required"})
 		_ = conn.Close()
 		return
 	}
@@ -136,6 +154,8 @@ func (h *Hub) RegisterDev(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+entities.PathSessions+"/{id}", h.wrap(h.handleSessionInfo))
 	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/health", h.wrap(h.handleHealth))
 	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/procs", h.wrap(h.handleProcsGet))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/ports", h.wrap(h.handlePortsGet))
+	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/apps", h.wrap(h.handleAppsGet))
 	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/procs", h.wrap(h.handleProcsPost))
 	mux.HandleFunc("GET "+entities.PathSessions+"/{id}/services", h.wrap(h.handleServicesGet))
 	mux.HandleFunc("POST "+entities.PathSessions+"/{id}/services", h.wrap(h.handleServicesPost))
@@ -216,6 +236,22 @@ func (h *Hub) handleDockerCompose(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	h.audit(r.PathValue("id"), "docker.compose", "项目 "+project, clientIP(r), nil)
+	return writeJSON(w, out)
+}
+
+func (h *Hub) handleAppsGet(w http.ResponseWriter, r *http.Request) error {
+	out, err := h.Apps(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, out)
+}
+
+func (h *Hub) handlePortsGet(w http.ResponseWriter, r *http.Request) error {
+	out, err := h.Ports(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
 	return writeJSON(w, out)
 }
 

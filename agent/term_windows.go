@@ -138,6 +138,7 @@ func (w *handleWriter) Close() error { return nil }
 
 func startPipes(onOut func([]byte), onExit func()) (io.WriteCloser, func(), func(int, int), error) {
 	cmd := exec.Command("cmd.exe")
+	quiet(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, nil, nil, err

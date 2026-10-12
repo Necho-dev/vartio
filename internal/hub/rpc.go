@@ -90,6 +90,29 @@ func (h *Hub) DockerCompose(ctx context.Context, key, project string) (entities.
 	return decode[entities.DockerComposeResult](raw)
 }
 
+func (h *Hub) Apps(ctx context.Context, bios string) ([]entities.AppInfo, error) {
+	raw, err := h.Call(ctx, bios, entities.MethodAppsList, nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := decode[[]entities.AppInfo](raw)
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []entities.AppInfo{}
+	}
+	return out, nil
+}
+
+func (h *Hub) Ports(ctx context.Context, bios string) ([]entities.PortInfo, error) {
+	raw, err := h.Call(ctx, bios, entities.MethodPortsList, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decode[[]entities.PortInfo](raw)
+}
+
 func (h *Hub) Procs(ctx context.Context, bios string) ([]entities.ProcInfo, error) {
 	raw, err := h.Call(ctx, bios, entities.MethodProcsList, nil)
 	if err != nil {

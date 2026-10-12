@@ -60,7 +60,8 @@ const rollupHostCols = `
 	retrans_pct double precision, latency_ms double precision,
 	tcp_out_segs double precision, tcp_retrans_segs double precision,
 	conn_tcp double precision, conn_udp double precision, conn_other double precision,
-	disk_parts jsonb, net_nics jsonb`
+	cpu_user double precision, cpu_system double precision, cpu_iowait double precision,
+	disk_parts jsonb, net_nics jsonb, gpus jsonb, temps jsonb`
 
 const rollupCtrCols = `
 	cpu_pct double precision, mem_used double precision NOT NULL, mem_limit double precision NOT NULL,
@@ -102,6 +103,7 @@ var hostAggs = []agg{
 	{"tcp_estab", "avg", ""}, {"tcp_time_wait", "avg", ""}, {"tcp_listen", "avg", ""},
 	{"retrans_pct", "avg", ""}, {"latency_ms", "avg", ""}, {"tcp_out_segs", "sum", ""}, {"tcp_retrans_segs", "sum", ""},
 	{"conn_tcp", "avg", ""}, {"conn_udp", "avg", ""}, {"conn_other", "avg", ""},
+	{"cpu_user", "avg", ""}, {"cpu_system", "avg", ""}, {"cpu_iowait", "avg", ""},
 }
 
 var ctrAggs = []agg{
@@ -126,8 +128,8 @@ func rollupSQL(from, to Source, interval time.Duration) (host, ctr string) {
 	}
 	cols, exprs, sets := build(hostAggs)
 	host = fmt.Sprintf(`
-		INSERT INTO %[1]s (device_id, ts, %[3]s, disk_parts, net_nics)
-		SELECT a.*, p.parts, n.nics FROM (
+		INSERT INTO %[1]s (device_id, ts, %[3]s, disk_parts, net_nics, gpus, temps)
+		SELECT a.*, p.parts, n.nics, g.gpus, t.temps FROM (
 			SELECT device_id, %[5]s AS b, %[4]s FROM %[2]s WHERE ts >= $1 GROUP BY 1, 2) a
 		LEFT JOIN (
 			SELECT device_id, b, jsonb_object_agg(key, v) AS parts FROM (
@@ -141,7 +143,17 @@ func rollupSQL(from, to Source, interval time.Duration) (host, ctr string) {
 					sum(coalesce((p.value->>'rb')::float8, 0)) AS rb, sum(coalesce((p.value->>'tb')::float8, 0)) AS tb
 				FROM %[2]s, jsonb_each(net_nics) p WHERE ts >= $1 AND net_nics IS NOT NULL GROUP BY 1, 2, 3) x
 			GROUP BY 1, 2) n USING (device_id, b)
-		ON CONFLICT (device_id, ts) DO UPDATE SET %[6]s, disk_parts = EXCLUDED.disk_parts, net_nics = EXCLUDED.net_nics`,
+		LEFT JOIN (
+			SELECT device_id, b, jsonb_object_agg(key, v) AS gpus FROM (
+				SELECT device_id, %[5]s AS b, p.key, avg(p.value::float8) AS v
+				FROM %[2]s, jsonb_each_text(gpus) p WHERE ts >= $1 AND gpus IS NOT NULL GROUP BY 1, 2, 3) x
+			GROUP BY 1, 2) g USING (device_id, b)
+		LEFT JOIN (
+			SELECT device_id, b, jsonb_object_agg(key, v) AS temps FROM (
+				SELECT device_id, %[5]s AS b, p.key, avg(p.value::float8) AS v
+				FROM %[2]s, jsonb_each_text(temps) p WHERE ts >= $1 AND temps IS NOT NULL GROUP BY 1, 2, 3) x
+			GROUP BY 1, 2) t USING (device_id, b)
+		ON CONFLICT (device_id, ts) DO UPDATE SET %[6]s, disk_parts = EXCLUDED.disk_parts, net_nics = EXCLUDED.net_nics, gpus = EXCLUDED.gpus, temps = EXCLUDED.temps`,
 		to.host, from.host, cols, exprs, bin, sets)
 	cols, exprs, sets = build(ctrAggs)
 	ctr = fmt.Sprintf(`

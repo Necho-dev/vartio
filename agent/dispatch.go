@@ -24,6 +24,12 @@ func (a *agent) dispatch(fr entities.Frame) (any, *entities.FrameError) {
 	case entities.MethodProcsList:
 		list, err := listProcs()
 		return list, asRPC(err)
+	case entities.MethodPortsList:
+		list, err := listPorts()
+		return list, asRPC(err)
+	case entities.MethodAppsList:
+		list, err := listApps()
+		return list, asRPC(err)
 	case entities.MethodProcsAction:
 		var req entities.ActionRequest
 		if err := json.Unmarshal(fr.Params, &req); err != nil {

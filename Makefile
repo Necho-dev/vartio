@@ -1,12 +1,16 @@
-.PHONY: vartio vartio-build vartio-webcheck vartio-agent vartio-agent-dist vartio-agent-windows test docker-agent docker-hub docker-images docker-push
+.PHONY: vartio vartio-build vartio-webcheck vartio-agent vartio-agent-headless vartio-agent-dist vartio-agent-windows test docker-agent docker-hub docker-images docker-push
 
 # Hub（不连 ESXi）
 vartio:
 	go run ./internal/cmd/hub
 
-# Agent（出站连 Hub :8766）
+# Agent（出站连 Hub :8766）。macOS 默认带 cgo，菜单栏可用。
 vartio-agent:
 	go run ./internal/cmd/agent
+
+# 无 cgo 的轻量后台进程：采集与带 cgo 的构建相同（含 GPU），没有菜单栏，也没有本机画面。
+vartio-agent-headless:
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o dist/vartio-agent-headless ./internal/cmd/agent
 
 # 分发包按版本 / 平台隔离：dist/vartio-agent/<ver>/vartio-agent-<ver>-<os>-<arch>/
 vartio-agent-dist:

@@ -33,3 +33,13 @@ func TestDeriveDiskSumsPartitions(t *testing.T) {
 		t.Fatalf("shared pool counted twice: %d/%d", shared.DiskUsed, shared.DiskTotal)
 	}
 }
+
+func TestDeriveKeepsGPUs(t *testing.T) {
+	m := &Monitor{prev: map[string]counters{}}
+	smp := m.derive("id", entities.Metrics{
+		GPUs: []entities.GPUInfo{{Name: "Apple M1 Pro", Vendor: "apple", UtilPct: 23}},
+	}, time.Second)
+	if len(smp.GPUs) != 1 || smp.GPUs[0].Name != "Apple M1 Pro" || smp.GPUs[0].UtilPct != 23 {
+		t.Fatalf("%+v", smp.GPUs)
+	}
+}

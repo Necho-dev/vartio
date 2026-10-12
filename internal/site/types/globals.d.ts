@@ -19,6 +19,10 @@ interface ChartSeries {
   fill?: number;
   /** plot against the right axis (ChartOpts.fmt2) */
   right?: boolean;
+  /** tooltip row only: no stroke, no fill, no legend */
+  tipOnly?: boolean;
+  /** draw and show in the tooltip, but omit the bottom legend swatch */
+  legend?: boolean;
 }
 
 interface ChartOpts {
@@ -33,6 +37,8 @@ interface ChartOpts {
   max?: number | null;
   stacked?: boolean;
   totalLabel?: string;
+  /** extra tooltip rows after the series, for values that are not drawn */
+  tipExtra?: (i: number) => string;
   capacity?: number | null;
   empty?: string;
 }

@@ -14,6 +14,8 @@ const (
 	MethodMetrics        = "metrics"
 	MethodProcsList      = "procs.list"
 	MethodProcsAction    = "procs.action"
+	MethodPortsList      = "ports.list"
+	MethodAppsList       = "apps.list"
 	MethodServicesList   = "services.list"
 	MethodServicesAction = "services.action"
 	MethodExec           = "exec"
@@ -45,6 +47,8 @@ const (
 const (
 	HealthTimeout = 5 * time.Second
 	ListTimeout   = 5 * time.Second
+	// AppsTimeout covers a desktop app scan plus one process sample.
+	AppsTimeout   = 30 * time.Second
 	ActionTimeout = 15 * time.Second
 	PowerTimeout  = 10 * time.Second
 	// UpgradeTimeout covers download, verification and the self-test run.
@@ -221,6 +225,38 @@ type Listener struct {
 	Port int    `json:"port"`
 	PID  int32  `json:"pid,omitempty"`
 	Name string `json:"name,omitempty"`
+}
+
+// PortInfo is one socket holding a local port. Proto is tcp (listening) or udp
+// (bound). UDP has no connection state. Name is empty when the process cannot
+// be read; PID 0 means the kernel kept the row without an owner.
+type PortInfo struct {
+	Proto string `json:"proto"`
+	IP    string `json:"ip"`
+	Port  int    `json:"port"`
+	PID   int32  `json:"pid,omitempty"`
+	Name  string `json:"name,omitempty"`
+}
+
+// AppInfo is one graphical desktop application. Servers and containers report
+// an empty list. Source is a stable token (appstore, homebrew, store, flatpak,
+// snap, deb, rpm, apk, appimage, developer). Arch is universal, arm64, x64,
+// x86, or neutral. Size is bytes. Installed and LastUsed are RFC3339.
+type AppInfo struct {
+	ID        string  `json:"id,omitempty"`
+	Name      string  `json:"name"`
+	Version   string  `json:"version,omitempty"`
+	Publisher string  `json:"publisher,omitempty"`
+	Arch      string  `json:"arch,omitempty"`
+	Source    string  `json:"source,omitempty"`
+	Path      string  `json:"path,omitempty"`
+	Size      int64   `json:"size,omitempty"`
+	Installed string  `json:"installed,omitempty"`
+	LastUsed  string  `json:"lastUsed,omitempty"`
+	Running   bool    `json:"running,omitempty"`
+	Procs     int     `json:"procs,omitempty"`
+	CPUPct    float64 `json:"cpuPct,omitempty"`
+	MemMB     float64 `json:"memMB,omitempty"`
 }
 
 type TunnelOpenRequest struct {
@@ -486,28 +522,70 @@ type TempSensor struct {
 	C    float64 `json:"c"`
 }
 
+// GPUInfo is one graphics device. UtilPct is 0 when the device is idle.
+// MemTotal is dedicated VRAM; Apple Silicon leaves it empty because the GPU
+// uses unified memory, and MemUsed is then the in-use portion of that pool.
+// RenderPct and TilerPct are set only when the source reports them (Apple).
+type GPUInfo struct {
+	Name      string   `json:"name"`
+	Vendor    string   `json:"vendor,omitempty"` // apple, nvidia, amd, intel
+	UtilPct   float64  `json:"utilPct"`
+	MemUsed   uint64   `json:"memUsed,omitempty"`
+	MemTotal  uint64   `json:"memTotal,omitempty"`
+	TempC     *float64 `json:"tempC,omitempty"`
+	PowerW    *float64 `json:"powerW,omitempty"`
+	ClockMHz  *float64 `json:"clockMHz,omitempty"`
+	RenderPct *float64 `json:"renderPct,omitempty"`
+	TilerPct  *float64 `json:"tilerPct,omitempty"`
+	Cores     int      `json:"cores,omitempty"`
+}
+
+// Battery is the internal pack on this sample. Absent when the machine has no
+// battery. State is charging, full, discharging, or ac (plugged in, not charging).
+type Battery struct {
+	Percent float64 `json:"percent"`
+	State   string  `json:"state"`
+}
+
+// CPUCore is one logical processor's utilization over the last sample interval.
+// Kind is "p" or "e" when the machine has performance and efficiency cores.
+type CPUCore struct {
+	Pct  float64 `json:"pct"`
+	Kind string  `json:"kind,omitempty"`
+}
+
 // Metrics is one monitoring sample. Byte counters are cumulative; the hub derives rates.
 type Metrics struct {
-	TimeMs    int64       `json:"timeMs"`
-	Info      SysInfo     `json:"info"`
-	CPUPct    float64     `json:"cpuPct"`
-	Load      [3]float64  `json:"load"`
-	MemTotal  uint64      `json:"memTotal"`
-	MemUsed   uint64      `json:"memUsed"`
-	SwapTotal uint64      `json:"swapTotal"`
-	SwapUsed  uint64      `json:"swapUsed"`
-	RootMount string      `json:"rootMount,omitempty"`
-	Disks     []DiskUsage `json:"disks"`
-	DiskRead  uint64      `json:"diskRead"`
-	DiskWrite uint64      `json:"diskWrite"`
-	NetRx     uint64      `json:"netRx"`
-	NetTx     uint64      `json:"netTx"`
+	TimeMs int64   `json:"timeMs"`
+	Info   SysInfo `json:"info"`
+	CPUPct float64 `json:"cpuPct"`
+	// User, system, and iowait are shares of the same interval as CPUPct.
+	// Nil until a second sample exists. Cores is live only and is not stored as history.
+	CPUUserPct   *float64    `json:"cpuUserPct,omitempty"`
+	CPUSystemPct *float64    `json:"cpuSystemPct,omitempty"`
+	CPUWaitPct   *float64    `json:"cpuWaitPct,omitempty"`
+	Cores        []CPUCore   `json:"cores,omitempty"`
+	Load         [3]float64  `json:"load"`
+	MemTotal     uint64      `json:"memTotal"`
+	MemUsed      uint64      `json:"memUsed"`
+	SwapTotal    uint64      `json:"swapTotal"`
+	SwapUsed     uint64      `json:"swapUsed"`
+	RootMount    string      `json:"rootMount,omitempty"`
+	Disks        []DiskUsage `json:"disks"`
+	DiskRead     uint64      `json:"diskRead"`
+	DiskWrite    uint64      `json:"diskWrite"`
+	NetRx        uint64      `json:"netRx"`
+	NetTx        uint64      `json:"netTx"`
 	// Packet, error and drop counters cover the same NICs as NetRx/NetTx (agent >= 1.14.0).
 	NetPkts *NetPackets  `json:"netPkts,omitempty"`
 	TCP     *TCPStats    `json:"tcp,omitempty"`
 	NICs    []NICInfo    `json:"nics"`
 	Temps   []TempSensor `json:"temps,omitempty"`
-	Procs   int          `json:"procs"`
+	// GPUs is the live graphics sample. Utilization is stored in history.
+	GPUs []GPUInfo `json:"gpus,omitempty"`
+	// Battery is the current pack reading. It is not stored as a series.
+	Battery *Battery `json:"battery,omitempty"`
+	Procs   int      `json:"procs"`
 	// Docker is set when the agent has CapDocker (agent >= 1.17.0).
 	Docker *DockerInfo `json:"docker,omitempty"`
 }
@@ -874,8 +952,10 @@ type AgentFlag struct {
 
 func TimeoutFor(method string, execSec int) time.Duration {
 	switch method {
-	case MethodHealth, MethodMetrics, MethodProcsList, MethodServicesList, MethodFsWhich, MethodFsRead, MethodDockerInspect, MethodDockerCompose:
+	case MethodHealth, MethodMetrics, MethodProcsList, MethodPortsList, MethodServicesList, MethodFsWhich, MethodFsRead, MethodDockerInspect, MethodDockerCompose:
 		return ListTimeout
+	case MethodAppsList:
+		return AppsTimeout
 	case MethodDockerLogs:
 		return ActionTimeout
 	case MethodProcsAction, MethodServicesAction, MethodProcSpawn, MethodNetListeners:

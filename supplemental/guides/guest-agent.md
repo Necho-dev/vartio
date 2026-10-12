@@ -185,7 +185,11 @@ dist/probe-agent/
 | 终端前台 | 直接运行 | 调试 | `console` |
 
 - **Windows 托盘**：`install` 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `ProbeAgent`，并立即在后台启动；`uninstall` 删除该项并结束本机的托盘探针。托盘与服务二选一，装了一种再装另一种会被拒绝。直接双击 exe 也会进入托盘模式，但不会开机自启
-- **macOS 菜单栏**：`install` 写 `~/Library/LaunchAgents/probe-agent.plist`（`RunAtLoad`、`KeepAlive`、仅 Aqua 会话）并 `launchctl bootstrap`。进程被结束会被 launchd 拉起，只有 `uninstall`（`bootout`）能停掉。不出现在程序坞。在终端里直接运行也会显示菜单栏图标，日志照常打到终端；root 或纯 SSH 登录时不显示。图标首次出现在系统图标（时钟、控制中心）左侧，避免被刘海挡住；按住 ⌘ 拖动可调整位置，重启和升级后保持（≥ 1.15.2，记录在 `~/Library/Preferences/probe-agent.plist`）
+- **两个构建**：`CGO_ENABLED=0` 是轻量后台进程，采集和上报与带 cgo 的构建相同（含 GPU），不链接 AppKit，没有菜单栏，也没有实时画面。带 cgo 的构建在此之上有菜单栏图标；本机指标面板用同一份采样，不另开一套采集。面板怎么排还没定，菜单里现在仍是连接状态、打开监控页、日志和重连
+- **macOS 菜单栏**：cgo 构建才有图标，`GUEST_TRAY=off` 可以关掉。`install` 写 `~/Library/LaunchAgents/probe-agent.plist`（`RunAtLoad`、`KeepAlive`、仅 Aqua 会话）并 `launchctl bootstrap`。进程被结束会被 launchd 拉起，只有 `uninstall`（`bootout`）能停掉。不出现在程序坞。在终端里直接运行 cgo 构建也会显示菜单栏图标，日志照常打到终端；root 或纯 SSH 登录时不显示。图标首次出现在系统图标（时钟、控制中心）左侧，避免被刘海挡住；按住 ⌘ 拖动可调整位置，重启和升级后保持（≥ 1.15.2，记录在 `~/Library/Preferences/probe-agent.plist`）
+- **GPU**：三端都采，放在最新采样的 `gpus` 里。占用率写入历史；Mac 的渲染占用和 Tiler 占用也各记一条曲线。Mac 用 IOKit 的 `IORegistryEntryCreateCFProperties` 读 IOAccelerator 的 `PerformanceStatistics`（设备、渲染、Tiler），和菜单栏 State 同一条路径；`ioreg` 打出来的是未刷新的 0，不再使用。大约一秒内读四次，留下三项的峰值（这三项是瞬时值，单次读取经常落在两帧之间的 0）。Apple 给出核心数和已用统一内存，没有独立显存容量。Linux / Windows 找得到 `nvidia-smi` 时读型号、显存、温度、功耗、频率。占用率用和任务管理器同一套性能计数器（每张卡最忙的引擎），所以核显会和 NVIDIA 同时出现；没有计数器时才退回 `nvidia-smi` 的占用。`nvidia-smi` 以 `CREATE_NO_WINDOW` 启动，托盘探针不会每个采样周期弹出终端。没有 NVIDIA 时，Linux 读 DRM sysfs（AMD/Xe 的 `gpu_busy_percent` 和显存），Windows 仍用那套计数器。GPU 自身的温度同时放进系统温度
+- **温度**：默认采集，每个传感器一条历史曲线，卡片右上角是当前最高和平均。Mac 读 IOHID（CPU 晶粒、GPU、硬盘、电池等），`GUEST_TEMPS=0` 关掉。Windows 读 ACPI 热区，桌面机经常不提供，空读下一分钟再试，不再永久关闭；GPU 核心温度会补进同一张卡片。Linux 读 hwmon 与 thermal zone
+- **电量**：只放在最新采样的 `battery` 里，基础信息显示百分比和状态（充电中、已充满、使用电池、已接电源），不记历史。没有内置电池时省略。Mac 读 IOKit `AppleSmartBattery` 的 `CurrentCapacity` / `MaxCapacity`、`IsCharging`、`FullyCharged`、`ExternalConnected`。Windows 用 `GetSystemPowerStatus`（无电池标志位则省略，不启进程）。Linux 读 `/sys/class/power_supply` 里 `scope` 不是 `Device` 的 `Battery`（跳过鼠标这类外设）
 - `install` 时如果 exe 旁还没有 `probe-agent.env`，会把当前环境里的 `GUEST_*` 写进去（0600），因为登录自启拿不到终端里的环境变量
 - 同一用户只允许一个实例：Windows 用命名互斥量 `Local\probe-agent`，并检查服务是否在跑；macOS 用 exe 旁的 `probe-agent.lock`（launchd 拉起的实例会等锁，而不是反复退出重启）。重复启动会提示"已在后台运行"后退出
 - 菜单内容：连接状态（已连接时长 / 未连接原因 / 升级中）、Hub 地址、版本与设备 ID、打开监控页、查看日志、立即重连。**没有退出**，防止误关监控
