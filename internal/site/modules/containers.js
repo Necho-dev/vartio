@@ -20,6 +20,7 @@ const UP_UNIT = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, m
 /** @type {SystemView | null} */
 let current = null;
 let showAll = false;
+let showUnused = false;
 let ctrPage = 1;
 let imgPage = 1;
 
@@ -43,7 +44,8 @@ export function containersSection(opts) {
   </section>
   <section class="card panel ctr-card" id="imgs" hidden>
     <div class="ctr-head"><div><h3>${icon("package")}镜像</h3><p class="desc" id="imgDesc"></p></div>
-      <div class="pager" id="imgPager"></div></div>
+      <div class="ctr-tools"><div class="pager" id="imgPager"></div>
+      <label class="ctr-all"><input type="checkbox" id="imgAll"> 显示未使用</label></div></div>
     <div class="ctr-wrap"><table class="kv-table ctr-table" id="imgTable"></table></div>
   </section>`;
 }
@@ -65,6 +67,12 @@ export function renderContainers(s) {
     $("#ctrs").addEventListener("click", (ev) => onPager(ev, "ctr"));
     const imgs = $("#imgs");
     if (imgs && !imgs.dataset.bound) { imgs.dataset.bound = "1"; imgs.addEventListener("click", (ev) => onPager(ev, "img")); }
+    const imgAll = $("#imgAll");
+    if (imgAll && !imgAll.dataset.bound) {
+      imgAll.dataset.bound = "1";
+      imgAll.checked = showUnused;
+      imgAll.addEventListener("change", () => { showUnused = /** @type {HTMLInputElement} */ (imgAll).checked; imgPage = 1; if (current) renderContainers(current); });
+    }
   }
   const live = s.online;
   $("#ctrDesc").innerHTML = [d.engine && esc(d.engine + (d.version ? " " + d.version : "")), `运行 <b>${d.running}</b> / 共 ${d.total}`,
@@ -113,13 +121,18 @@ function renderImages(d) {
   const imgs = (d.images || []).slice().sort((a, b) => usedRank(b) - usedRank(a) || (b.created || 0) - (a.created || 0) || a.name.localeCompare(b.name));
   box.hidden = !imgs.length;
   if (!imgs.length) { paintPager("imgPager", "img", pageOf(0, 1), 0); return; }
-  const pg = pageOf(imgs.length, imgPage);
+  const rows = imgs.filter((i) => showUnused || i.inUse > 0);
+  const pg = pageOf(rows.length, imgPage);
   imgPage = pg.page;
   const used = imgs.filter((i) => i.inUse > 0).length;
   $("#imgDesc").textContent = `${imgs.length} 个镜像 · ${used} 个被容器使用`;
-  paintPager("imgPager", "img", pg, imgs.length);
+  paintPager("imgPager", "img", pg, rows.length);
+  if (!rows.length) {
+    $("#imgTable").innerHTML = `<tr><td class="faint">没有使用中的镜像，勾选“显示未使用”查看全部</td></tr>`;
+    return;
+  }
   $("#imgTable").innerHTML = `<tr><th>镜像名称</th><th>状态</th><th>大小</th><th>创建时间</th><th>更新检查</th><th>关联容器</th></tr>`
-    + imgs.slice(pg.start, pg.start + PAGE).map((i) => {
+    + rows.slice(pg.start, pg.start + PAGE).map((i) => {
       const rel = relatedContainers(i, containers);
       const outdated = rel.some((c) => c.update);
       const when = i.created ? new Date(i.created * 1000).toISOString() : "";
