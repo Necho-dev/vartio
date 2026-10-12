@@ -372,14 +372,14 @@ function renderHero(s) {
     </div>
     <div class="hero-actions">
       <div class="seg" id="rangeSeg">${RANGES.map(([k, n]) => `<button data-r="${k}" class="${state.range === k ? "on" : ""}">${n}</button>`).join("")}</div>
-      ${docker ? "" : `<button class="btn" id="termBtn" ${s.online ? "" : "disabled"}>${icon("square-terminal")}终端</button>
-      <button class="btn" id="screenBtn" ${s.online ? "" : "disabled"}>${icon("monitor")}实时画面</button>`}
+      ${docker ? "" : `<button class="btn" id="screenBtn" ${s.online ? "" : "disabled"}>${icon("monitor")}实时画面</button>
+      <button class="btn" id="termBtn" ${s.online ? "" : "disabled"}>${icon("square-terminal")}终端</button>`}
       <button class="btn" id="procBtn" ${s.online ? "" : "disabled"}>${icon("list")}进程</button>
       <button class="btn" id="portBtn" ${s.online ? "" : "disabled"}>${icon("ethernet-port")}端口</button>
-      <button class="btn" id="appBtn" ${s.online ? "" : "disabled"}>${icon("app-window")}应用</button>
+      ${docker ? "" : `<button class="btn" id="appBtn" ${s.online ? "" : "disabled"}>${icon("app-window")}应用</button>`}
       <button class="btn" id="filesBtn" ${s.online ? "" : "disabled"}>${icon("folder-open")}文件</button>
-      <button class="btn" id="pluginBtn" ${s.online ? "" : "disabled"}>${icon("grid-2x2-plus")}插件</button>
       <button class="btn" id="fwBtn">${icon("arrow-right-left")}隧道转发</button>
+      <button class="btn" id="pluginBtn" ${s.online ? "" : "disabled"}>${icon("grid-2x2-plus")}插件</button>
       ${canUpgrade(s) && outdated(s, latest) ? `<button class="btn primary" id="upBtn">${icon("circle-arrow-up")}升级到 ${esc(latest)}</button>` : ""}
       ${s.online ? "" : `<button class="btn danger" id="delBtn">${icon("trash-2")}删除</button>`}
     </div>`;
@@ -394,7 +394,7 @@ function renderHero(s) {
   $("#screenBtn")?.addEventListener("click", () => openScreen(s));
   $("#procBtn").addEventListener("click", () => openProcs(s));
   $("#portBtn").addEventListener("click", () => openPorts(s));
-  $("#appBtn").addEventListener("click", () => openApps(s));
+  $("#appBtn")?.addEventListener("click", () => openApps(s));
   $("#filesBtn").addEventListener("click", () => openFiles(s));
   $("#pluginBtn").addEventListener("click", () => openPluginDrawer(s));
   $("#fwBtn").addEventListener("click", () => openForwardDrawer(s));
@@ -474,14 +474,12 @@ async function loadSeries(s) {
     const present = (data) => data.some((v) => v != null);
     const busyAt = (i) => user[i] == null && system[i] == null ? (d.cpu || [])[i] : (user[i] || 0) + (system[i] || 0) + (waitA[i] || 0);
     const hist = (d.cpu || []).map((v, i) => (user[i] == null && system[i] == null ? v : null));
-    const usedTip = d.t.map((_, i) => (user[i] == null && system[i] == null ? null : busyAt(i)));
     const idle = d.t.map((_, i) => { const b = busyAt(i); return b == null || isNaN(b) ? null : Math.max(0, 100 - b); });
     const cpuSeries = [
       ...(present(hist) ? [{ label: "已用", color: C.blue, data: hist, legend: false }] : []),
       ...(present(user) ? [{ label: "用户", color: C.blue, data: user }] : []),
       ...(present(system) ? [{ label: "系统", color: "#ef4444", data: system }] : []),
       ...(waitA.some((v) => v > 0.5) ? [{ label: "等待", color: C.orange, data: waitA }] : []),
-      { label: "已用", color: C.blue, data: usedTip, tipOnly: true },
       { label: "空闲", color: C.faint, data: idle, tipOnly: true },
       { label: "峰值", color: C.faint, data: d.cpuMax, area: false, dash: true, width: 1 },
     ];
@@ -566,10 +564,10 @@ async function loadSeries(s) {
   if (hasTemp) {
     const tempFmt = (v, axis) => (v == null ? "—" : (axis && Math.abs(v - Math.round(v)) > 0.05 ? v.toFixed(1) : v.toFixed(0)) + "°C");
     const liveC = new Map((l.temps || []).map((t) => [t.name, t.c]));
+    const named = tempNames.filter((n) => (tempBy[n] || []).some((v) => v != null) || liveC.has(n));
+    named.sort((a, b) => tempFamily(a) - tempFamily(b) || a.localeCompare(b, "en", { numeric: true }));
     const series = hasTempSeries
-      ? tempNames.filter((n) => (tempBy[n] || []).some((v) => v != null) || liveC.has(n)).map((n, i) => ({
-        label: n, color: PART_COLORS[i % PART_COLORS.length], data: tempBy[n] || [], fill: 0.22, width: 1.5,
-      }))
+      ? named.map((n) => ({ label: n, color: tempColor(n, named), data: tempBy[n] || [], fill: 0.22, width: 1.5 }))
       : [{ label: "最高", color: C.yellow, data: d.temp }];
     chart("temp", { ...base, fit: "band", fmt: tempFmt, series }, s.online ? tempNow(l.temps, l.tempMax) : "");
     $("#lg-temp").innerHTML = series.map((se) => {
@@ -577,6 +575,27 @@ async function loadSeries(s) {
       return `<span><i style="background:${se.color}"></i>${esc(se.label)}${c != null ? " " + c.toFixed(0) + "°C" : ""}</span>`;
     }).join("");
   }
+}
+
+// Die, device, and board sensors each keep one hue. Lightness steps stay inside
+// the family so a host with many PMU probes does not cycle through every color.
+const TEMP_HUES = [
+  { re: /tdie/i, colors: ["#1d4ed8", "#2563eb", "#3b82f6", "#60a5fa", "#1e40af", "#93c5fd"] },
+  { re: /tdev/i, colors: ["#0f766e", "#0d9488", "#14b8a6", "#2dd4bf", "#115e59", "#5eead4"] },
+  { re: /(?:^|[^a-z])tp/i, colors: ["#c2410c", "#ea580c", "#f97316", "#fb923c", "#9a3412", "#fdba74"] },
+  { re: /.*/, colors: ["#6d28d9", "#7c3aed", "#8b5cf6", "#a78bfa", "#5b21b6", "#c4b5fd"] },
+];
+
+function tempFamily(name) {
+  const i = TEMP_HUES.findIndex((h) => h.re.test(name));
+  return i < 0 ? TEMP_HUES.length - 1 : i;
+}
+
+function tempColor(name, names) {
+  const fam = tempFamily(name);
+  const colors = TEMP_HUES[fam].colors;
+  const index = names.filter((n) => tempFamily(n) === fam).indexOf(name);
+  return colors[(index < 0 ? 0 : index) % colors.length];
 }
 
 /** Current corner text: hottest sensor and the mean of the live readings. */

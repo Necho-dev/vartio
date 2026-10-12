@@ -169,13 +169,20 @@ function draw(box) {
       cur.push([x(t[i]), yy(v), s.inStack ? yy(s.lower[i]) : PAD.t + ih]);
     }
     if (cur.length) segs.push(cur);
-    for (const seg of segs) {
-      if (seg.length === 1) seg.push([seg[0][0] + 1.5, seg[0][1], seg[0][2]]);
+    s._segs = segs.map((seg) => (seg.length === 1 ? [seg[0], [seg[0][0] + 1.5, seg[0][1], seg[0][2]]] : seg));
+    s._gid = gid;
+  });
+  order.forEach((s) => {
+    if (s.area === false) return;
+    for (const seg of s._segs) {
       const line = seg.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("");
-      if (s.area !== false) {
-        const back = seg.slice().reverse().map((p) => "L" + p[0].toFixed(1) + " " + p[2].toFixed(1)).join("");
-        el("path", { d: `${line}${back}Z`, fill: `url(#${gid})` }, svg);
-      }
+      const back = seg.slice().reverse().map((p) => "L" + p[0].toFixed(1) + " " + p[2].toFixed(1)).join("");
+      el("path", { d: `${line}${back}Z`, fill: `url(#${s._gid})` }, svg);
+    }
+  });
+  order.forEach((s) => {
+    for (const seg of s._segs) {
+      const line = seg.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("");
       el("path", { d: line, fill: "none", stroke: s.color, "stroke-width": s.width || 1.6, "stroke-dasharray": s.dash ? "4 3" : "none", "stroke-linejoin": "round" }, svg);
     }
   });

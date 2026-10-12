@@ -54,7 +54,25 @@ func staticInfo() entities.SysInfo {
 	return v
 }
 
+// metricsRead keeps a slow snapshot from blocking the next one. A collection
+// already running is answered with the previous snapshot, so one stuck sample
+// cannot pile up. The first sample, which has nothing to reuse, is waited out
+// instead of being published as an empty reading.
+var metricsRead limitedRead[entities.Metrics]
+
 func collectMetrics() entities.Metrics {
+	m, ok := metricsRead.get(4*time.Second, collectSnapshot)
+	if ok {
+		return m
+	}
+	m, ok = metricsRead.get(2*time.Minute, collectSnapshot)
+	if ok {
+		return m
+	}
+	return entities.Metrics{TimeMs: time.Now().UnixMilli(), Info: staticInfo()}
+}
+
+func collectSnapshot() entities.Metrics {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	out := entities.Metrics{TimeMs: time.Now().UnixMilli(), Info: staticInfo()}
@@ -279,47 +297,78 @@ func nicList(ctx context.Context) []entities.NICInfo {
 var tempsState struct {
 	sync.Mutex
 	off  bool
+	has  bool
 	at   time.Time
 	last []entities.TempSensor
 }
 
-// temps is best effort and cached for a minute. Windows reads ACPI thermal zones,
-// which a desktop often does not publish, so an empty read is retried next minute
-// instead of turning the sensor off. macOS reads IOHID sensors (CPU die, GPU, NAND,
-// battery); GUEST_TEMPS=0 turns that off. GPU core temperature is added separately.
+// One refresh at a time. A query that ignores its deadline cannot stack up.
+var tempRead limitedRead[[]entities.TempSensor]
+
+// temps is best effort and cached for a minute, including an empty reading.
+// Windows reads ACPI thermal zones, which a desktop often does not publish, so
+// an empty read is retried next minute instead of turning the sensor off.
+// macOS reads IOHID sensors (CPU die, GPU, NAND, battery); GUEST_TEMPS=0 turns
+// that off. GPU core temperature is added separately. A refresh still running
+// returns the previous minute's values instead of blocking this sample.
 func temps(ctx context.Context) []entities.TempSensor {
 	tempsState.Lock()
-	defer tempsState.Unlock()
 	if tempsState.off {
-		return tempsState.last
+		last := tempsState.last
+		tempsState.Unlock()
+		return last
 	}
 	if runtime.GOOS == "darwin" && getenv("VARTIO_AGENT_TEMPS", "GUEST_TEMPS") == "0" {
 		tempsState.off = true
+		tempsState.Unlock()
 		return nil
 	}
-	if time.Since(tempsState.at) < time.Minute && tempsState.last != nil {
-		return tempsState.last
+	if tempsState.has && time.Since(tempsState.at) < time.Minute {
+		last := append([]entities.TempSensor(nil), tempsState.last...)
+		tempsState.Unlock()
+		return last
 	}
-	tempsState.at = time.Now()
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	tempsState.Unlock()
+
+	wait := time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		if d := time.Until(deadline); d < wait {
+			wait = d
+		}
+	}
+	if wait < 0 {
+		wait = 0
+	}
+	out, _ := tempRead.get(wait, readTemps)
+	return out
+}
+
+func readTemps() []entities.TempSensor {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ts, err := sensors.TemperaturesWithContext(ctx)
-	if err != nil && len(ts) == 0 {
-		return tempsState.last
-	}
 	var out []entities.TempSensor
-	for _, t := range ts {
-		if t.Temperature <= 0 || t.Temperature > 150 {
-			continue
+	if err == nil || len(ts) > 0 {
+		for _, t := range ts {
+			if t.Temperature <= 0 || t.Temperature > 150 {
+				continue
+			}
+			out = append(out, entities.TempSensor{Name: t.SensorKey, C: t.Temperature})
 		}
-		out = append(out, entities.TempSensor{Name: t.SensorKey, C: t.Temperature})
+		sort.Slice(out, func(i, j int) bool { return out[i].C > out[j].C })
+		if len(out) > maxTemps {
+			out = out[:maxTemps]
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].C > out[j].C })
-	if len(out) > maxTemps {
-		out = out[:maxTemps]
+	tempsState.Lock()
+	tempsState.at = time.Now()
+	tempsState.has = true
+	if err == nil || len(ts) > 0 {
+		tempsState.last = out
 	}
-	tempsState.last = out
-	return out
+	last := append([]entities.TempSensor(nil), tempsState.last...)
+	tempsState.Unlock()
+	return last
 }
 
 // appendGPUTemps adds each graphics device's own temperature. A desktop often
