@@ -203,7 +203,7 @@ func (s *Store) LoadSystems(ctx context.Context) ([]*System, error) {
 func (s *Store) Connect(ctx context.Context, sys System) error {
 	var device []byte
 	if sys.Device != nil {
-		device, _ = json.Marshal(sys.Device)
+		device = postgresJSON(mustJSON(sys.Device))
 	}
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO probe_systems (device_id, bios_uuid, name, hostname, agent_version, remote_addr, device, online, first_seen, last_seen, connected_at)
@@ -212,7 +212,7 @@ func (s *Store) Connect(ctx context.Context, sys System) error {
 			bios_uuid = EXCLUDED.bios_uuid, hostname = EXCLUDED.hostname, agent_version = EXCLUDED.agent_version,
 			remote_addr = EXCLUDED.remote_addr, device = COALESCE(EXCLUDED.device, probe_systems.device), online = true,
 			last_seen = EXCLUDED.last_seen, connected_at = EXCLUDED.connected_at`,
-		sys.ID, sys.BiosUUID, sys.Name, sys.HostName, sys.Version, sys.RemoteAddr, device, sys.ConnectedAt)
+		sys.ID, scrub(sys.BiosUUID), scrub(sys.Name), scrub(sys.HostName), scrub(sys.Version), scrub(sys.RemoteAddr), device, sys.ConnectedAt)
 	return err
 }
 

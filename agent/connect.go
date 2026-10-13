@@ -100,7 +100,18 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 		Upgrade:    pendingReport(),
 		Nonce:      nonce,
 	}
-	if err := conn.WriteJSON(hello); err != nil {
+	// Encode while collectors are idle. A raw NUL in this buffer is not valid
+	// JSON, and writing it makes the hub reject the handshake.
+	sampleMu.Lock()
+	payload, err := json.Marshal(hello)
+	if err == nil && !json.Valid(payload) {
+		err = errors.New("hello payload contained a null byte")
+	}
+	if err == nil {
+		err = conn.WriteMessage(websocket.TextMessage, payload)
+	}
+	sampleMu.Unlock()
+	if err != nil {
 		return false, err
 	}
 	var ack entities.HelloOK
@@ -220,14 +231,22 @@ func (a *agent) handle(fr entities.Frame) {
 	out := entities.Frame{ID: fr.ID}
 	if rpcErr != nil {
 		out.Error = rpcErr
-	} else if res != nil {
-		b, _ := json.Marshal(res)
-		out.Result = b
 	}
 	a.writeMu.Lock()
-	err := a.conn.WriteJSON(out)
-	a.writeMu.Unlock()
-	if err != nil {
+	defer a.writeMu.Unlock()
+	// Collectors take sampleMu for the whole native read. Encoding under the
+	// same lock means a still-running sample cannot poke a NUL into this buffer.
+	sampleMu.Lock()
+	defer sampleMu.Unlock()
+	if rpcErr == nil && res != nil {
+		b, err := json.Marshal(res)
+		if err != nil || !json.Valid(b) {
+			out.Error = &entities.FrameError{Code: "internal", Message: "采集结果无法编码"}
+		} else {
+			out.Result = b
+		}
+	}
+	if err := a.conn.WriteJSON(out); err != nil {
 		log.Printf("write reply: %v", err)
 	}
 }

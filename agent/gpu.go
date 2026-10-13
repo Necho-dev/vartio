@@ -16,29 +16,12 @@ import (
 	"vartio/internal/entities"
 )
 
-// gpuRead keeps a slow counter query or nvidia-smi from stacking. The sample
-// waits at most long enough to fit in the metrics deadline, then uses the
-// previous reading while that query finishes in the background.
-var gpuRead limitedRead[[]entities.GPUInfo]
-
 // gpus is one sample of every graphics device this host can see.
 // A missing tool is remembered for a while; a present tool is read every sample.
+// The read finishes before the sample is encoded. Leaving it running in the
+// background planted a raw NUL in the reply JSON and dropped the websocket.
 func gpus(ctx context.Context) []entities.GPUInfo {
-	wait := 1200 * time.Millisecond
-	if deadline, ok := ctx.Deadline(); ok {
-		if d := time.Until(deadline); d < wait {
-			wait = d
-		}
-	}
-	if wait < 0 {
-		wait = 0
-	}
-	out, _ := gpuRead.get(wait, func() []entities.GPUInfo {
-		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		return platformGPUs(c)
-	})
-	return out
+	return platformGPUs(ctx)
 }
 
 var nvidiaBin struct {

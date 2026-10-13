@@ -22,14 +22,67 @@ import (
 
 const maxTemps = 12
 
-// staticInfo is read on every sample. A long-lived cache was observed to lose
-// the first byte of platform and CPU model (replaced by NUL) while the process
-// kept running, which then made PostgreSQL reject the sample.
+// sampleMu keeps native collectors from running while a reply or hello is
+// encoded. Those collectors were observed to plant a raw NUL in the encode
+// buffer; encoding/json then rejects the payload and the websocket drops.
+var sampleMu sync.Mutex
+
+// identityEvery is how often the native identity read (platform, kernel, CPU,
+// model) runs again. Hostname is read on every sample; these fields change
+// rarely, and reading them on every sample overlapped JSON encoding.
+const identityEvery = 10 * time.Minute
+
+var identityState struct {
+	sync.Mutex
+	at time.Time
+	v  entities.SysInfo
+}
+
+// staticInfo returns the cached identity plus the current hostname. It does not
+// call sysctl; the sample path refreshes the cache when it is due.
 func staticInfo() entities.SysInfo {
-	v := readStaticInfo()
-	if identitySmashed(v) {
-		v = readStaticInfo()
+	return withLiveHost(cachedIdentity())
+}
+
+// refreshIdentity rereads native identity when the cache is older than
+// identityEvery. The caller holds sampleMu, so the read cannot overlap a reply.
+func refreshIdentity() entities.SysInfo {
+	identityState.Lock()
+	due := identityStale(identityState.at, time.Now())
+	identityState.Unlock()
+	if due {
+		v := readStaticInfo()
+		if identitySmashed(v) {
+			v = readStaticInfo()
+		}
+		identityState.Lock()
+		identityState.v = scrubSys(v)
+		identityState.at = time.Now()
+		identityState.Unlock()
 	}
+	return withLiveHost(cachedIdentity())
+}
+
+func cachedIdentity() entities.SysInfo {
+	identityState.Lock()
+	defer identityState.Unlock()
+	return identityState.v
+}
+
+func identityStale(at, now time.Time) bool {
+	return at.IsZero() || now.Sub(at) >= identityEvery
+}
+
+func withLiveHost(v entities.SysInfo) entities.SysInfo {
+	v = scrubSys(v)
+	v.HostName = hostname()
+	if bt, err := host.BootTime(); err == nil {
+		v.BootTime = int64(bt)
+	}
+	return v
+}
+
+func scrubSys(v entities.SysInfo) entities.SysInfo {
 	v.HostName = scrubNUL(v.HostName)
 	v.Platform = scrubNUL(v.Platform)
 	v.PlatformVersion = scrubNUL(v.PlatformVersion)
@@ -39,10 +92,6 @@ func staticInfo() entities.SysInfo {
 	v.Vendor = scrubNUL(v.Vendor)
 	v.Product = scrubNUL(v.Product)
 	v.Virt = scrubNUL(v.Virt)
-	v.HostName = hostname()
-	if bt, err := host.BootTime(); err == nil {
-		v.BootTime = int64(bt)
-	}
 	return v
 }
 
@@ -101,6 +150,8 @@ func collectMetrics() entities.Metrics {
 }
 
 func collectSnapshot() entities.Metrics {
+	sampleMu.Lock()
+	defer sampleMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	out := entities.Metrics{TimeMs: time.Now().UnixMilli()}
@@ -141,9 +192,7 @@ func collectSnapshot() entities.Metrics {
 	if containers != nil {
 		out.Docker = <-containers
 	}
-	// Identity is read after the native collectors. A smashed cached string
-	// must not be what this sample sends.
-	out.Info = staticInfo()
+	out.Info = refreshIdentity()
 	return out
 }
 
@@ -333,15 +382,12 @@ var tempsState struct {
 	last []entities.TempSensor
 }
 
-// One refresh at a time. A query that ignores its deadline cannot stack up.
-var tempRead limitedRead[[]entities.TempSensor]
-
 // temps is best effort and cached for a minute, including an empty reading.
 // Windows reads ACPI thermal zones, which a desktop often does not publish, so
 // an empty read is retried next minute instead of turning the sensor off.
 // macOS reads IOHID sensors (CPU die, GPU, NAND, battery); GUEST_TEMPS=0 turns
-// that off. GPU core temperature is added separately. A refresh still running
-// returns the previous minute's values instead of blocking this sample.
+// that off. GPU core temperature is added separately. The refresh runs inside
+// the sample, so it is finished before the reply is encoded.
 func temps(ctx context.Context) []entities.TempSensor {
 	tempsState.Lock()
 	if tempsState.off {
@@ -360,18 +406,13 @@ func temps(ctx context.Context) []entities.TempSensor {
 		return last
 	}
 	tempsState.Unlock()
-
-	wait := time.Second
-	if deadline, ok := ctx.Deadline(); ok {
-		if d := time.Until(deadline); d < wait {
-			wait = d
-		}
+	if ctx.Err() != nil {
+		tempsState.Lock()
+		last := append([]entities.TempSensor(nil), tempsState.last...)
+		tempsState.Unlock()
+		return last
 	}
-	if wait < 0 {
-		wait = 0
-	}
-	out, _ := tempRead.get(wait, readTemps)
-	return out
+	return readTemps()
 }
 
 func readTemps() []entities.TempSensor {

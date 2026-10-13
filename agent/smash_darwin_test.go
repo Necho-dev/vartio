@@ -9,7 +9,7 @@ import (
 )
 
 func TestCollectorsDoNotSmashIdentity(t *testing.T) {
-	before := staticInfo()
+	before := refreshIdentity()
 	want := map[string]string{
 		"platform": before.Platform,
 		"version":  before.PlatformVersion,
