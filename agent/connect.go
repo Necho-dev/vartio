@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -100,17 +101,12 @@ func dialOnce(ctx context.Context, cfg config) (bool, error) {
 		Upgrade:    pendingReport(),
 		Nonce:      nonce,
 	}
-	// Encode while collectors are idle. A raw NUL in this buffer is not valid
-	// JSON, and writing it makes the hub reject the handshake.
-	sampleMu.Lock()
-	payload, err := json.Marshal(hello)
-	if err == nil && !json.Valid(payload) {
-		err = errors.New("hello payload contained a null byte")
-	}
+	// A raw NUL in this buffer is not valid JSON, and writing it makes the hub
+	// reject the handshake.
+	payload, err := encode("hello", hello)
 	if err == nil {
 		err = conn.WriteMessage(websocket.TextMessage, payload)
 	}
-	sampleMu.Unlock()
 	if err != nil {
 		return false, err
 	}
@@ -232,23 +228,76 @@ func (a *agent) handle(fr entities.Frame) {
 	if rpcErr != nil {
 		out.Error = rpcErr
 	}
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	// Collectors take sampleMu for the whole native read. Encoding under the
-	// same lock means a still-running sample cannot poke a NUL into this buffer.
-	sampleMu.Lock()
-	defer sampleMu.Unlock()
 	if rpcErr == nil && res != nil {
-		b, err := json.Marshal(res)
-		if err != nil || !json.Valid(b) {
-			out.Error = &entities.FrameError{Code: "internal", Message: "采集结果无法编码"}
+		if b, err := encode(fr.Method, res); err != nil {
+			out.Error = &entities.FrameError{Code: "internal", Message: "采样结果无法编码"}
 		} else {
 			out.Result = b
 		}
 	}
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
 	if err := a.conn.WriteJSON(out); err != nil {
 		log.Printf("write reply: %v", err)
 	}
+}
+
+// encodeFailLimit is how many encodes in a row may fail before the agent
+// restarts itself. encoding/json never emits a raw NUL, so a run of invalid
+// output means a native call wrote into Go memory, and only a fresh process
+// is clean again.
+const encodeFailLimit = 3
+
+// encodeFails counts failures in a row per method. encoding/json caches field
+// names per type, so damage shows up in one kind of reply while others still
+// encode.
+var encodeFails struct {
+	sync.Mutex
+	n map[string]int
+}
+
+// encode marshals v for what (a method, or "hello") and rejects output that is
+// not valid JSON.
+func encode(what string, v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err == nil && !json.Valid(b) {
+		if i := bytes.IndexByte(b, 0); i >= 0 {
+			lo, hi := max(i-40, 0), min(i+40, len(b))
+			err = fmt.Errorf("raw NUL at byte %d of %d: %q", i, len(b), b[lo:hi])
+		} else {
+			err = errors.New("encoded payload is not valid JSON")
+		}
+	}
+	encodeFails.Lock()
+	if err == nil {
+		delete(encodeFails.n, what)
+		encodeFails.Unlock()
+		return b, nil
+	}
+	if encodeFails.n == nil {
+		encodeFails.n = map[string]int{}
+	}
+	encodeFails.n[what]++
+	n := encodeFails.n[what]
+	encodeFails.Unlock()
+	log.Printf("encode %s: %v (%d in a row)", what, err, n)
+	if n == encodeFailLimit && !upgrading.Load() {
+		restartSoon(what, n)
+	}
+	return nil, err
+}
+
+var restartSelf = restartInPlace
+
+func restartSoon(what string, n int) {
+	go func() {
+		// Let the error reply go out first.
+		time.Sleep(500 * time.Millisecond)
+		log.Printf("encode %s failed %d times in a row; restarting to recover", what, n)
+		if err := restartSelf(); err != nil {
+			log.Printf("restart: %v", err)
+		}
+	}()
 }
 
 func (a *agent) streamOut(id string, p []byte) {

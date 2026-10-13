@@ -34,6 +34,22 @@ func TestStallRecordedOnceAndRecovered(t *testing.T) {
 	}
 }
 
+func TestRepeatedSnapshotIsNotStoredAgain(t *testing.T) {
+	m := &Monitor{sampleAt: map[string]int64{}}
+	if m.repeated("a", 1000) || m.repeated("a", 2000) || m.repeated("b", 2000) {
+		t.Fatal("new snapshots are not repeats")
+	}
+	if !m.repeated("a", 2000) {
+		t.Fatal("the same snapshot twice is a repeat")
+	}
+	if m.repeated("a", 1500) {
+		t.Fatal("an agent clock that stepped back is still a new snapshot")
+	}
+	if m.repeated("a", 0) || m.repeated("a", 0) {
+		t.Fatal("legacy replies without a timestamp are never repeats")
+	}
+}
+
 func TestStallIgnoresOfflineAndShortRuns(t *testing.T) {
 	m := &Monitor{systems: map[string]*System{"a": {ID: "a", Online: true}}, stalls: map[string]*stall{}}
 	for i := 0; i < 5; i++ {

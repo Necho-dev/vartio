@@ -51,6 +51,12 @@ func applyUpgrade(st *upgradeState, staged string) error {
 	return nil
 }
 
+// restartInPlace is not offered on Windows: a process cannot replace itself,
+// and the corruption it recovers from has only been seen on macOS.
+func restartInPlace() error {
+	return errors.New("restart in place is not supported on windows")
+}
+
 func spawn(bin string, args []string, dir string, flags uint32) (int, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir

@@ -44,6 +44,17 @@ func applyUpgrade(st *upgradeState, staged string) error {
 	return err
 }
 
+// restartInPlace re-execs the same binary with the same arguments, keeping
+// the PID and the supervisor.
+func restartInPlace() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	beforeExit()
+	return syscall.Exec(exe, append([]string{exe}, os.Args[1:]...), os.Environ())
+}
+
 func spawnDetached(bin string, args []string, dir string) error {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir

@@ -204,6 +204,8 @@ type Monitor struct {
 	rejected map[string]time.Time
 	netErrAt map[string]time.Time
 	stalls   map[string]*stall
+	// sampleAt is the agent timestamp of the last accepted snapshot.
+	sampleAt map[string]int64
 }
 
 func New(hub *hub.Hub, store *Store, interval, retention time.Duration) *Monitor {
@@ -222,6 +224,7 @@ func New(hub *hub.Hub, store *Store, interval, retention time.Duration) *Monitor
 		rejected: map[string]time.Time{},
 		netErrAt: map[string]time.Time{},
 		stalls:   map[string]*stall{},
+		sampleAt: map[string]int64{},
 	}
 	hub.OnConnect = m.onConnect
 	hub.OnDisconnect = m.onDisconnect
@@ -566,6 +569,12 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 		m.pollFailed(id, start, err)
 		return
 	}
+	if m.repeated(id, met.TimeMs) {
+		err := fmt.Errorf("Agent 采样未完成，返回的仍是 %s 的数据", time.UnixMilli(met.TimeMs).Format(time.TimeOnly))
+		log.Printf("monitor poll %s: %v", id, err)
+		m.pollFailed(id, start, err)
+		return
+	}
 	latency := time.Since(start)
 	if rtt, ok := m.Hub.RTT(id); ok {
 		latency = rtt
@@ -573,6 +582,7 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 	scrubInfo(&met.Info)
 	smp := m.derive(id, met, latency)
 	scrubSample(&smp)
+	entities.Finite(&smp)
 
 	m.mu.Lock()
 	sys := m.systems[id]
@@ -602,6 +612,22 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 		}
 	}
 	m.emit(id, smp.TS, events...)
+}
+
+// repeated reports a snapshot the agent already returned. An agent whose
+// collection is stuck answers with its previous snapshot; storing it again
+// would draw a flat line and zero rates instead of a gap.
+func (m *Monitor) repeated(id string, timeMs int64) bool {
+	if timeMs == 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sampleAt[id] == timeMs {
+		return true
+	}
+	m.sampleAt[id] = timeMs
+	return false
 }
 
 // pollFailed counts a poll that returned no metrics. The third miss in a row is

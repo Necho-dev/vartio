@@ -15,21 +15,14 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
-	"github.com/shirou/gopsutil/v4/sensors"
 
 	"vartio/internal/entities"
 )
 
 const maxTemps = 12
 
-// sampleMu keeps native collectors from running while a reply or hello is
-// encoded. Those collectors were observed to plant a raw NUL in the encode
-// buffer; encoding/json then rejects the payload and the websocket drops.
-var sampleMu sync.Mutex
-
 // identityEvery is how often the native identity read (platform, kernel, CPU,
-// model) runs again. Hostname is read on every sample; these fields change
-// rarely, and reading them on every sample overlapped JSON encoding.
+// model) runs again. Hostname is read on every sample; these fields change rarely.
 const identityEvery = 10 * time.Minute
 
 var identityState struct {
@@ -45,7 +38,7 @@ func staticInfo() entities.SysInfo {
 }
 
 // refreshIdentity rereads native identity when the cache is older than
-// identityEvery. The caller holds sampleMu, so the read cannot overlap a reply.
+// identityEvery. identityRead keeps two refreshes from running at once.
 func refreshIdentity() entities.SysInfo {
 	identityState.Lock()
 	due := identityStale(identityState.at, time.Now())
@@ -149,50 +142,135 @@ func collectMetrics() entities.Metrics {
 	return entities.Metrics{TimeMs: time.Now().UnixMilli(), Info: staticInfo()}
 }
 
-func collectSnapshot() entities.Metrics {
-	sampleMu.Lock()
-	defer sampleMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	out := entities.Metrics{TimeMs: time.Now().UnixMilli()}
-	var containers chan *entities.DockerInfo
-	if docker() != nil {
-		containers = make(chan *entities.DockerInfo, 1)
-		go func() {
-			c, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
+// stageWait is how long one sample waits for a collector, and stageTimeout the
+// deadline the collector itself gets. Several native reads have no timeout of
+// their own: statfs on a dead network mount, PDH collection on Windows, sysfs
+// files of a stuck driver. A collector that overruns keeps running alone while
+// later samples reuse its last value, so one hung read costs that metric only.
+var stageWait = 3 * time.Second
+
+const stageTimeout = 10 * time.Second
+
+type memStage struct {
+	load      [3]float64
+	memTotal  uint64
+	memUsed   uint64
+	swapTotal uint64
+	swapUsed  uint64
+	procs     int
+}
+
+type diskStage struct {
+	disks       []entities.DiskUsage
+	root        string
+	read, write uint64
+}
+
+type netStage struct {
+	rx, tx uint64
+	pkts   *entities.NetPackets
+	tcp    *entities.TCPStats
+	nics   []entities.NICInfo
+}
+
+var (
+	memRead      limitedRead[memStage]
+	diskRead     limitedRead[diskStage]
+	netRead      limitedRead[netStage]
+	tempsRead    limitedRead[[]entities.TempSensor]
+	gpusRead     limitedRead[[]entities.GPUInfo]
+	batteryRead  limitedRead[*entities.Battery]
+	dockerRead   limitedRead[*entities.DockerInfo]
+	identityRead limitedRead[entities.SysInfo]
+)
+
+// bounded starts fn under r and returns a function that yields its result, or the
+// previous one when fn is still running after stageWait.
+func bounded[T any](r *limitedRead[T], fn func(context.Context) T) func() T {
+	ch := make(chan T, 1)
+	go func() {
+		v, _ := r.get(stageWait, func() T {
+			ctx, cancel := context.WithTimeout(context.Background(), stageTimeout)
 			defer cancel()
-			containers <- dockerMetrics(c)
-		}()
-	}
-	out.CPUPct, out.CPUUserPct, out.CPUSystemPct, out.CPUWaitPct, out.Cores = sampleCPU(ctx)
+			return fn(ctx)
+		})
+		ch <- v
+	}()
+	return func() T { return <-ch }
+}
+
+func readMem(ctx context.Context) memStage {
+	var s memStage
 	if l, ok := loadAvg(ctx); ok {
-		out.Load = l
+		s.load = l
 	}
 	if vm, err := mem.VirtualMemoryWithContext(ctx); err == nil {
-		out.MemTotal = vm.Total
-		out.MemUsed = vm.Total - vm.Available
+		s.memTotal = vm.Total
+		s.memUsed = vm.Total - vm.Available
 	}
 	if sw, err := mem.SwapMemoryWithContext(ctx); err == nil {
-		out.SwapTotal, out.SwapUsed = sw.Total, sw.Used
+		s.swapTotal, s.swapUsed = sw.Total, sw.Used
 	}
-	out.Disks, out.RootMount = diskUsages(ctx)
-	out.DiskRead, out.DiskWrite = diskIO(ctx)
-	out.NetRx, out.NetTx, out.NetPkts = netIO(ctx)
-	if t, err := tcpStats(ctx); err == nil {
-		out.TCP = t
-	}
-	out.NICs = nicList(ctx)
-	out.Temps = temps(ctx)
-	out.GPUs = gpus(ctx)
-	out.Battery = readBattery()
-	out.Temps = appendGPUTemps(out.Temps, out.GPUs)
 	if pids, err := process.PidsWithContext(ctx); err == nil {
-		out.Procs = len(pids)
+		s.procs = len(pids)
 	}
-	if containers != nil {
-		out.Docker = <-containers
+	return s
+}
+
+func readDisks(ctx context.Context) diskStage {
+	var s diskStage
+	s.disks, s.root = diskUsages(ctx)
+	s.read, s.write = diskIO(ctx)
+	return s
+}
+
+func readNet(ctx context.Context) netStage {
+	var s netStage
+	s.rx, s.tx, s.pkts = netIO(ctx)
+	if t, err := tcpStats(ctx); err == nil {
+		s.tcp = t
 	}
-	out.Info = refreshIdentity()
+	s.nics = nicList(ctx)
+	return s
+}
+
+func collectSnapshot() entities.Metrics {
+	out := entities.Metrics{TimeMs: time.Now().UnixMilli()}
+	memS := bounded(&memRead, readMem)
+	diskS := bounded(&diskRead, readDisks)
+	netS := bounded(&netRead, readNet)
+	tempsS := bounded(&tempsRead, temps)
+	gpusS := bounded(&gpusRead, gpus)
+	batteryS := bounded(&batteryRead, func(context.Context) *entities.Battery { return readBattery() })
+	identityS := bounded(&identityRead, func(context.Context) entities.SysInfo { return refreshIdentity() })
+	var dockerS func() *entities.DockerInfo
+	if docker() != nil {
+		dockerS = bounded(&dockerRead, func(ctx context.Context) *entities.DockerInfo {
+			c, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
+			defer cancel()
+			return dockerMetrics(c)
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), stageWait)
+	out.CPUPct, out.CPUUserPct, out.CPUSystemPct, out.CPUWaitPct, out.Cores = sampleCPU(ctx)
+	cancel()
+
+	m := memS()
+	out.Load, out.MemTotal, out.MemUsed, out.SwapTotal, out.SwapUsed, out.Procs = m.load, m.memTotal, m.memUsed, m.swapTotal, m.swapUsed, m.procs
+	d := diskS()
+	out.Disks, out.RootMount, out.DiskRead, out.DiskWrite = d.disks, d.root, d.read, d.write
+	n := netS()
+	out.NetRx, out.NetTx, out.NetPkts, out.TCP, out.NICs = n.rx, n.tx, n.pkts, n.tcp, n.nics
+	out.GPUs = gpusS()
+	out.Battery = batteryS()
+	// A reused reading is shared with the cache; appendGPUTemps sorts in place.
+	out.Temps = appendGPUTemps(append([]entities.TempSensor(nil), tempsS()...), out.GPUs)
+	if dockerS != nil {
+		out.Docker = dockerS()
+	}
+	out.Info = withLiveHost(identityS())
+	entities.Finite(&out)
 	return out
 }
 
@@ -386,8 +464,7 @@ var tempsState struct {
 // Windows reads ACPI thermal zones, which a desktop often does not publish, so
 // an empty read is retried next minute instead of turning the sensor off.
 // macOS reads IOHID sensors (CPU die, GPU, NAND, battery); GUEST_TEMPS=0 turns
-// that off. GPU core temperature is added separately. The refresh runs inside
-// the sample, so it is finished before the reply is encoded.
+// that off. GPU core temperature is added separately.
 func temps(ctx context.Context) []entities.TempSensor {
 	tempsState.Lock()
 	if tempsState.off {
@@ -418,11 +495,12 @@ func temps(ctx context.Context) []entities.TempSensor {
 func readTemps() []entities.TempSensor {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ts, err := sensors.TemperaturesWithContext(ctx)
+	ts, err := sensorTemps(ctx)
 	var out []entities.TempSensor
 	if err == nil || len(ts) > 0 {
 		for _, t := range ts {
-			if t.Temperature <= 0 || t.Temperature > 150 {
+			// Written so NaN fails too; encoding/json cannot encode it.
+			if !(t.Temperature > 0 && t.Temperature <= 150) {
 				continue
 			}
 			out = append(out, entities.TempSensor{Name: t.SensorKey, C: t.Temperature})

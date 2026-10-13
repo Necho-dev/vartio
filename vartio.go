@@ -6,4 +6,4 @@ const AppName = "vartio"
 
 // Version is the agent build stamped into Hello and dist packages.
 // Release builds may override it with -ldflags -X vartio.Version=...
-var Version = "1.28.3"
+var Version = "1.28.5"
