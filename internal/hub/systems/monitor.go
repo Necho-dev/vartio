@@ -173,6 +173,17 @@ type counters struct {
 // netErrEvery throttles "net.errors" events per system.
 const netErrEvery = time.Hour
 
+// stallAfter is how many polls in a row must fail before the gap is recorded.
+// One slow sample is ordinary; three is about half a minute without metrics.
+const stallAfter = 3
+
+// stall tracks consecutive failed polls of one online system.
+type stall struct {
+	since  time.Time
+	misses int
+	logged bool
+}
+
 // minRetransBase is the fewest segments (bytes on macOS) sent in one interval
 // for which a retransmission ratio is reported.
 const minRetransBase = 200
@@ -192,6 +203,7 @@ type Monitor struct {
 	polling  map[string]bool
 	rejected map[string]time.Time
 	netErrAt map[string]time.Time
+	stalls   map[string]*stall
 }
 
 func New(hub *hub.Hub, store *Store, interval, retention time.Duration) *Monitor {
@@ -209,6 +221,7 @@ func New(hub *hub.Hub, store *Store, interval, retention time.Duration) *Monitor
 		polling:  map[string]bool{},
 		rejected: map[string]time.Time{},
 		netErrAt: map[string]time.Time{},
+		stalls:   map[string]*stall{},
 	}
 	hub.OnConnect = m.onConnect
 	hub.OnDisconnect = m.onDisconnect
@@ -376,6 +389,7 @@ func (m *Monitor) onConnect(info entities.SessionInfo) {
 	sys.LastSeen = at
 	snap := *sys
 	delete(m.prev, key)
+	delete(m.stalls, key)
 	m.mu.Unlock()
 	if m.Store != nil {
 		ctx := context.Background()
@@ -447,7 +461,11 @@ func (m *Monitor) onDisconnect(info entities.SessionInfo) {
 	if !sys.ConnectedAt.IsZero() {
 		detail = "在线 " + now.Sub(sys.ConnectedAt).Round(time.Second).String()
 	}
+	if st := m.stalls[key]; st != nil && st.logged {
+		detail = strings.TrimPrefix(detail+"；断开前指标采样已中断 "+now.Sub(st.since).Round(time.Second).String(), "；")
+	}
 	delete(m.prev, key)
+	delete(m.stalls, key)
 	m.mu.Unlock()
 	if m.Store != nil {
 		if err := m.Store.Disconnect(context.Background(), key, now); err != nil {
@@ -545,6 +563,7 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 	}
 	if err != nil {
 		log.Printf("monitor poll %s: %v", id, err)
+		m.pollFailed(id, start, err)
 		return
 	}
 	latency := time.Since(start)
@@ -573,6 +592,9 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 		sys.HostName = met.Info.HostName
 	}
 	sys.LastSeen = smp.TS
+	if e, ok := m.recoveredLocked(id, time.Now()); ok {
+		events = append(events, e)
+	}
 	m.mu.Unlock()
 	if m.Store != nil {
 		if err := m.Store.Record(context.Background(), id, met.Info, smp); err != nil {
@@ -580,6 +602,59 @@ func (m *Monitor) poll(ctx context.Context, id string) {
 		}
 	}
 	m.emit(id, smp.TS, events...)
+}
+
+// pollFailed counts a poll that returned no metrics. The third miss in a row is
+// recorded once; an agent that is gone is reported by its offline event instead.
+func (m *Monitor) pollFailed(id string, at time.Time, err error) {
+	var ce *common.Error
+	if errors.As(err, &ce) && ce.Code == common.ErrOffline().Code {
+		return
+	}
+	m.mu.Lock()
+	if sys := m.systems[id]; sys == nil || !sys.Online {
+		m.mu.Unlock()
+		return
+	}
+	st := m.stalls[id]
+	if st == nil {
+		st = &stall{since: at}
+		m.stalls[id] = st
+	}
+	st.misses++
+	report := !st.logged && st.misses >= stallAfter
+	if report {
+		st.logged = true
+	}
+	since, misses := st.since, st.misses
+	m.mu.Unlock()
+	if !report {
+		return
+	}
+	reason := err.Error()
+	if errors.As(err, &ce) && ce.Code == "timeout" {
+		reason = fmt.Sprintf("%s 内未返回", entities.ListTimeout)
+	}
+	log.Printf("monitor stall %s: %d polls failed since %s", id, misses, since.Format(time.TimeOnly))
+	m.emit(id, at, Event{Kind: "poll.stall", Category: CatLifecycle, Level: LevelWarn,
+		Detail: fmt.Sprintf("指标采样连续 %d 次失败（自 %s 起，%s）", misses, since.Format(time.TimeOnly), reason)})
+}
+
+// recoveredLocked closes a run of failed polls. Only a run that was recorded
+// gets a recovery event. The caller holds m.mu.
+func (m *Monitor) recoveredLocked(id string, at time.Time) (Event, bool) {
+	st := m.stalls[id]
+	if st == nil {
+		return Event{}, false
+	}
+	delete(m.stalls, id)
+	if !st.logged {
+		return Event{}, false
+	}
+	gap := at.Sub(st.since).Round(time.Second)
+	log.Printf("monitor recovered %s after %s, %d polls missed", id, gap, st.misses)
+	return Event{Kind: "poll.recover", Category: CatLifecycle, Level: LevelInfo,
+		Detail: fmt.Sprintf("指标采样恢复，中断 %s，缺 %d 次采样", gap, st.misses)}, true
 }
 
 func (m *Monitor) derive(id string, met entities.Metrics, latency time.Duration) Sample {

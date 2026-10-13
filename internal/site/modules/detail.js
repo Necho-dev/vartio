@@ -108,7 +108,7 @@ const EV_NAMES = {
   "service.start": "启动服务", "service.stop": "停止服务", "service.restart": "重启服务",
   "file.upload": "上传文件", "file.download": "下载文件", "file.mkdir": "新建目录", "file.rename": "重命名", "file.delete": "永久删除", "file.trash": "移入回收站",
   "trash.restore": "还原文件", "trash.purge": "彻底删除", "trash.empty": "清空回收站", meta: "编辑信息",
-  "agent.upgrade": "下发升级", "upgrade.failed": "升级失败", "net.errors": "网卡错误",
+  "agent.upgrade": "下发升级", "upgrade.failed": "升级失败", "net.errors": "网卡错误", "poll.stall": "采样中断", "poll.recover": "采样恢复",
   "container.stop": "容器停止", "container.start": "容器启动", "container.unhealthy": "容器不健康", "container.healthy": "容器恢复健康",
   "docker.logs": "查看容器日志", "docker.exec": "容器终端", "docker.compose": "查看编排", "auth.reject": "接入被拒", "credential.reset": "重置凭据",
 };
@@ -350,7 +350,7 @@ function renderHero(s) {
   const prev = /** @type {HTMLElement | null} */ (document.querySelector("#hero .lat"));
   const tick = prev && prev.dataset.ms !== String(ms) ? " tick" : "";
   const latCls = ms == null ? "" : ms >= 300 ? " bad" : ms >= 100 ? " slow" : "";
-  const lat = ms == null ? "" : `<span class="lat${latCls}${tick}" data-ms="${ms}" title="最近一次采集的往返延迟，约每 ${state.config.intervalSec}s 刷新">${esc(latText(ms))}</span>`;
+  const lat = ms == null ? "" : `<span class="lat${latCls}${tick}" data-ms="${ms}" title="最近一次采样的往返延迟，约每 ${state.config.intervalSec}s 刷新">${esc(latText(ms))}</span>`;
   const badge = s.online
     ? `<span class="badge up"><span class="dot up"></span>在线${lat}</span>`
     : `<span class="badge down"><span class="dot"></span>离线</span>`;

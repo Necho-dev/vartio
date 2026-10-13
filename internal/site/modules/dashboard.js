@@ -13,7 +13,7 @@ export async function dashboard() {
     <div class="chips" id="chips"></div>
     <div id="upBanner"></div>
     <section class="card">
-      <div class="card-head"><div><h2>全部主机</h2><p>每 ${state.config.intervalSec}s 采集一次，点击行查看详情与历史曲线</p></div>
+      <div class="card-head"><div><h2>全部主机</h2><p>每 ${state.config.intervalSec}s 采样一次，点击行查看详情与历史曲线</p></div>
         <div class="head-side"><select class="m-sort" id="mSort" title="排序">${SORT_NAMES.map(([k, n]) => `<option value="${k}">${n}</option>`).join("")}</select>
         <span class="muted" id="updated"></span></div></div>
       <div class="table-wrap" id="tableWrap"></div>
