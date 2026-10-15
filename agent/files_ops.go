@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"vartio/internal/entities"
 )
@@ -119,8 +118,8 @@ func fileDelete(abs string, confirm bool) (entities.FilesOpResult, *entities.Fra
 	return entities.FilesOpResult{OK: true, Path: abs, Count: n}, nil
 }
 
-// fileZip archives a directory into <staging>/zip-<ts>/<name>.zip; the caller
-// downloads it and deletes the zip-<ts> directory.
+// fileZip archives a directory into <staging>/zip-<random>/<name>.zip; the caller
+// downloads it and deletes that directory.
 func fileZip(abs string) (entities.FilesOpResult, *entities.FrameError) {
 	st, err := os.Stat(abs)
 	if err != nil {
@@ -133,8 +132,11 @@ func fileZip(abs string) (entities.FilesOpResult, *entities.FrameError) {
 	if err != nil {
 		return entities.FilesOpResult{}, asRPC(err)
 	}
-	dir := filepath.Join(stage, fmt.Sprintf("zip-%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// Several folders are zipped at once when a selection is downloaded, and the
+	// Windows clock can give them the same timestamp; each needs its own
+	// directory, since the hub deletes it when that download ends.
+	dir, err := os.MkdirTemp(stage, "zip-")
+	if err != nil {
 		return entities.FilesOpResult{}, asRPC(err)
 	}
 	name := filepath.Base(abs)

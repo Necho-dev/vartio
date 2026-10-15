@@ -180,11 +180,37 @@ func (h *Hub) RegisterDev(mux *http.ServeMux) {
 
 func (h *Hub) wrap(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if err := fn(w, r); err != nil {
+		sw := &sentWriter{ResponseWriter: w}
+		err := fn(sw, r)
+		switch {
+		case err == nil:
+		case sw.sent:
+			// The status and part of the body are already out; the client sees a
+			// truncated response, and a second status cannot be sent.
+			log.Printf("http %s %s: %v (after the response started)", r.Method, r.URL.Path, err)
+		default:
 			writeAPIErr(w, err)
 		}
 	}
 }
+
+// sentWriter records whether a handler has started its response.
+type sentWriter struct {
+	http.ResponseWriter
+	sent bool
+}
+
+func (w *sentWriter) WriteHeader(code int) {
+	w.sent = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *sentWriter) Write(b []byte) (int, error) {
+	w.sent = true
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *sentWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (h *Hub) handleSessions(w http.ResponseWriter, r *http.Request) error {
 	return writeJSON(w, h.List())
