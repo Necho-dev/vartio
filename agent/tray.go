@@ -39,6 +39,23 @@ func trayReady(ctx context.Context, cfg config, logFile string) {
 		mLog.Hide()
 	}
 	mRe := systray.AddMenuItem("立即重连", "断开并立即重新连接 hub")
+	ensureAutostart()
+	mAuto := systray.AddMenuItemCheckbox("登录时自动启动", "默认开启：登录本机后自动运行探针（当前用户）；取消后不再自动开启", autostartEnabled())
+	if !autostartSupported {
+		mAuto.Hide()
+	}
+	syncAuto := func() {
+		if !autostartSupported {
+			return
+		}
+		if on := autostartEnabled(); on != mAuto.Checked() {
+			if on {
+				mAuto.Check()
+			} else {
+				mAuto.Uncheck()
+			}
+		}
+	}
 
 	go func() {
 		err := serve(ctx, cfg)
@@ -61,6 +78,7 @@ func trayReady(ctx context.Context, cfg config, logFile string) {
 				setTrayIcon(state)
 				icon = state
 			}
+			syncAuto()
 			select {
 			case <-ctx.Done():
 				return
@@ -76,6 +94,14 @@ func trayReady(ctx context.Context, cfg config, logFile string) {
 			case <-mRe.ClickedCh:
 				log.Printf("reconnect requested from tray")
 				requestReconnect()
+			case <-mAuto.ClickedCh:
+				want := !autostartEnabled()
+				if err := setAutostart(want); err != nil {
+					log.Printf("autostart %v: %v", want, err)
+					notifyUser("设置登录自启失败：" + err.Error())
+				} else {
+					log.Printf("autostart set to %v from tray", want)
+				}
 			}
 		}
 	}()

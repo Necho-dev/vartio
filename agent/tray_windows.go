@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,13 +159,118 @@ const (
 )
 
 func autostartRegistered() bool {
+	_, ok := autostartCommand()
+	return ok
+}
+
+func autostartCommand() (string, bool) {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.QUERY_VALUE)
+	if err != nil {
+		return "", false
+	}
+	defer k.Close()
+	v, _, err := k.GetStringValue(runValue)
+	return v, err == nil
+}
+
+const autostartSupported = true
+
+// autostartEnabled reports a login item that starts this binary. One left by
+// a copy in another folder does not count; enabling replaces it.
+func autostartEnabled() bool {
+	v, ok := autostartCommand()
+	if !ok {
+		return false
+	}
+	exe, err := selfExe()
+	return err == nil && strings.EqualFold(strings.Trim(v, `"`), exe)
+}
+
+// optOutKey remembers that the user turned the login item off, so the default
+// does not turn it back on at the next start.
+const (
+	optOutKey   = `Software\Vartio`
+	optOutValue = "AutostartOff"
+)
+
+func autostartOptedOut() bool {
+	k, err := registry.OpenKey(registry.CURRENT_USER, optOutKey, registry.QUERY_VALUE)
 	if err != nil {
 		return false
 	}
 	defer k.Close()
-	_, _, err = k.GetStringValue(runValue)
-	return err == nil
+	v, _, err := k.GetIntegerValue(optOutValue)
+	return err == nil && v != 0
+}
+
+func setOptOut(off bool) error {
+	if !off {
+		k, err := registry.OpenKey(registry.CURRENT_USER, optOutKey, registry.SET_VALUE)
+		if err != nil {
+			return nil
+		}
+		defer k.Close()
+		if err := k.DeleteValue(optOutValue); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	k, _, err := registry.CreateKey(registry.CURRENT_USER, optOutKey, registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	return k.SetDWordValue(optOutValue, 1)
+}
+
+// ensureAutostart turns the login item on unless the user turned it off.
+func ensureAutostart() {
+	if autostartOptedOut() || autostartEnabled() {
+		return
+	}
+	if err := setAutostart(true); err != nil {
+		log.Printf("autostart: %v", err)
+		return
+	}
+	log.Printf("autostart: login item registered (default on)")
+}
+
+// setAutostart adds or removes the current user's login item for this binary
+// and records the choice. Enabling also saves the running configuration next
+// to the binary, because a login start does not inherit this environment.
+func setAutostart(on bool) error {
+	if !on {
+		if err := setOptOut(true); err != nil {
+			return err
+		}
+		k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
+		if err != nil {
+			return nil
+		}
+		defer k.Close()
+		if err := k.DeleteValue(runValue); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err := setOptOut(false); err != nil {
+		return err
+	}
+	exe, err := selfExe()
+	if err != nil {
+		return err
+	}
+	if saved, err := saveEnvFile(exe); err != nil {
+		return fmt.Errorf("保存配置失败：%w", err)
+	} else if saved != "" {
+		log.Printf("autostart: saved config to %s", saved)
+	}
+	k, _, err := registry.CreateKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
+	if err != nil {
+		return err
+	}
+	defer k.Close()
+	return k.SetStringValue(runValue, `"`+exe+`"`)
 }
 
 // runInstall registers the tray agent to start at login for the current user
@@ -179,20 +285,7 @@ func runInstall() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	if saved, err := saveEnvFile(exe); err != nil {
-		fmt.Fprintln(os.Stderr, "保存配置失败：", err)
-		return 1
-	} else if saved != "" {
-		fmt.Println("已保存配置：", saved)
-	}
-	k, _, err := registry.CreateKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	err = k.SetStringValue(runValue, `"`+exe+`"`)
-	k.Close()
-	if err != nil {
+	if err := setAutostart(true); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -211,13 +304,9 @@ func runInstall() int {
 
 // runUninstall removes the login item and stops running tray agents of this binary.
 func runUninstall() int {
-	if k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.SET_VALUE); err == nil {
-		err = k.DeleteValue(runValue)
-		k.Close()
-		if err != nil && !errors.Is(err, registry.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
+	if err := setAutostart(false); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
 	exe, _ := selfExe()
 	n := 0

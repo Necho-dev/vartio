@@ -189,3 +189,13 @@ func lockFree() bool {
 	}
 	return false
 }
+
+// The LaunchAgent is both the login item and the supervisor; turning it off
+// from the menu would stop this process, so the tray offers no switch.
+const autostartSupported = false
+
+func autostartEnabled() bool { return false }
+
+func setAutostart(bool) error { return nil }
+
+func ensureAutostart() {}
