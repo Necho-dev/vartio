@@ -206,6 +206,12 @@ type Monitor struct {
 	stalls   map[string]*stall
 	// sampleAt is the agent timestamp of the last accepted snapshot.
 	sampleAt map[string]int64
+	// Prune bookkeeping is touched only from Run. pruneLast is the previous
+	// hour's raw deletion count; pruneDay* sums the calendar day for one line.
+	pruneLast     int64
+	pruneDay      string
+	pruneDayN     int64
+	pruneDayHours int64
 }
 
 func New(hub *hub.Hub, store *Store, interval, retention time.Duration) *Monitor {
@@ -315,15 +321,98 @@ func (m *Monitor) prune(ctx context.Context) {
 		return
 	}
 	now := time.Now()
-	n, err := m.Store.Prune(ctx, now.Add(-m.Retention), now.Add(-30*24*time.Hour))
+	cutoff := now.Add(-m.Retention)
+	n, err := m.Store.Prune(ctx, cutoff, now.Add(-30*24*time.Hour))
 	if err != nil {
 		log.Printf("monitor prune: %v", err)
 	} else if n > 0 {
-		log.Printf("monitor prune: %d samples older than %s", n, m.Retention)
+		m.logPrune(now, cutoff, n)
 	}
 	if err := m.Store.PruneRollups(ctx, now.Add(-m.Retention5m), now.Add(-m.Retention1h)); err != nil {
 		log.Printf("monitor prune rollups: %v", err)
 	}
+}
+
+// logPrune records one hour of retention deletion. A steady fleet drops about
+// the same number of raw samples every hour, so that case is folded into one
+// line per calendar day. The hour is logged on its own when the count moves.
+func (m *Monitor) logPrune(now, cutoff time.Time, n int64) {
+	per := samplesPerHostHour(m.Interval)
+	today := now.Format(time.DateOnly)
+	if m.pruneDay == "" {
+		m.pruneDay = today
+	} else if today != m.pruneDay {
+		if m.pruneDayN > 0 {
+			log.Printf("%s", pruneDayMessage(m.pruneDay, m.pruneDayN, m.pruneDayHours, per, m.Retention, m.Interval))
+		}
+		m.pruneDay, m.pruneDayN, m.pruneDayHours = today, 0, 0
+	}
+	if pruneNotable(n, m.pruneLast, per) {
+		log.Printf("%s", pruneHourMessage(n, m.pruneLast, per, cutoff, m.Retention, m.Interval))
+	}
+	m.pruneLast = n
+	m.pruneDayN += n
+	m.pruneDayHours++
+}
+
+func samplesPerHostHour(interval time.Duration) int64 {
+	if interval <= 0 {
+		return 0
+	}
+	n := int64(time.Hour / interval)
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// pruneNotable is true for the first deletion and when the count moves by at
+// least half a host-hour or 10%. Smaller jitter is the same retention hour.
+func pruneNotable(n, prev, perHost int64) bool {
+	if prev <= 0 {
+		return n > 0
+	}
+	d := n - prev
+	if d < 0 {
+		d = -d
+	}
+	if perHost > 0 && d*2 >= perHost {
+		return true
+	}
+	return d*10 >= prev
+}
+
+func pruneHourMessage(n, prev, perHost int64, cutoff time.Time, keep, every time.Duration) string {
+	was := ""
+	if prev > 0 && prev != n {
+		was = fmt.Sprintf(" (was %d)", prev)
+	}
+	return fmt.Sprintf("monitor prune: deleted %d raw samples%s before %s (keep %s, ~%s hosts at %s)",
+		n, was, cutoff.Format(time.DateTime), fmtKeep(keep), fmtHosts(n, perHost), every)
+}
+
+func pruneDayMessage(day string, n, hours, perHost int64, keep, every time.Duration) string {
+	denom := perHost * hours
+	return fmt.Sprintf("monitor prune: %s deleted %d raw samples over %dh (keep %s, ~%s hosts at %s)",
+		day, n, hours, fmtKeep(keep), fmtHosts(n, denom), every)
+}
+
+func fmtKeep(d time.Duration) string {
+	if d > 0 && d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+	return d.String()
+}
+
+func fmtHosts(samples, perHost int64) string {
+	if perHost <= 0 {
+		return "?"
+	}
+	h := float64(samples) / float64(perHost)
+	if math.Abs(h-math.Round(h)) < 0.05 {
+		return fmt.Sprintf("%d", int(math.Round(h)))
+	}
+	return fmt.Sprintf("%.1f", h)
 }
 
 func (m *Monitor) onConnect(info entities.SessionInfo) {
