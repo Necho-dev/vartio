@@ -91,6 +91,8 @@ ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS temps jsonb;
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS cpu_user real;
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS cpu_system real;
 ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS cpu_iowait real;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS mem_compressed bigint;
+ALTER TABLE probe_metrics ADD COLUMN IF NOT EXISTS mem_cached bigint;
 CREATE INDEX IF NOT EXISTS probe_events_device_ts ON probe_events (device_id, ts DESC);
 CREATE TABLE IF NOT EXISTS probe_container_metrics (
 	device_id     text NOT NULL REFERENCES probe_systems(device_id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -122,6 +124,10 @@ ALTER TABLE probe_metrics_5m ADD COLUMN IF NOT EXISTS cpu_iowait double precisio
 ALTER TABLE probe_metrics_1h ADD COLUMN IF NOT EXISTS cpu_user double precision;
 ALTER TABLE probe_metrics_1h ADD COLUMN IF NOT EXISTS cpu_system double precision;
 ALTER TABLE probe_metrics_1h ADD COLUMN IF NOT EXISTS cpu_iowait double precision;
+ALTER TABLE probe_metrics_5m ADD COLUMN IF NOT EXISTS mem_compressed double precision;
+ALTER TABLE probe_metrics_5m ADD COLUMN IF NOT EXISTS mem_cached double precision;
+ALTER TABLE probe_metrics_1h ADD COLUMN IF NOT EXISTS mem_compressed double precision;
+ALTER TABLE probe_metrics_1h ADD COLUMN IF NOT EXISTS mem_cached double precision;
 `
 
 // Store persists systems, samples and events in PostgreSQL.
@@ -305,14 +311,14 @@ func (s *Store) Record(ctx context.Context, id string, info entities.SysInfo, sm
 	b.Queue(`INSERT INTO probe_metrics (device_id, ts, cpu_pct, mem_used, mem_total, swap_used, swap_total,
 			disk_used, disk_total, disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, load1, load5, load15, temp_max, procs, disk_parts,
 			net_rx_bytes, net_tx_bytes, net_rx_pps, net_tx_pps, net_errs, net_drops, tcp_estab, tcp_time_wait, tcp_listen, retrans_pct, latency_ms, tcp_out_segs, tcp_retrans_segs, conn_tcp, conn_udp, conn_other, net_nics, gpus, temps,
-			cpu_user, cpu_system, cpu_iowait)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41) ON CONFLICT DO NOTHING`,
+			cpu_user, cpu_system, cpu_iowait, mem_compressed, mem_cached)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43) ON CONFLICT DO NOTHING`,
 		id, smp.TS, smp.CPUPct, int64(smp.MemUsed), int64(smp.MemTotal), int64(smp.SwapUsed), int64(smp.SwapTotal),
 		int64(smp.DiskUsed), int64(smp.DiskTotal), smp.DiskReadBps, smp.DiskWriteBps, smp.NetRxBps, smp.NetTxBps,
 		smp.Load[0], smp.Load[1], smp.Load[2], temp, smp.Procs, parts,
 		int64(smp.NetRxBytes), int64(smp.NetTxBytes), smp.NetRxPps, smp.NetTxPps, i64(smp.NetErrs), i64(smp.NetDrops),
 		estab, tw, listen, smp.RetransPct, smp.LatencyMs, i64(smp.TCPOutSegs), i64(smp.TCPRetransSegs), cTCP, cUDP, cOther, nics, gpuJSON, tempJSON,
-		smp.CPUUserPct, smp.CPUSystemPct, smp.CPUWaitPct)
+		smp.CPUUserPct, smp.CPUSystemPct, smp.CPUWaitPct, i64(smp.MemCompressed), i64(smp.MemCached))
 	if d := smp.Docker; d != nil {
 		for _, c := range d.Containers {
 			if !c.Stats {
@@ -462,7 +468,7 @@ func (s *Store) Series(ctx context.Context, id string, src Source, from time.Tim
 		SELECT date_bin(make_interval(secs => $3::float8), ts, TIMESTAMPTZ 'epoch') AS b,
 			avg(cpu_pct)::float8, max(%[2]s)::float8,
 			avg(cpu_user)::float8, avg(cpu_system)::float8, avg(cpu_iowait)::float8,
-			avg(mem_used)::float8, max(mem_total)::float8, avg(swap_used)::float8,
+			avg(mem_used)::float8, max(mem_total)::float8, avg(mem_compressed)::float8, avg(mem_cached)::float8, avg(swap_used)::float8,
 			avg(disk_used)::float8, max(disk_total)::float8,
 			avg(disk_read_bps)::float8, avg(disk_write_bps)::float8,
 			avg(net_rx_bps)::float8, avg(net_tx_bps)::float8, max(%[3]s)::float8, max(%[4]s)::float8,
@@ -484,7 +490,7 @@ func (s *Store) Series(ctx context.Context, id string, src Source, from time.Tim
 	for rows.Next() {
 		var t time.Time
 		var b bucket
-		if err := rows.Scan(&t, &b.cpu, &b.cpuMax, &b.cpuUser, &b.cpuSystem, &b.cpuWait, &b.mem, &b.memT, &b.swap, &b.disk, &b.diskT, &b.dr, &b.dw,
+		if err := rows.Scan(&t, &b.cpu, &b.cpuMax, &b.cpuUser, &b.cpuSystem, &b.cpuWait, &b.mem, &b.memT, &b.memComp, &b.memCache, &b.swap, &b.disk, &b.diskT, &b.dr, &b.dw,
 			&b.rx, &b.tx, &b.rxMax, &b.txMax, &b.rxBytes, &b.txBytes, &b.l1, &b.l5, &b.l15, &b.temp, &b.procs,
 			&b.rxPps, &b.txPps, &b.errs, &b.drops, &b.estab, &b.tw, &b.listen, &b.retrans, &b.latency, &b.outSegs, &b.retransSegs, &b.connTCP, &b.connUDP, &b.connOther); err != nil {
 			return nil, err

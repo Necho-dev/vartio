@@ -17,15 +17,18 @@ type Series struct {
 	CPUWait   []*float64 `json:"cpuWait"`
 	Mem       []float64  `json:"mem"`
 	MemTotal  []float64  `json:"memTotal"`
-	Swap      []float64  `json:"swap"`
-	Disk      []float64  `json:"disk"`
-	DiskTotal []float64  `json:"diskTotal"`
-	DiskRead  []float64  `json:"diskRead"`
-	DiskWrite []float64  `json:"diskWrite"`
-	NetRx     []float64  `json:"netRx"`
-	NetTx     []float64  `json:"netTx"`
-	NetRxMax  []float64  `json:"netRxMax"`
-	NetTxMax  []float64  `json:"netTxMax"`
+	// MemCompressed/MemCached are nil for buckets recorded before agent 1.28.9.
+	MemCompressed []*float64 `json:"memCompressed"`
+	MemCached     []*float64 `json:"memCached"`
+	Swap          []float64  `json:"swap"`
+	Disk          []float64  `json:"disk"`
+	DiskTotal     []float64  `json:"diskTotal"`
+	DiskRead      []float64  `json:"diskRead"`
+	DiskWrite     []float64  `json:"diskWrite"`
+	NetRx         []float64  `json:"netRx"`
+	NetTx         []float64  `json:"netTx"`
+	NetRxMax      []float64  `json:"netRxMax"`
+	NetTxMax      []float64  `json:"netTxMax"`
 	// NetRxBytes/NetTxBytes are bytes moved within each bucket.
 	NetRxBytes []float64 `json:"netRxBytes"`
 	NetTxBytes []float64 `json:"netTxBytes"`
@@ -74,6 +77,7 @@ func newSeries(step time.Duration) *Series {
 	return &Series{
 		StepSec: int(step / time.Second),
 		T:       []int64{}, CPU: []float64{}, CPUMax: []float64{}, CPUUser: []*float64{}, CPUSystem: []*float64{}, CPUWait: []*float64{}, Mem: []float64{}, MemTotal: []float64{},
+		MemCompressed: []*float64{}, MemCached: []*float64{},
 		Swap: []float64{}, Disk: []float64{}, DiskTotal: []float64{}, DiskRead: []float64{}, DiskWrite: []float64{},
 		NetRx: []float64{}, NetTx: []float64{}, NetRxMax: []float64{}, NetTxMax: []float64{}, NetRxBytes: []float64{}, NetTxBytes: []float64{},
 		Load1: []float64{}, Load5: []*float64{}, Load15: []*float64{}, Temp: []*float64{}, Procs: []float64{},
@@ -92,6 +96,7 @@ func newSeries(step time.Duration) *Series {
 type bucket struct {
 	cpu, cpuMax, mem, memT, swap, disk, diskT, dr, dw float64
 	cpuUser, cpuSystem, cpuWait                       *float64
+	memComp, memCache                                 *float64
 	rx, tx, rxMax, txMax, rxBytes, txBytes, l1, procs float64
 	l5, l15, temp, rxPps, txPps, errs, drops          *float64
 	estab, tw, listen, retrans, latency               *float64
@@ -107,6 +112,8 @@ func (s *Series) add(t time.Time, b bucket) {
 	s.CPUWait = append(s.CPUWait, b.cpuWait)
 	s.Mem = append(s.Mem, b.mem)
 	s.MemTotal = append(s.MemTotal, b.memT)
+	s.MemCompressed = append(s.MemCompressed, b.memComp)
+	s.MemCached = append(s.MemCached, b.memCache)
 	s.Swap = append(s.Swap, b.swap)
 	s.Disk = append(s.Disk, b.disk)
 	s.DiskTotal = append(s.DiskTotal, b.diskT)

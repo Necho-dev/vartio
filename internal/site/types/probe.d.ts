@@ -41,6 +41,21 @@ interface TempSensor {
   c: number;
 }
 
+/** guest.GPUInfo. RenderPct and TilerPct are set only for Apple GPUs. */
+interface GPUInfo {
+  name: string;
+  vendor?: string;
+  utilPct: number;
+  memUsed?: number;
+  memTotal?: number;
+  tempC?: number;
+  powerW?: number;
+  clockMHz?: number;
+  renderPct?: number;
+  tilerPct?: number;
+  cores?: number;
+}
+
 /** guest.NICInfo */
 interface NicInfo {
   name: string;
@@ -86,6 +101,8 @@ interface Sample {
   latencyMs: number;
   disks?: DiskUsage[];
   temps?: TempSensor[];
+  /** live graphics sample; utilization history is Series.gpus */
+  gpus?: GPUInfo[];
   nics?: NicInfo[];
   /** per-NIC rates once the agent reports cumulative rx/tx */
   netNics?: { name: string; rxBps: number; txBps: number; rxBytes?: number; txBytes?: number }[];
@@ -243,6 +260,10 @@ interface Series {
   cpuWait: (number | null)[];
   mem: number[];
   memTotal: number[];
+  /** compressed bytes inside mem; absent until a probe reports them */
+  memCompressed?: (number | null)[];
+  /** reclaimable cache inside (memTotal - mem); absent until a probe reports it */
+  memCached?: (number | null)[];
   swap: number[];
   disk: number[];
   diskTotal: number[];
@@ -278,6 +299,10 @@ interface Series {
   load5: (number | null)[];
   load15: (number | null)[];
   temp: (number | null)[];
+  /** sensor name -> Celsius per bucket; nil entries are missing samples */
+  tempBy?: Record<string, (number | null)[]>;
+  /** device name -> utilization per bucket; keys may be "name 渲染" or "name Tiler" */
+  gpus?: Record<string, (number | null)[]>;
   procs: number[];
   /** mount -> used bytes */
   diskParts: Record<string, (number | null)[]>;

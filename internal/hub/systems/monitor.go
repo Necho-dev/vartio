@@ -50,20 +50,22 @@ type Sample struct {
 	CPUSystemPct *float64  `json:"cpuSystemPct,omitempty"`
 	CPUWaitPct   *float64  `json:"cpuWaitPct,omitempty"`
 	// Cores is the live per-processor reading. It is not kept in history.
-	Cores        []entities.CPUCore `json:"cores,omitempty"`
-	MemUsed      uint64             `json:"memUsed"`
-	MemTotal     uint64             `json:"memTotal"`
-	MemPct       float64            `json:"memPct"`
-	SwapUsed     uint64             `json:"swapUsed"`
-	SwapTotal    uint64             `json:"swapTotal"`
-	DiskUsed     uint64             `json:"diskUsed"`
-	DiskTotal    uint64             `json:"diskTotal"`
-	DiskPct      float64            `json:"diskPct"`
-	RootMount    string             `json:"rootMount,omitempty"`
-	DiskReadBps  float64            `json:"diskReadBps"`
-	DiskWriteBps float64            `json:"diskWriteBps"`
-	NetRxBps     float64            `json:"netRxBps"`
-	NetTxBps     float64            `json:"netTxBps"`
+	Cores         []entities.CPUCore `json:"cores,omitempty"`
+	MemUsed       uint64             `json:"memUsed"`
+	MemTotal      uint64             `json:"memTotal"`
+	MemCompressed *uint64            `json:"memCompressed,omitempty"`
+	MemCached     *uint64            `json:"memCached,omitempty"`
+	MemPct        float64            `json:"memPct"`
+	SwapUsed      uint64             `json:"swapUsed"`
+	SwapTotal     uint64             `json:"swapTotal"`
+	DiskUsed      uint64             `json:"diskUsed"`
+	DiskTotal     uint64             `json:"diskTotal"`
+	DiskPct       float64            `json:"diskPct"`
+	RootMount     string             `json:"rootMount,omitempty"`
+	DiskReadBps   float64            `json:"diskReadBps"`
+	DiskWriteBps  float64            `json:"diskWriteBps"`
+	NetRxBps      float64            `json:"netRxBps"`
+	NetTxBps      float64            `json:"netTxBps"`
 	// Bytes moved since the previous sample, for exact traffic totals.
 	NetRxBytes uint64 `json:"netRxBytes,omitempty"`
 	NetTxBytes uint64 `json:"netTxBytes,omitempty"`
@@ -778,6 +780,7 @@ func (m *Monitor) derive(id string, met entities.Metrics, latency time.Duration)
 		TS: now.UTC().Truncate(time.Second), CPUPct: met.CPUPct,
 		CPUUserPct: met.CPUUserPct, CPUSystemPct: met.CPUSystemPct, CPUWaitPct: met.CPUWaitPct, Cores: met.Cores,
 		MemUsed: met.MemUsed, MemTotal: met.MemTotal,
+		MemCompressed: met.MemCompressed, MemCached: met.MemCached,
 		SwapUsed: met.SwapUsed, SwapTotal: met.SwapTotal,
 		Load: met.Load, Procs: met.Procs,
 		LatencyMs: math.Round(float64(latency.Microseconds())/10) / 100,

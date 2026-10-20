@@ -561,21 +561,25 @@ type Metrics struct {
 	CPUPct float64 `json:"cpuPct"`
 	// User, system, and iowait are shares of the same interval as CPUPct.
 	// Nil until a second sample exists. Cores is live only and is not stored as history.
-	CPUUserPct   *float64    `json:"cpuUserPct,omitempty"`
-	CPUSystemPct *float64    `json:"cpuSystemPct,omitempty"`
-	CPUWaitPct   *float64    `json:"cpuWaitPct,omitempty"`
-	Cores        []CPUCore   `json:"cores,omitempty"`
-	Load         [3]float64  `json:"load"`
-	MemTotal     uint64      `json:"memTotal"`
-	MemUsed      uint64      `json:"memUsed"`
-	SwapTotal    uint64      `json:"swapTotal"`
-	SwapUsed     uint64      `json:"swapUsed"`
-	RootMount    string      `json:"rootMount,omitempty"`
-	Disks        []DiskUsage `json:"disks"`
-	DiskRead     uint64      `json:"diskRead"`
-	DiskWrite    uint64      `json:"diskWrite"`
-	NetRx        uint64      `json:"netRx"`
-	NetTx        uint64      `json:"netTx"`
+	CPUUserPct   *float64   `json:"cpuUserPct,omitempty"`
+	CPUSystemPct *float64   `json:"cpuSystemPct,omitempty"`
+	CPUWaitPct   *float64   `json:"cpuWaitPct,omitempty"`
+	Cores        []CPUCore  `json:"cores,omitempty"`
+	Load         [3]float64 `json:"load"`
+	MemTotal     uint64     `json:"memTotal"`
+	MemUsed      uint64     `json:"memUsed"`
+	// MemCompressed sits inside MemUsed. MemCached sits inside MemTotal-MemUsed.
+	// Nil until the agent reports the split (agent >= 1.28.9).
+	MemCompressed *uint64     `json:"memCompressed,omitempty"`
+	MemCached     *uint64     `json:"memCached,omitempty"`
+	SwapTotal     uint64      `json:"swapTotal"`
+	SwapUsed      uint64      `json:"swapUsed"`
+	RootMount     string      `json:"rootMount,omitempty"`
+	Disks         []DiskUsage `json:"disks"`
+	DiskRead      uint64      `json:"diskRead"`
+	DiskWrite     uint64      `json:"diskWrite"`
+	NetRx         uint64      `json:"netRx"`
+	NetTx         uint64      `json:"netTx"`
 	// Packet, error and drop counters cover the same NICs as NetRx/NetTx (agent >= 1.14.0).
 	NetPkts *NetPackets  `json:"netPkts,omitempty"`
 	TCP     *TCPStats    `json:"tcp,omitempty"`

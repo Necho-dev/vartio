@@ -14,6 +14,8 @@ interface ChartSeries {
   data: (number | null)[];
   area?: boolean;
   dash?: boolean;
+  /** dashed stroke that stays in the legend, unlike dash which marks a peak */
+  line?: "dash";
   width?: number;
   /** area top opacity (default 0.38) */
   fill?: number;
@@ -23,6 +25,18 @@ interface ChartSeries {
   tipOnly?: boolean;
   /** draw and show in the tooltip, but omit the bottom legend swatch */
   legend?: boolean;
+  /** when the chart is stacked, false keeps this area on the absolute baseline, behind the stack */
+  stack?: boolean;
+  /** absolute area drawn over the stack, for a value that sits inside another band */
+  overlay?: boolean;
+  /** tooltip values; defaults to data. Use when data is a stack band and the label is the whole */
+  tip?: (number | null)[];
+  /** tooltip label at one point; defaults to label */
+  labelAt?: (i: number) => string;
+  /** tooltip value text at one point; null hides the row */
+  tipValue?: (i: number) => string | null;
+  /** legend order; defaults to series order */
+  legendAt?: number;
 }
 
 interface ChartOpts {
@@ -35,6 +49,10 @@ interface ChartOpts {
   from?: number;
   to?: number;
   max?: number | null;
+  /** "ceil" rounds the top up and can hold a floor via fitMin; "band" also lifts the floor. */
+  fit?: "ceil" | "band";
+  /** lowest top of the axis when fit is set, such as physical RAM */
+  fitMin?: number;
   stacked?: boolean;
   totalLabel?: string;
   /** extra tooltip rows after the series, for values that are not drawn */

@@ -152,12 +152,14 @@ var stageWait = 3 * time.Second
 const stageTimeout = 10 * time.Second
 
 type memStage struct {
-	load      [3]float64
-	memTotal  uint64
-	memUsed   uint64
-	swapTotal uint64
-	swapUsed  uint64
-	procs     int
+	load          [3]float64
+	memTotal      uint64
+	memUsed       uint64
+	memCompressed *uint64
+	memCached     *uint64
+	swapTotal     uint64
+	swapUsed      uint64
+	procs         int
 }
 
 type diskStage struct {
@@ -207,6 +209,12 @@ func readMem(ctx context.Context) memStage {
 	if vm, err := mem.VirtualMemoryWithContext(ctx); err == nil {
 		s.memTotal = vm.Total
 		s.memUsed = vm.Total - vm.Available
+		if used, comp, cache, ok := memoryDetail(vm); ok {
+			if used != nil {
+				s.memUsed = *used
+			}
+			s.memCompressed, s.memCached = &comp, &cache
+		}
 	}
 	if sw, err := mem.SwapMemoryWithContext(ctx); err == nil {
 		s.swapTotal, s.swapUsed = sw.Total, sw.Used
@@ -258,6 +266,7 @@ func collectSnapshot() entities.Metrics {
 
 	m := memS()
 	out.Load, out.MemTotal, out.MemUsed, out.SwapTotal, out.SwapUsed, out.Procs = m.load, m.memTotal, m.memUsed, m.swapTotal, m.swapUsed, m.procs
+	out.MemCompressed, out.MemCached = m.memCompressed, m.memCached
 	d := diskS()
 	out.Disks, out.RootMount, out.DiskRead, out.DiskWrite = d.disks, d.root, d.read, d.write
 	n := netS()

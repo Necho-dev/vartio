@@ -61,6 +61,7 @@ const rollupHostCols = `
 	tcp_out_segs double precision, tcp_retrans_segs double precision,
 	conn_tcp double precision, conn_udp double precision, conn_other double precision,
 	cpu_user double precision, cpu_system double precision, cpu_iowait double precision,
+	mem_compressed double precision, mem_cached double precision,
 	disk_parts jsonb, net_nics jsonb, gpus jsonb, temps jsonb`
 
 const rollupCtrCols = `
@@ -104,6 +105,7 @@ var hostAggs = []agg{
 	{"retrans_pct", "avg", ""}, {"latency_ms", "avg", ""}, {"tcp_out_segs", "sum", ""}, {"tcp_retrans_segs", "sum", ""},
 	{"conn_tcp", "avg", ""}, {"conn_udp", "avg", ""}, {"conn_other", "avg", ""},
 	{"cpu_user", "avg", ""}, {"cpu_system", "avg", ""}, {"cpu_iowait", "avg", ""},
+	{"mem_compressed", "avg", ""}, {"mem_cached", "avg", ""},
 }
 
 var ctrAggs = []agg{

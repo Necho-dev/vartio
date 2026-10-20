@@ -5,12 +5,43 @@ import { esc } from "./core.js";
 const NS = "http://www.w3.org/2000/svg";
 const PAD = { l: 54, r: 10, t: 8, b: 22 };
 let tipEl = null;
+/** @type {WeakMap<HTMLElement, string>} */
+const drawnSize = new WeakMap();
+/** @type {WeakMap<HTMLElement, HoverState>} */
+const hovers = new WeakMap();
 const ro = new ResizeObserver((entries) => {
   for (const e of entries) {
     const box = /** @type {HTMLElement} */ (e.target);
-    if (box.__chart) draw(box);
+    if (!box.__chart) continue;
+    const key = box.clientWidth + "x" + box.clientHeight;
+    if (drawnSize.get(box) === key) continue;
+    draw(box);
   }
 });
+
+/**
+ * @typedef {object} HoverState
+ * @property {SVGSVGElement} svg
+ * @property {number[]} t
+ * @property {number} from
+ * @property {number} span
+ * @property {number} W
+ * @property {number} iw
+ * @property {(ms: number) => number} x
+ * @property {(v: number) => number} y
+ * @property {(v: number) => number} y2
+ * @property {any[]} plotted
+ * @property {SVGLineElement} cursor
+ * @property {(SVGCircleElement | null)[]} dots
+ * @property {boolean} stacked
+ * @property {number[] | null} acc
+ * @property {ChartOpts} o
+ */
+
+/** Hash routes make a relative url(#id) miss the gradient, so the fill paints black then snaps to color. */
+function paintRef(id) {
+  return `url(${location.origin}${location.pathname}${location.search}#${id})`;
+}
 
 function el(name, attrs, parent) {
   const n = document.createElementNS(NS, name);
@@ -74,10 +105,10 @@ function tip() {
 
 function draw(box) {
   const o = box.__chart;
-  box.innerHTML = "";
   const W = box.clientWidth, H = box.clientHeight;
   if (W < 40 || H < 40) return;
-  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" }, box);
+  // Build detached and swap once, so a refresh never shows an empty frame.
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" });
   const t = o.t || [];
   const to = o.to || Date.now();
   const from = o.from || (t.length ? t[0] : to - 3600e3);
@@ -91,8 +122,8 @@ function draw(box) {
   const stacked = !!o.stacked;
   const acc = stacked ? t.map(() => 0) : null;
   const plotted = o.series.map((s) => {
-    // Overlays (dashed peak) and tooltip-only rows (idle) stay out of the stack and off the scale.
-    const inStack = stacked && !s.tipOnly && s.area !== false;
+    // Swap stays on the absolute baseline. Compressed is an inset, not another layer.
+    const inStack = stacked && s.stack !== false && !s.overlay && !s.tipOnly && s.area !== false;
     const lower = inStack ? acc.slice() : null;
     const vals = s.data.map((v, i) => {
       if (v == null || isNaN(v)) return null;
@@ -138,11 +169,16 @@ function draw(box) {
   }
 
   if (!t.length) {
+    mountPlot(box, svg);
+    hovers.delete(box);
     const nd = document.createElement("div");
     nd.className = "nodata";
+    const prev = box.querySelector(":scope > .nodata");
     nd.textContent = o.empty || "暂无数据";
-    box.appendChild(nd);
+    if (prev) prev.replaceWith(nd);
+    else box.appendChild(nd);
     placeNote(box);
+    drawnSize.set(box, W + "x" + H);
     return;
   }
 
@@ -150,12 +186,17 @@ function draw(box) {
   const defs = el("defs", {}, svg);
   const areas = plotted.filter((s) => !s.tipOnly && s.area !== false);
   const lines = plotted.filter((s) => !s.tipOnly && s.area === false);
-  const order = [...(stacked ? [...areas].reverse() : areas), ...lines];
+  // Behind, then stack from the top down, then insets that sit inside a band.
+  const order = stacked
+    ? [...areas.filter((s) => !s.inStack && !s.overlay), ...areas.filter((s) => s.inStack).reverse(), ...areas.filter((s) => s.overlay), ...lines]
+    : [...areas, ...lines];
   order.forEach((s, si) => {
     const gid = `g${Math.random().toString(36).slice(2)}${si}`;
     const lg = el("linearGradient", { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
-    el("stop", { offset: "0%", "stop-color": s.color, "stop-opacity": s.area === false ? 0 : stacked ? 0.5 : s.fill ?? 0.38 }, lg);
-    el("stop", { offset: "100%", "stop-color": s.color, "stop-opacity": s.area === false ? 0 : stacked ? 0.28 : 0.03 }, lg);
+    const wash = s.overlay ? (s.fill ?? 0.45) : s.inStack ? 0.42 : (s.fill ?? 0.38);
+    const washEnd = s.overlay ? (s.fill ?? 0.45) * 0.75 : s.inStack ? 0.2 : (s.fill != null ? Math.min(s.fill, 0.08) : 0.03);
+    el("stop", { offset: "0%", "stop-color": s.color, "stop-opacity": s.area === false ? 0 : wash }, lg);
+    el("stop", { offset: "100%", "stop-color": s.color, "stop-opacity": s.area === false ? 0 : washEnd }, lg);
     const segs = [];
     let cur = [];
     for (let i = 0; i < t.length; i++) {
@@ -177,52 +218,133 @@ function draw(box) {
     for (const seg of s._segs) {
       const line = seg.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("");
       const back = seg.slice().reverse().map((p) => "L" + p[0].toFixed(1) + " " + p[2].toFixed(1)).join("");
-      el("path", { d: `${line}${back}Z`, fill: `url(#${s._gid})` }, svg);
+      el("path", { d: `${line}${back}Z`, fill: paintRef(s._gid) }, svg);
     }
   });
   order.forEach((s) => {
     for (const seg of s._segs) {
       const line = seg.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("");
-      el("path", { d: line, fill: "none", stroke: s.color, "stroke-width": s.width || 1.6, "stroke-dasharray": s.dash ? "4 3" : "none", "stroke-linejoin": "round" }, svg);
+      el("path", { d: line, fill: "none", stroke: s.color, "stroke-width": s.width || 1.6, "stroke-dasharray": s.dash || s.line === "dash" ? "4 3" : "none", "stroke-linejoin": "round" }, svg);
     }
   });
 
-  const cursor = el("line", { y1: PAD.t, y2: PAD.t + ih, class: "cursor", visibility: "hidden" }, svg);
-  const dots = plotted.map((s) => s.tipOnly ? null : el("circle", { r: 3, fill: s.color, visibility: "hidden" }, svg));
-  const hit = el("rect", { x: PAD.l, y: PAD.t, width: iw, height: ih, fill: "transparent" }, svg);
+  el("line", { y1: PAD.t, y2: PAD.t + ih, class: "cursor", visibility: "hidden" }, svg);
+  plotted.forEach((s) => { if (!s.tipOnly) el("circle", { r: 3, fill: s.color, visibility: "hidden" }, svg); });
+  el("rect", { x: PAD.l, y: PAD.t, width: iw, height: ih, fill: "transparent" }, svg);
+  const live = mountPlot(box, svg);
+  const circles = /** @type {SVGCircleElement[]} */ (Array.from(live.querySelectorAll("circle")));
+  let ci = 0;
+  hovers.set(box, {
+    svg: /** @type {SVGSVGElement} */ (live),
+    t, from, span, W, iw, x, y, y2, plotted,
+    cursor: /** @type {SVGLineElement} */ (live.querySelector("line.cursor")),
+    dots: plotted.map((s) => (s.tipOnly ? null : circles[ci++] || null)),
+    stacked, acc, o,
+  });
+  bindHover(box);
+  box.querySelector(":scope > .nodata")?.remove();
+  placeNote(box);
+  drawnSize.set(box, W + "x" + H);
+}
+
+/** @param {Element} root @param {string} sel */
+function list(root, sel) {
+  return Array.from(root.querySelectorAll(sel));
+}
+
+/** Copy the new geometry onto the svg already on screen. Keeps the gradient nodes, so a sample tick does not repaint from black. */
+function syncPlot(prev, next) {
+  /** @type {[string, string[]][]} */
+  const spec = [
+    ["line.gl", ["x1", "x2", "y1", "y2"]],
+    ["text.axis", ["x", "y", "text-anchor"]],
+    ["path", ["d", "stroke", "stroke-width", "stroke-dasharray", "stroke-linejoin"]],
+    ["circle", ["fill"]],
+    ["line.cursor", ["y1", "y2"]],
+    ["rect", ["x", "y", "width", "height"]],
+  ];
+  const pairs = spec.map(([sel]) => [list(prev, sel), list(next, sel)]);
+  if (pairs.some(([a, b]) => a.length !== b.length)) return false;
+  const ga = list(prev, "linearGradient");
+  const gb = list(next, "linearGradient");
+  if (ga.length !== gb.length) return false;
+  const stops = ga.map((g, i) => [list(g, "stop"), list(gb[i], "stop")]);
+  if (stops.some(([a, b]) => a.length !== b.length)) return false;
+  prev.setAttribute("viewBox", next.getAttribute("viewBox") || "");
+  stops.forEach(([a, b]) => a.forEach((s, j) => {
+    for (const attr of ["offset", "stop-color", "stop-opacity"]) {
+      const v = b[j].getAttribute(attr);
+      if (v != null && s.getAttribute(attr) !== v) s.setAttribute(attr, v);
+    }
+  }));
+  pairs.forEach(([a, b], i) => a.forEach((n, j) => {
+    for (const attr of spec[i][1]) {
+      const v = b[j].getAttribute(attr);
+      if (v == null) n.removeAttribute(attr);
+      else if (n.getAttribute(attr) !== v) n.setAttribute(attr, v);
+    }
+    if (n.localName === "text" && n.textContent !== b[j].textContent) n.textContent = b[j].textContent;
+  }));
+  return true;
+}
+
+/** @param {HTMLElement} box @param {SVGElement} svg */
+function mountPlot(box, svg) {
+  const prev = box.querySelector(":scope > svg");
+  if (prev && syncPlot(prev, svg)) return prev;
+  if (prev) prev.replaceWith(svg);
+  else box.prepend(svg);
+  return svg;
+}
+
+/** @param {HTMLElement} box */
+function bindHover(box) {
+  if (box.dataset.chartHover) return;
+  box.dataset.chartHover = "1";
   const tp = tip();
+  let hideTimer = 0;
   const hide = () => {
     tp.hidden = true;
-    cursor.setAttribute("visibility", "hidden");
-    dots.forEach((d) => { if (d) d.setAttribute("visibility", "hidden"); });
+    const h = hovers.get(box);
+    if (!h) return;
+    h.cursor.setAttribute("visibility", "hidden");
+    h.dots.forEach((d) => { if (d) d.setAttribute("visibility", "hidden"); });
   };
-  let hideTimer = 0;
   /** @param {PointerEvent} ev */
   const move = (ev) => {
+    const h = hovers.get(box);
+    if (!h || !h.t.length) return;
     clearTimeout(hideTimer);
-    const r = svg.getBoundingClientRect();
-    const mx = ((ev.clientX - r.left) / r.width) * W;
-    const ms = from + ((mx - PAD.l) / iw) * span;
-    let lo = 0, hi = t.length - 1;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (t[mid] < ms) lo = mid + 1; else hi = mid; }
-    if (lo > 0 && Math.abs(t[lo - 1] - ms) < Math.abs(t[lo] - ms)) lo--;
-    const cx = x(t[lo]);
-    cursor.setAttribute("x1", cx); cursor.setAttribute("x2", cx); cursor.setAttribute("visibility", "visible");
+    const r = h.svg.getBoundingClientRect();
+    const mx = ((ev.clientX - r.left) / r.width) * h.W;
+    if (mx < PAD.l || mx > PAD.l + h.iw) { hide(); return; }
+    const ms = h.from + ((mx - PAD.l) / h.iw) * h.span;
+    let lo = 0, hi = h.t.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (h.t[mid] < ms) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && Math.abs(h.t[lo - 1] - ms) < Math.abs(h.t[lo] - ms)) lo--;
+    const cx = h.x(h.t[lo]);
+    h.cursor.setAttribute("x1", String(cx)); h.cursor.setAttribute("x2", String(cx)); h.cursor.setAttribute("visibility", "visible");
     let rows = "", stackN = 0;
-    plotted.forEach((s, i) => {
-      const v = s.vals[lo], raw = s.data[lo];
-      if (v == null) { if (dots[i]) dots[i].setAttribute("visibility", "hidden"); return; }
+    h.plotted.forEach((s, i) => {
+      const v = s.vals[lo], raw = s.tip ? s.tip[lo] : s.data[lo];
+      const text = s.tipValue ? s.tipValue(lo) : null;
+      if (v == null || (s.tipValue ? text == null : (raw == null || isNaN(raw)))) { if (h.dots[i]) h.dots[i].setAttribute("visibility", "hidden"); return; }
       if (s.inStack) stackN++;
-      if (dots[i]) {
-        dots[i].setAttribute("cx", cx); dots[i].setAttribute("cy", (s.right ? y2 : y)(v)); dots[i].setAttribute("visibility", "visible");
+      if (h.dots[i]) {
+        h.dots[i].setAttribute("cx", String(cx));
+        h.dots[i].setAttribute("cy", String((s.right ? h.y2 : h.y)(v)));
+        h.dots[i].setAttribute("visibility", "visible");
       }
-      rows += `<div class="r"><span><i style="background:${s.color}"></i>${esc(s.label)}</span><b>${(s.right ? o.fmt2 : o.fmt)(raw)}</b></div>`;
+      const label = s.labelAt ? s.labelAt(lo) : s.label;
+      const shown = s.tipValue ? text : (s.right ? h.o.fmt2 : h.o.fmt)(raw);
+      const swatch = s.line === "dash" ? ` class="dash" style="border-top-color:${s.color}"` : ` style="background:${s.color}"`;
+      rows += `<div class="r"><span><i${swatch}></i>${esc(label)}</span><b>${esc(shown)}</b></div>`;
     });
-    if (stacked && o.totalLabel && stackN > 1 && acc[lo]) {
-      rows += `<div class="r sum"><span>${o.totalLabel}</span><b>${o.fmt(acc[lo])}${o.capacity ? ` / ${o.fmt(o.capacity)}` : ""}</b></div>`;
+    if (h.stacked && h.o.totalLabel && stackN > 1 && h.acc && h.acc[lo]) {
+      rows += `<div class="r sum"><span>${h.o.totalLabel}</span><b>${h.o.fmt(h.acc[lo])}${h.o.capacity ? ` / ${h.o.fmt(h.o.capacity)}` : ""}</b></div>`;
     }
-    if (o.tipExtra) rows += o.tipExtra(lo) || "";
-    const d = new Date(t[lo]);
+    if (h.o.tipExtra) rows += h.o.tipExtra(lo) || "";
+    const d = new Date(h.t[lo]);
     tp.innerHTML = `<div class="t">${d.toLocaleString()}</div>${rows}`;
     tp.hidden = false;
     const tw = tp.offsetWidth;
@@ -231,24 +353,25 @@ function draw(box) {
     tp.style.left = Math.max(8, left) + "px";
     tp.style.top = ev.clientY - 10 + "px";
   };
-  hit.addEventListener("pointermove", move);
-  hit.addEventListener("pointerdown", move);
+  box.addEventListener("pointermove", move);
+  box.addEventListener("pointerdown", move);
   // A tap ends with pointerleave right away; keep the reading up long enough to read it.
-  hit.addEventListener("pointerleave", (ev) => {
+  box.addEventListener("pointerleave", (ev) => {
     clearTimeout(hideTimer);
     if (ev.pointerType === "touch") hideTimer = setTimeout(hide, 2500);
     else hide();
   });
-  placeNote(box);
 }
 
 function placeNote(box) {
+  const old = box.querySelector(":scope > .chart-note");
   const note = box.__chart && box.__chart.note;
-  if (!note) return;
+  if (!note) { old?.remove(); return; }
   const n = document.createElement("div");
   n.className = "chart-note";
   n.innerHTML = note;
-  box.appendChild(n);
+  if (old) old.replaceWith(n);
+  else box.appendChild(n);
 }
 
 /**

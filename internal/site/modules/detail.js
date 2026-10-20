@@ -16,20 +16,77 @@ import { containersSection, renderContainers, loadContainerSeries, isDockerRunne
 import { latestAgent, outdated, canUpgrade, upgradeOne, RUNNERS } from "./upgrade.js";
 
 let latest = "";
+// Bumped on every visit so a slow response cannot paint over the next page.
+let detailGen = 0;
 
 const C = { blue: "#3b82f6", green: "#22c55e", cyan: "#06b6d4", violet: "#8b5cf6", orange: "#f97316", pink: "#ec4899", yellow: "#eab308", faint: "#71717a" };
 const RANGES = [["1h", "1 小时"], ["6h", "6 小时"], ["24h", "24 小时"], ["7d", "7 天"], ["30d", "30 天"]];
 const SPAN = { "1h": 3600e3, "6h": 6 * 3600e3, "24h": 86400e3, "7d": 7 * 86400e3, "30d": 30 * 86400e3 };
 
+/** Placeholder bodies follow the charts they stand in for: area, core bars, stacked disk, stroked lines. */
+const SKEL_KINDS = ["area", "bars", "area", "stack", "lines", "lines"];
+
+/** @param {string} kind @param {number} i */
+function skelPlot(kind, i) {
+  const svg = (body) => `<svg viewBox="0 0 220 90" preserveAspectRatio="none" aria-hidden="true">${body}</svg>`;
+  if (kind === "bars") {
+    return `<div class="sk-bars">${[72, 64, 81, 58, 76, 47].map((w) => `<span><i style="width:${w}%"></i></span>`).join("")}</div>`;
+  }
+  if (kind === "stack") {
+    return svg(`<path class="band b1" d="M0 54 H220 V90 H0 Z"/><path class="band b2" d="M0 42 H220 V54 H0 Z"/><path class="band b3" d="M0 34 H220 V42 H0 Z"/>`);
+  }
+  if (kind === "lines") {
+    // Disk I/O is two strokes; load and temperature sit closer together.
+    return i < 5
+      ? svg(`<path class="line" d="M0 70 C 18 70 28 58 40 60 S 58 40 72 48 96 74 118 52 150 30 168 44 196 68 220 36"/>
+          <path class="line soft" d="M0 58 C 22 58 36 66 54 60 S 88 42 112 50 148 36 176 48 200 28 220 40"/>`)
+      : svg(`<path class="line" d="M0 40 C 40 40 70 36 110 34 S 170 30 220 28"/>
+          <path class="line soft" d="M0 52 C 36 52 80 48 120 46 S 180 42 220 40"/>
+          <path class="line faint" d="M0 64 C 30 64 90 60 140 58 S 190 54 220 52"/>`);
+  }
+  // CPU moves; memory stays in a high band.
+  return i === 0
+    ? svg(`<path class="area" d="M0 66 C 28 66 40 48 64 50 S 104 24 132 36 170 58 220 30 V 90 H 0 Z"/>
+        <path class="line" d="M0 66 C 28 66 40 48 64 50 S 104 24 132 36 170 58 220 30"/>`)
+    : svg(`<path class="area" d="M0 38 C 40 36 80 40 120 34 S 180 30 220 32 V 90 H 0 Z"/>
+        <path class="line" d="M0 38 C 40 36 80 40 120 34 S 180 30 220 32"/>`);
+}
+
+/** Even chart placeholders. The real grid is uneven until history arrives, so it stays off-screen. */
+function detailSkeleton() {
+  const card = (kind, i) => `<div class="card panel skel-card"><div class="sk sk-title"></div><div class="sk sk-sub"></div><div class="sk-chart">${skelPlot(kind, i)}</div></div>`;
+  const info = `<div class="card panel skel-card"><div class="sk sk-title"></div><div class="sk sk-row"></div><div class="sk sk-row"></div><div class="sk sk-row short"></div></div>`;
+  return `<section class="card hero skel-hero">
+      <div class="hero-main"><div class="sk sk-title"></div><div class="sk sk-line"></div><div class="sk sk-line short"></div></div>
+      <div class="skel-actions">${"<div class=\"sk sk-btn\"></div>".repeat(6)}</div>
+    </section>
+    <section class="grid2 skel-charts">${SKEL_KINDS.map(card).join("")}</section>
+    <section class="grid2">${info.repeat(4)}</section>`;
+}
+
 /** @param {string} id */
 export async function detail(id) {
-  app.innerHTML = `<a class="back" href="#/">${icon("arrow-left")}返回全部主机</a><div id="d"><div class="empty">加载中…</div></div>`;
+  const gen = ++detailGen;
+  app.innerHTML = `<a class="back" href="#/">${icon("arrow-left")}返回全部主机</a><div id="d" class="detail-pending" aria-busy="true">${detailSkeleton()}</div>`;
   /** @type {SystemView} */
   let sys;
+  /** @type {Series | null} */
+  let series = null;
   try {
-    sys = await api("/monitor/systems/" + encodeURIComponent(id));
-    latest = await latestAgent();
+    const seriesReq = state.config.history
+      ? api(`/monitor/systems/${encodeURIComponent(id)}/series?range=${state.range}`).catch(() => null)
+      : Promise.resolve(null);
+    const [got, lat, ser] = await Promise.all([
+      api("/monitor/systems/" + encodeURIComponent(id)),
+      latestAgent(),
+      seriesReq,
+    ]);
+    if (gen !== detailGen) return;
+    sys = got;
+    latest = lat;
+    series = ser;
   } catch (e) {
+    if (gen !== detailGen) return;
     if (e.message !== "unauthorized") $("#d").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
@@ -38,19 +95,22 @@ export async function detail(id) {
   const cpuId = docker ? "hcpu" : "cpu";
   const hostCharts = `
       <div class="grid-pair wide">${panel(cpuId, "CPU 使用率", "全部核心平均值")}${coresCard}</div>
-      ${docker ? "" : panel("gpu", "GPU 使用率", "设备占用", true)}
-      ${docker ? "" : panel("mem", "内存使用", "已用物理内存（总量 - 可用）与交换区")}
-      ${docker ? `<div class="grid-pair wide">${panel("disk", "磁盘使用", "宿主机分区已用空间。容器没有独立容量，Docker 只提供读写吞吐")}${panel("load", "系统负载", "")}</div>` : `${panel("disk", "磁盘使用", "系统盘已用空间")}
-      ${panel("dio", "磁盘 I/O", "全部物理磁盘读写吞吐")}
-      <div class="grid-pair wide">${panel("load", "系统负载", "")}${panel("temp", "系统温度", "每个传感器一条曲线", true)}</div>`}
+      ${docker ? "" : panel("gpu", "GPU 使用率", "占用率", true)}
+      ${docker ? "" : panel("mem", "内存使用", "物理内存与交换区")}
+      ${docker ? `<div class="grid-pair wide">${panel("disk", "磁盘使用", "宿主机磁盘")}${panel("load", "系统负载", "")}</div>` : `${panel("disk", "磁盘使用", "已用空间")}
+      ${panel("dio", "磁盘 I/O", "读写吞吐")}
+      <div class="grid-pair wide">${panel("load", "系统负载", "")}${panel("temp", "系统温度", "传感器温度", true)}</div>`}
       <div class="card panel wide" id="p-net">
         <div class="panel-head"><h3>网络带宽</h3><select class="nic-pick" id="netNic" hidden></select><span class="now" id="now-net"></span></div>
-        <p class="desc" id="desc-net">物理网卡收发情况（已排除回环/虚拟网卡）</p>
+        <p class="desc" id="desc-net">物理网卡</p>
         <div class="chart" id="c-net"></div><div class="legend" id="lg-net"></div><div class="net-sum" id="net-sum"></div></div>
-      ${panel("conn", "网络连接数", "按协议统计的套接字数量（堆积）", true)}
-      ${panel("tcp", "TCP 连接状态", "各状态的 TCP 连接数", true)}
-      ${panel("nerr", "网卡错误与丢包", "区间内收发错误包与丢弃包数量", true)}`;
-  $("#d").innerHTML = `
+      ${panel("conn", "网络连接数", "按协议", true)}
+      ${panel("tcp", "TCP 连接状态", "连接数", true)}
+      ${panel("nerr", "网卡错误与丢包", "错误与丢包", true)}`;
+  const root = $("#d");
+  root.className = "detail-enter";
+  root.removeAttribute("aria-busy");
+  root.innerHTML = `
     <section class="card hero" id="hero"></section>
     ${docker ? containersSection({ inset: false }) : ""}
     ${docker ? `<div class="chart-sec"><span class="lvl ctr">容器</span><span>按容器堆积，与 docker stats 同一口径</span></div>
@@ -82,7 +142,8 @@ export async function detail(id) {
     $("#evSeg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
     loadEvents(sys);
   }));
-  await loadSeries(sys);
+  await loadSeries(sys, series);
+  if (gen !== detailGen) return;
   every(Math.max(5, state.config.intervalSec) * 1000, async () => {
     try {
       sys = await api("/monitor/systems/" + encodeURIComponent(id));
@@ -231,9 +292,7 @@ function paintHostNet() {
   const nic = selectedNic;
   const line = nic ? (d.netNics || {})[nic] : null;
   if (nic) {
-    $("#desc-net").textContent = line
-      ? `网卡 ${nic} 的收发（宿主机）`
-      : `网卡 ${nic}：暂无分网卡历史，等探针上报累计计数后开始记录`;
+    $("#desc-net").textContent = line ? nic : `${nic} 暂无历史`;
     const now = (s.latest?.netNics || []).find((n) => n.name === nic);
     chart("net", { ...base, fmt: rate, empty: "该网卡暂无历史", series: line ? [
       { label: "下行", color: C.cyan, data: line.rx },
@@ -243,9 +302,7 @@ function paintHostNet() {
     else { const box = $("#net-sum"); if (box) box.hidden = true; }
     return;
   }
-  $("#desc-net").textContent = hasPps
-    ? "物理网卡收发情况（已排除回环/虚拟网卡）；左轴吞吐，右轴包速率"
-    : "物理网卡收发情况（已排除回环/虚拟网卡）";
+  $("#desc-net").textContent = "物理网卡";
   const nowPps = s.online && l.netRxPps != null ? ` · ${count(l.netRxPps)} / ${count(l.netTxPps)} pps` : "";
   chart("net", { ...base, fmt: rate, fmt2: pps, series: [
     { label: "下行", color: C.cyan, data: d.netRx },
@@ -443,8 +500,12 @@ const CREDS = {
   none: ["未绑定", "warn", "探针仍只凭共享 GUEST_TOKEN 接入（1.18.0 以前的探针）"],
 };
 
-/** @param {SystemView} s */
-async function loadSeries(s) {
+/**
+ * @param {SystemView} s
+ * @param {Series | null} [prefetched] history already loaded with the page; omit to refetch
+ */
+async function loadSeries(s, prefetched) {
+  const gen = detailGen;
   const docker = isDockerRunner(s);
   loadContainerSeries(s);
   if (!state.config.history) {
@@ -458,10 +519,13 @@ async function loadSeries(s) {
     return;
   }
   /** @type {Series} */
-  let d;
-  try {
-    d = await api(`/monitor/systems/${encodeURIComponent(s.id)}/series?range=${state.range}`);
-  } catch (e) { return; }
+  let d = prefetched || null;
+  if (!d) {
+    try {
+      d = await api(`/monitor/systems/${encodeURIComponent(s.id)}/series?range=${state.range}`);
+    } catch (e) { return; }
+    if (gen !== detailGen) return;
+  }
   const to = Date.now(), from = to - SPAN[state.range];
   const base = { t: d.t, stepSec: d.stepSec, from, to };
   const l = s.latest || /** @type {Partial<Sample>} */ ({});
@@ -494,15 +558,50 @@ async function loadSeries(s) {
     }
     if (!docker) {
       renderGPU(s, d, base);
-      chart("mem", { ...base, max: memMax, fmt: bytes, series: [
-        { label: "已用", color: C.green, data: d.mem },
-        ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: C.orange, data: d.swap, fill: 0.2 }] : [])] },
+      const compressed = d.memCompressed || [];
+      const cached = d.memCached || [];
+      const num = (v) => v == null || isNaN(v) ? null : v;
+      // total = used + cached + free. Compressed is part of used, so it shares
+      // that area and is named beside it. Cyan is the cached part of the rest.
+      const compBand = d.t.map((_, i) => {
+        const used = num(d.mem[i]), comp = num(compressed[i]);
+        if (used == null || comp == null) return null;
+        return Math.min(Math.max(0, comp), used);
+      });
+      const cacheBand = d.t.map((_, i) => {
+        const cache = num(cached[i]);
+        if (cache == null) return null;
+        const total = num(d.memTotal[i]), used = num(d.mem[i]);
+        const room = total == null || used == null ? cache : Math.max(0, total - used);
+        return Math.min(Math.max(0, cache), room);
+      });
+      const hasBand = (data) => data.some((v) => v > 0);
+      const showComp = hasBand(compBand);
+      const memFree = d.t.map((_, i) => {
+        const total = d.memTotal[i], used = d.mem[i];
+        if (!(total > 0) || used == null || isNaN(used)) return null;
+        const room = Math.max(0, total - used);
+        const reclaim = cacheBand[i] == null ? 0 : cacheBand[i];
+        return room - reclaim;
+      });
+      chart("mem", { ...base, stacked: true, fit: "ceil", fitMin: memMax || 0, fmt: bytes, series: [
+        { label: showComp ? "已使用(已压缩)" : "已使用", color: C.green, data: d.mem, legendAt: 0,
+          labelAt: showComp ? (i) => compBand[i] == null ? "已使用" : "已使用(已压缩)" : undefined,
+          tipValue: showComp ? (i) => {
+            const used = d.mem[i];
+            if (used == null || isNaN(used)) return null;
+            const comp = compBand[i];
+            return comp == null ? bytes(used) : `${bytes(used)}(${bytes(comp)})`;
+          } : undefined },
+        ...(hasBand(cacheBand) ? [{ label: "已缓存", color: C.cyan, data: cacheBand, legendAt: 2 }] : []),
+        { label: "空闲", color: C.faint, data: memFree, tipOnly: true },
+        ...(Math.max(0, ...d.swap) > 0 ? [{ label: "交换区", color: "#a1a1aa", data: d.swap, stack: false, fill: 0.16, width: 1.25, legendAt: 3 }] : [])] },
         s.online && l.memTotal ? `${bytes(l.memUsed)} / ${bytes(l.memTotal)}` : "");
     }
   }
   const parts = diskParts(d, l);
   const nDisk = poolDisks(l).disks.length;
-  $("#desc-disk").textContent = parts ? "各分区已用空间（堆积）" : nDisk > 1 ? "全部分区已用空间（合计）" : "系统盘已用空间";
+  $("#desc-disk").textContent = parts ? "各分区" : nDisk > 1 ? "分区合计" : "系统盘";
   if (parts) {
     chart("disk", { ...base, stacked: true, totalLabel: "合计", capacity: parts.total || null, fmt: bytes, series: parts.series },
       parts.total ? `${bytes(parts.used)} / ${bytes(parts.total)} · ${parts.series.length} 个分区` : "");
@@ -552,9 +651,7 @@ async function loadSeries(s) {
   document.querySelectorAll(".grid-pair").forEach(spanRows);
   if (docker) spanRows($("#ctr-charts"));
   $("#p-load").querySelector("h3").textContent = winLoad ? "系统负载（估算）" : "系统负载";
-  $("#desc-load").textContent = winLoad
-    ? "Windows 无原生 load average，由 CPU 使用率与处理器队列长度折算"
-    : "1 / 5 / 15 分钟平均负载";
+  $("#desc-load").textContent = winLoad ? "由 CPU 与队列长度估算" : "1、5、15 分钟";
   if (hasLoad) chart("load", { ...base, fmt: (v) => (v == null ? "—" : v.toFixed(2)), series: [
     { label: "load1", color: C.pink, data: d.load1 },
     { label: "load5", color: C.violet, data: d.load5, fill: 0.18, width: 1.3 },
@@ -699,14 +796,14 @@ function renderGPU(s, d, base) {
       const mem = g && g.memUsed ? (g.memTotal ? `${bytes(g.memUsed)} / ${bytes(g.memTotal)}` : bytes(g.memUsed)) : "";
       return `<span><i style="background:${GPU_COLORS[i % GPU_COLORS.length]}"></i><b class="nm">${esc(name)}</b>${mem ? `<span class="mem">${esc(mem)}</span>` : ""}</span>`;
     }).join("");
-    $("#desc-gpu").textContent = "每张卡一条曲线";
+    $("#desc-gpu").textContent = "各卡占用率";
   } else {
     legend.innerHTML = series.map((se) => `<span><i style="background:${se.color}"></i>${esc(se.label)}${se.cur != null ? " " + pct(se.cur) : ""}</span>`).join("");
     const bits = live.map((g) => {
       const extra = gpuMeta(g);
       return extra ? `${g.name}（${extra}）` : g.name;
     });
-    $("#desc-gpu").textContent = bits.length ? bits.join("；") : "设备占用";
+    $("#desc-gpu").textContent = bits.length ? bits.join("；") : "占用率";
   }
 }
 
@@ -785,7 +882,7 @@ function renderConn(d, base, now, win) {
   const sockets = now ? (now.total || 0) + (now.udp || 0) + (now.other || 0) : 0;
   chart("conn", { ...base, stacked: true, totalLabel: "合计", fmt: n, series: rows.map(({ label, color, data }) => ({ label, color, data, width: 1.2 })) },
     now ? `合计 ${sockets}` : "");
-  $("#desc-conn").textContent = win ? "按协议统计的套接字数量（堆积）；Windows 不统计原始套接字" : "按协议统计的套接字数量（堆积）；其他为原始 / ICMP 套接字";
+  $("#desc-conn").textContent = win ? "TCP / UDP" : "TCP / UDP / 其他";
   $("#lg-conn").innerHTML = rows.map((r) => {
     const st = stats(r.data);
     return `<span><i style="background:${r.color}"></i>${r.label} <b class="lg-num">${n(r.cur)}</b>${st ? stat("平均", n(st.avg)) + stat("峰值", n(st.max)) : ""}</span>`;
@@ -824,12 +921,23 @@ function chart(id, opts, now, extra) {
   const box = $("#c-" + id);
   if (!box) return;
   renderChart(box, opts);
-  if (now !== undefined) $("#now-" + id).textContent = now || "";
+  if (now !== undefined) {
+    const cur = $("#now-" + id);
+    const text = now || "";
+    if (cur && cur.textContent !== text) cur.textContent = text;
+  }
   const lg = $("#lg-" + id);
   if (lg && id !== "temp") {
-    const solid = opts.series.filter((s) => !s.dash && !s.tipOnly && s.legend !== false);
-    const peak = solid.length < opts.series.length ? `<span><i class="dash"></i>虚线为区间峰值</span>` : "";
-    lg.innerHTML = html`${solid.map((s) => html`<span><i style="background:${s.color}"></i>${s.label}</span>`)}` + peak + (extra || "");
+    const solid = opts.series.filter((s) => !s.dash && !s.tipOnly && s.legend !== false)
+      .sort((a, b) => (a.legendAt ?? 0) - (b.legendAt ?? 0));
+    const peak = opts.series.some((s) => s.dash) ? `<span><i class="dash"></i>虚线为区间峰值</span>` : "";
+    const markup = html`${solid.map((s) => s.line === "dash"
+      ? html`<span><i class="dash" style="border-top-color:${s.color}"></i>${s.label}</span>`
+      : html`<span><i style="background:${s.color}"></i>${s.label}</span>`)}` + peak + (extra || "");
+    if (lg.dataset.markup !== markup) {
+      lg.dataset.markup = markup;
+      lg.innerHTML = markup;
+    }
   }
 }
 
